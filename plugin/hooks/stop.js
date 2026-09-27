@@ -91,7 +91,7 @@ const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PHASES = ['idea', 'spec', 'plan', 'build', 'tests', 'harden', 'review', 'done'];
 const shownPhase = (value) => (PHASES.includes(value) ? value : 'an unknown phase');
 const shownCursor = (value) =>
-  typeof value === 'string' && /^Td+[a-z]?$/i.test(value) ? value : 'no cursor';
+  typeof value === 'string' && /^T\d+[a-z]?$/i.test(value) ? value : 'no cursor';
 
 /** Where the loop guards live: the person's own folder, never a shared temp
  *  directory another user could plant a link in. */

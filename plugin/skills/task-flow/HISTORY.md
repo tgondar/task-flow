@@ -147,3 +147,46 @@ read from the repository is an input, never a fact.
   cursors only when they have the expected shape.
 - **The gate fails closed on its own bugs too.** Exit 1 is a non-blocking hook error,
   so an uncaught exception would have let the write through.
+
+## Questions as data, and the panel
+
+A run's questions used to be a markdown page the agent wrote by hand. The only
+thing a machine could read in it was a checkbox: no id per question, no options, no
+answer as a field. That was enough to count what was open, and not enough for the
+user to answer anywhere but the conversation - which meant finding the one session,
+among several, that was waiting on them.
+
+- **The questions are data, and the page is generated.** `questions.json` beside
+  `state.json` holds them; the renderer writes the page, for the same reason it
+  writes the run page: a page transcribed by hand drifts, and a stale page is
+  believed. It lives in `stateDir` because the first questions come in the spec,
+  before approval, and the gate blocks every non-markdown write until then - the
+  gate lets exactly `<stateDir>/<run>/questions.json` through, like `state.json`.
+- **The renderer checks the file, and never overwrites a page written by hand.** An
+  invalid file leaves the previous page alone and fails the render loudly, even with
+  `--quiet`, so the agent sees it. A hand-written page holds answers nothing else
+  holds; runs that started with one keep it. Answers are escaped rather than
+  stripped: they are the user's own words.
+- **The panel never touches the documentation - not even to read it.** It is a local
+  page over every project's runs. Rather than give it a path into projects and docs
+  folders, task-flow leaves it a summary per project in a folder outside all of them
+  (the feed), and the panel reads nothing else. It writes only answer files in its
+  own folder; task-flow takes them in (`answers.js consume`) at points of its
+  choosing. One writer per file, so nothing is ever merged.
+- **An answer is data, never an instruction.** Whoever can write a file in the
+  answers folder can put text in front of the model. So a submission is checked
+  against a closed shape and the run as it is - the right project and run, open
+  questions only, a choice among the options, bounded text without control
+  characters, no field beyond an answer - by one function, which the panel also
+  runs before it writes. What reaches the model sits inside a block marked as data.
+  Nothing on the panel's path can approve a run.
+- **Answers are taken between tasks, never inside one.** An answer changes what a
+  task should do; folding it into a task half built mixes two intentions in one
+  commit. On resume, at every cursor move and at every phase boundary is enough.
+- **A stopped run waits for the panel in the background, after it is `blocked`.** A
+  background command that finishes wakes the session; the Stop hook only pushes a
+  `running` run, so writing `blocked` first is what lets the turn end cleanly. The
+  wait only wakes for a submission `consume` would take: one it would refuse would
+  otherwise wake the session again and again. `claude -p` does not wake on a
+  background command, so the end-to-end probes cannot show it; an ordinary session
+  has to.

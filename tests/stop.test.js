@@ -197,6 +197,30 @@ function check(name, expectedCode, actual, extraAssert) {
   );
 }
 
+// --- T21e: the give-up message names the cursor, when it is a task id --------
+// It once printed "no cursor" for every cursor: the pattern read /^Td+/ - a
+// literal "d" - instead of /^T\d+/.
+{
+  const root = makeProject([{ status: 'running', buildCursor: 'T3' }]);
+  const sessionId = newSessionId();
+  const p = () => payloadFor(root, { sessionId });
+  runStop(root, p());
+  runStop(root, p());
+  runStop(root, p());
+  check('T21e the give-up message names the task the run is stuck on', ALLOW, runStop(root, p()),
+    (r) => (/\/T3\)/.test(r.stderr) ? null : `expected ".../T3)" in: ${r.stderr}`));
+}
+{
+  const root = makeProject([{ status: 'running', buildCursor: 'T3; rm -rf /' }]);
+  const sessionId = newSessionId();
+  const p = () => payloadFor(root, { sessionId });
+  runStop(root, p());
+  runStop(root, p());
+  runStop(root, p());
+  check('T21f SECURITY a cursor that is not a task id is never echoed', ALLOW, runStop(root, p()),
+    (r) => (/rm -rf/.test(r.stderr) ? 'the cursor text reached the message' : /no cursor/.test(r.stderr) ? null : r.stderr));
+}
+
 // --- T22: progress resets the budget --------------------------------------
 {
   const root = makeProject([{ status: 'running', buildCursor: 'T3' }]);
