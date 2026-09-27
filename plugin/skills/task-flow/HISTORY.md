@@ -190,3 +190,10 @@ among several, that was waiting on them.
   otherwise wake the session again and again. `claude -p` does not wake on a
   background command, so the end-to-end probes cannot show it; an ordinary session
   has to.
+- **The home view lists open runs, not every run.** Long-lived projects finish
+  many runs, and a page that keeps listing them all buries the ones that still
+  need the user. A finished run (`status: "done"` and nothing waiting on it) is
+  folded into a collapsed "finished" accordion per project instead of being
+  dropped, since its PR link and branch are still worth finding. A finished run
+  that still has something waiting on it (feed.mjs `waitsOnUser`) stays in the
+  open list - being done is not the same as being closed out.

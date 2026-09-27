@@ -6,7 +6,13 @@
 // innerHTML in this file, and a PR link is only rendered when the server has
 // already reduced it to an http(s) URL.
 import { h } from "./dom.js";
-import { badge, button } from "./ui.js";
+import { badge, button, accordion } from "./ui.js";
+
+/** A run is finished once it is done and nothing on it still waits for the
+ *  user (feed.mjs: a done run with open questions still waits). */
+function isFinished(run) {
+  return !run.unreadable && run.status === "done" && !run.waitsOnUser;
+}
 
 const PHASES = ["idea", "spec", "plan", "build", "tests", "harden", "review"];
 
@@ -93,12 +99,27 @@ export function renderHome(root, { projects, t, go }) {
   }
   if (projects.some((project) => project.unreadable)) body.push(h("p", { class: "empty" }, t("home.unreadable")));
   for (const project of readable) {
+    const open = project.runs.filter((run) => !isFinished(run));
+    const finished = project.runs.filter(isFinished);
+    const children = open.length
+      ? [h("ul", { class: "runs" }, open.map((run) => runRow(project, run, t, go)))]
+      : finished.length
+      ? [h("p", { class: "empty" }, t("home.allFinished"))]
+      : [];
+    if (finished.length) {
+      children.push(
+        accordion({
+          label: t("home.finished", { count: finished.length }),
+          content: () => h("ul", { class: "runs" }, finished.map((run) => runRow(project, run, t, go))),
+        })
+      );
+    }
     body.push(
       h(
         "section",
         { class: "project", dataset: { project: project.projectKey } },
         h("div", { class: "project-head" }, h("h2", {}, project.projectName), project.generatedAt ? h("span", {}, t("home.generated", { ago: ago(project.generatedAt, t) })) : null),
-        h("ul", { class: "runs" }, project.runs.map((run) => runRow(project, run, t, go)))
+        ...children
       )
     );
   }
