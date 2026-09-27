@@ -9,6 +9,8 @@ task-flow panel since:
 - `public/css/tokens.css`, `base.css`, `components.css`, `fonts.css` — from `engine/public/css/`
 - the local-server protections in `server.mjs` (loopback only, Host and Origin
   checks, body limit, next free port) — after `engine/server.mjs`
+- `tests/support/browser.mjs` in this repository (the headless-browser driver
+  of the panel smoke test) — from `engine/lib/browser.mjs`
 
 FluidPlan is distributed under the MIT License:
 

@@ -1,12 +1,12 @@
-// Labels for the interface and the exports. Pure module: the page loads the dictionary with fetch,
-// the server and the CLI from the file system; both get the same `t` function.
+// Labels for the interface (from FluidPlan, see NOTICE.md). The page loads the dictionary with fetch,
+// and every label goes through the same `t` function.
 //   t("verdict.ok")                        → "Accepted"
 //   t("home.decisions", { count: 3 })      → key "home.decisions_one" or "_other"
 //   t("round.label", { n: 2 })             → "Round 2"
 
-export const LANGS = ["fr", "en"];
+export const LANGS = ["en"];
 
-export function makeT(dict, lang = "fr") {
+export function makeT(dict, lang = "en") {
   const t = (key, vars = {}) => {
     let template;
     if (vars.count !== undefined) template = dict[`${key}_${pluralForm(lang, vars.count)}`];
