@@ -95,6 +95,14 @@ Optional fields: `stateDir` (where runs keep `state.json`, default
 Without that file the plugin's hooks do nothing in the repository, and `/task-flow`
 says it is not configured.
 
+A `docsDir` **outside the repository** has to be trusted once per machine, because
+the configuration travels with the repository and the hooks write run pages there.
+`init` trusts the folder you give it; for a configuration that came with a clone,
+confirm the folder and run `node <plugin>/scripts/config.js trust`. Trusted
+folders are listed in `~/.claude/task-flow-trusted.json`, one entry per repository
+and folder, so pointing a repository somewhere else needs trusting again. Network
+paths (`\\host\share`) are never accepted.
+
 ## Where things go
 
 Inside `docsDir`:

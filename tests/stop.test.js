@@ -17,6 +17,14 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// The trust list for a docsDir outside the project lives in the home folder
+// (config.js). These tests get a home of their own, so they never read or write
+// the real one; child processes inherit it through the environment.
+const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-home-'));
+process.env.HOME = TEST_HOME;
+process.env.USERPROFILE = TEST_HOME;
+const { trustDocsDir } = require('../plugin/scripts/config.js');
+
 const STOP = path.join(__dirname, '..', 'plugin', 'hooks', 'stop.js');
 const ALLOW = 0;
 const BLOCK = 2;
@@ -223,7 +231,7 @@ function check(name, expectedCode, actual, extraAssert) {
 /** A project the renderer can actually draw: a full configuration, a docs folder,
  *  a task list and a plan. The other cases do not need one, because they only ever
  *  assert on the exit code. */
-function makeRenderableProject(run = {}, { language = 'EN', tasksTime = null } = {}) {
+function makeRenderableProject(run = {}, { language = 'EN', tasksTime = null, trusted = true } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-stoprender-'));
   const docs = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-stopdocs-'));
   const tasksFile = path.join(docs, 'tasks', 'index.md');
@@ -239,6 +247,7 @@ function makeRenderableProject(run = {}, { language = 'EN', tasksTime = null } =
     path.join(root, '.claude', 'task-flow.json'),
     JSON.stringify({ docsDir: docs, language, tasksFile: 'tasks/index.md' })
   );
+  if (trusted) trustDocsDir(root, docs);
   fs.mkdirSync(path.join(docs, 'plans'), { recursive: true });
   fs.writeFileSync(path.join(docs, 'plans', '260908_demo.plan.md'), '## T1 · The first\n\n## T2 · The second\n');
 
@@ -382,6 +391,33 @@ function withTaskList({ phaseChangedAt, tasksTime, status = 'blocked' }) {
   );
   check('T37 a tasksFile outside docsDir is not followed', ALLOW, runStop(f.root, payloadFor(f.root)));
   fs.rmSync(outside, { force: true });
+}
+
+// --- T38: a docsDir the person never trusted is left exactly as it was -------
+// Security: .claude/task-flow.json is repository data. A cloned repository that
+// points docsDir at a folder outside itself must not get the Stop hook to create,
+// write or delete anything there - on any turn of any conversation.
+{
+  const snapshot = (dir) => {
+    const out = {};
+    const walk = (d) => {
+      for (const name of fs.readdirSync(d)) {
+        const full = path.join(d, name);
+        if (fs.statSync(full).isDirectory()) walk(full);
+        else out[path.relative(dir, full)] = fs.readFileSync(full, 'utf8');
+      }
+    };
+    walk(dir);
+    return JSON.stringify(out);
+  };
+  const f = makeRenderableProject({ status: 'ready' }, { trusted: false });
+  fs.mkdirSync(path.join(f.docs, 'runs', 'finished'), { recursive: true });
+  fs.writeFileSync(path.join(f.docs, 'runs', '260101_demo.md'), 'my own notes');
+  fs.writeFileSync(path.join(f.docs, 'runs', 'finished', '260102_demo.md'), 'more of my notes');
+  const before = snapshot(f.docs);
+  check('T38 an untrusted docsDir outside the project: the turn ends', ALLOW, runStop(f.root, payloadFor(f.root)));
+  check('T38 and the folder is byte-for-byte unchanged', ALLOW,
+    { code: before === snapshot(f.docs) ? 0 : 1 }, () => (before === snapshot(f.docs) ? null : 'the untrusted docsDir changed'));
 }
 
 // --- report ---------------------------------------------------------------

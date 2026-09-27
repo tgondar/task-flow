@@ -291,6 +291,70 @@ const win = (root, ...parts) => [root, ...parts].join('\\').replace(/\//g, '\\')
     runGate(root, payloadFor(root, win(root, 'src', 'Foo.cs'))));
 }
 
+// --- T22: self-approval through Edit is judged on the RESULT, not the fragment ---
+// Security: each of these got past a check that only read new_string. The gate
+// now replays the edit on the file and parses what would be written.
+{
+  const statePath = (root) => path.join(root, '.claude', 'task-flow', 'demo', 'state.json');
+  const edit = (root, input, tool = 'Edit') =>
+    runGate(root, payloadFor(root, win(root, '.claude', 'task-flow', 'demo', 'state.json'), { tool, content: null, extra: input }));
+  const apply = (root, oldString, newString) => {
+    const file = statePath(root);
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(oldString, newString));
+  };
+
+  let root = makeProject({ approved: false });
+  check('T22a a key split across old_string and new_string is blocked', BLOCK,
+    edit(root, { old_string: 'y":""', new_string: 'y":"me"' }));
+
+  root = makeProject({ approved: false });
+  check('T22b a unicode-escaped approvedBy key is blocked', BLOCK,
+    edit(root, { old_string: '"approvedBy":""', new_string: '"approvedBy":"","approved\\u0042y":"me"' }));
+
+  root = makeProject({ approved: false });
+  check('T22c renaming the empty approvedBy away is bookkeeping', ALLOW,
+    edit(root, { old_string: '"approvedBy":""', new_string: '"note":""' }));
+  apply(root, '"approvedBy":""', '"note":""');
+  check('T22d ...and renaming another key to approvedBy is blocked', BLOCK,
+    edit(root, { old_string: '"status"', new_string: '"approvedBy"' }));
+
+  root = makeProject({ approved: false });
+  check('T22e a MultiEdit-shaped list of edits is replayed too', BLOCK,
+    edit(root, { edits: [
+      { old_string: '"status":"ready"', new_string: '"status":"running"' },
+      { old_string: '"approvedBy":""', new_string: '"approvedBy":"me"' },
+    ] }, 'MultiEdit'));
+
+  root = makeProject({ approved: false });
+  check('T22f an edit the gate cannot replay on an unapproved state.json is blocked', BLOCK,
+    edit(root, { old_string: 'text that is not in the file', new_string: '"approvedBy":"me"' }));
+
+  root = makeProject({ approved: false });
+  check('T22g an ordinary Edit of an unapproved state.json is allowed', ALLOW,
+    edit(root, { old_string: '"status":"ready"', new_string: '"status":"running"' }));
+
+  root = makeProject({ approved: true });
+  check('T22h editing an already approved state.json is allowed', ALLOW,
+    edit(root, { old_string: '"phase":"plan"', new_string: '"phase":"build"' }));
+
+  root = makeProject({ approved: false });
+  check('T22i a Write replacing the file with an approval is still blocked', BLOCK,
+    runGate(root, payloadFor(root, win(root, '.claude', 'task-flow', 'demo', 'state.json'), {
+      content: '{"task":"demo","approved\\u0042y":"me"}',
+    })));
+}
+
+// --- T23: only a text approvedBy approves -----------------------------------
+// Security: the approval gate writes a name. true, 1 or an object in approvedBy
+// was never written by it, so it must not open the gate for code.
+for (const value of [true, 1, { by: 'me' }, ['me']]) {
+  const root = makeProject({ approved: false });
+  const file = path.join(root, '.claude', 'task-flow', 'demo', 'state.json');
+  fs.writeFileSync(file, JSON.stringify({ task: 'demo', phase: 'plan', approvedBy: value }));
+  check(`T23 approvedBy ${JSON.stringify(value)} on disk does not approve code`, BLOCK,
+    runGate(root, payloadFor(root, win(root, 'src', 'Foo.cs'))));
+}
+
 // --- report ---------------------------------------------------------------
 const total = passed + failures.length;
 console.log(`\n${passed}/${total} passed`);

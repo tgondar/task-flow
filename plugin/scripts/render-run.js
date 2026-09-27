@@ -689,8 +689,25 @@ function buildDocument({ state, slug, tasks, questions, openQuestions, depth, ar
 
 // --- writing it where it belongs -------------------------------------------
 
+/** True when the file carries the note every generated page opens with. Read only
+ *  from its head: the note is in the first lines, and a page is never large. */
+function isGeneratedPage(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const head = Buffer.alloc(1024);
+    const read = fs.readSync(fd, head, 0, head.length, 0);
+    return head.toString('utf8', 0, read).includes(`\`${GENERATED_BY}\``);
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 /** One file per run, and exactly one: any older name for the same slug goes, in the
- *  live folder and in the archive alike. Only `*_<slug>.md` is ever removed. */
+ *  live folder and in the archive alike. Only `*_<slug>.md` is ever removed, and
+ *  only when this renderer wrote it: a file a person put in runs/ is theirs. */
 function placeDocument({ liveDir, archiveDir, fileName, slug, body, archive }) {
   const targetDir = archive ? archiveDir : liveDir;
   fs.mkdirSync(targetDir, { recursive: true });
@@ -704,7 +721,7 @@ function placeDocument({ liveDir, archiveDir, fileName, slug, body, archive }) {
     for (const name of fs.readdirSync(dir)) {
       if (!name.endsWith(suffix)) continue;
       const stale = assertInside(dir, path.join(dir, name));
-      if (stale !== target) fs.unlinkSync(stale);
+      if (stale !== target && isGeneratedPage(stale)) fs.unlinkSync(stale);
     }
   }
   return target;

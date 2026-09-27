@@ -14,6 +14,13 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// The trust list for a docsDir outside the project lives in the home folder
+// (config.js). These tests get a home of their own, so they never read or write
+// the real one; child processes inherit it through the environment.
+const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-home-'));
+process.env.HOME = TEST_HOME;
+process.env.USERPROFILE = TEST_HOME;
+
 const MODULE = path.join(__dirname, '..', 'plugin', 'scripts', 'config.js');
 const {
   expandEnv,
@@ -22,6 +29,7 @@ const {
   normalizeLanguage,
   pageLanguage,
   stateDirOf,
+  trustDocsDir,
 } = require(MODULE);
 
 let passed = 0;
@@ -49,7 +57,7 @@ function assertEqual(actual, expected, message) {
 const temp = (prefix) => fs.mkdtempSync(path.join(os.tmpdir(), `taskflow-config-${prefix}-`));
 
 /** A project with a docs folder outside it, a task list in it, and a config. */
-function makeProject(config, { createDocs = true, createTasks = true } = {}) {
+function makeProject(config, { createDocs = true, createTasks = true, trusted = true } = {}) {
   const project = temp('project');
   const docs = temp('docs');
   if (!createDocs) fs.rmSync(docs, { recursive: true, force: true });
@@ -65,6 +73,7 @@ function makeProject(config, { createDocs = true, createTasks = true } = {}) {
       typeof body === 'string' ? body : JSON.stringify(body)
     );
   }
+  if (trusted) trustDocsDir(project, docs);
   return { project, docs };
 }
 
@@ -354,6 +363,123 @@ check('C30 `check` exits 1 when the project never opted in', () => {
   const { project } = makeProject(null);
   const run = spawnSync(process.execPath, [MODULE, 'check', '--project-dir', project], { encoding: 'utf8' });
   assertEqual(run.status, 1, 'exit code');
+});
+
+// --- trusting a docsDir outside the project ---------------------------------
+// The hooks write and delete run pages under docsDir on every turn, and the file
+// that names it is repository data. So a folder outside the project is only
+// followed once the person has trusted it on this machine.
+
+/** Calls fn with fs.statSync recorded; returns the paths it was asked about. */
+function statCalls(fn) {
+  const original = fs.statSync;
+  const seen = [];
+  fs.statSync = (target, ...rest) => {
+    seen.push(String(target));
+    return original(target, ...rest);
+  };
+  try {
+    fn();
+  } finally {
+    fs.statSync = original;
+  }
+  return seen;
+}
+
+check('C31 SECURITY an untrusted docsDir outside the project is refused before it is touched', () => {
+  const { project, docs } = makeProject(valid, { trusted: false });
+  let outcome;
+  const seen = statCalls(() => {
+    outcome = loadConfig(project);
+  });
+  assert(!outcome.ok, 'an untrusted outside docsDir was accepted');
+  assert(outcome.errors.some((line) => line.startsWith('docsDir') && /not trusted/.test(line)), outcome.errors.join('; '));
+  assert(!seen.some((p) => p.toLowerCase().startsWith(docs.toLowerCase())), `stat-ed the untrusted folder: ${seen.join(', ')}`);
+});
+
+check('C32 SECURITY trust is per project AND folder: another repo, or a moved docsDir, is not trusted', () => {
+  const { project, docs } = makeProject(valid);
+  assert(loadConfig(project).ok, 'the trusted pair should load');
+
+  const other = temp('other-project');
+  fs.mkdirSync(path.join(other, '.claude'));
+  fs.writeFileSync(path.join(other, '.claude', 'task-flow.json'), JSON.stringify(valid(docs)));
+  assert(!loadConfig(other).ok, 'a second repository borrowed the first one\'s trust');
+
+  const moved = temp('moved-docs');
+  fs.mkdirSync(path.join(moved, 'tasks'));
+  fs.writeFileSync(path.join(moved, 'tasks', 'index.md'), '# Tasks\n');
+  fs.writeFileSync(path.join(project, '.claude', 'task-flow.json'), JSON.stringify(valid(moved)));
+  assert(!loadConfig(project).ok, 'repointing docsDir kept the old trust');
+});
+
+check('C33 a docsDir inside the project needs no trust', () => {
+  const project = temp('inside');
+  fs.mkdirSync(path.join(project, 'docs', 'tasks'), { recursive: true });
+  fs.writeFileSync(path.join(project, 'docs', 'tasks', 'index.md'), '# Tasks\n');
+  fs.mkdirSync(path.join(project, '.claude'));
+  fs.writeFileSync(path.join(project, '.claude', 'task-flow.json'), JSON.stringify(valid(path.join(project, 'docs'))));
+  const outcome = loadConfig(project);
+  assert(outcome.ok, outcome.errors.join('; '));
+});
+
+check('C34 SECURITY network and device paths are refused, trusted or not, and never stat-ed', () => {
+  const cases = ['//attacker.example/share/notes', '\\\\attacker.example\\share', '\\\\?\\C:\\notes', '\\\\.\\pipe\\x', '%TF_UNC_TEST%/notes'];
+  for (const docsDir of cases) {
+    const { project } = makeProject({ docsDir, language: 'EN', tasksFile: 'x.md' }, { trusted: false });
+    let outcome;
+    const seen = statCalls(() => {
+      outcome = loadConfig(project, { env: { TF_UNC_TEST: '\\\\attacker.example\\share' } });
+    });
+    assert(!outcome.ok, `${docsDir} accepted`);
+    assert(outcome.errors.some((line) => /network or device/.test(line)), `${docsDir}: ${outcome.errors.join('; ')}`);
+    assert(!seen.some((p) => /attacker|^[\\/]{2}/.test(p)), `${docsDir} was stat-ed: ${seen.join(', ')}`);
+  }
+});
+
+check('C35 `trust` records the pair, after which `check` passes', () => {
+  const { project } = makeProject(valid, { trusted: false });
+  const before = spawnSync(process.execPath, [MODULE, 'check', '--project-dir', project], { encoding: 'utf8' });
+  assertEqual(before.status, 1, `check before trust (${before.stdout})`);
+  assert(/config\.js trust/.test(before.stdout), `check should say how to trust: ${before.stdout}`);
+  const trust = spawnSync(process.execPath, [MODULE, 'trust', '--project-dir', project], { encoding: 'utf8' });
+  assertEqual(trust.status, 0, `trust (${trust.stderr})`);
+  const after = spawnSync(process.execPath, [MODULE, 'check', '--project-dir', project], { encoding: 'utf8' });
+  assertEqual(after.status, 0, `check after trust (${after.stdout})`);
+});
+
+check('C36 SECURITY `trust` refuses a network path', () => {
+  const { project } = makeProject({ docsDir: '//attacker.example/share', language: 'EN', tasksFile: 'x.md' }, { trusted: false });
+  const run = spawnSync(process.execPath, [MODULE, 'trust', '--project-dir', project], { encoding: 'utf8' });
+  assertEqual(run.status, 1, 'exit code');
+  assert(!fs.readFileSync(path.join(TEST_HOME, '.claude', 'task-flow-trusted.json'), 'utf8').includes('attacker'), 'the network path was trusted');
+});
+
+check('C37 init trusts the outside folder the person gave it', () => {
+  const project = temp('init-trust');
+  const docs = temp('init-trust-docs');
+  const outcome = initConfig(project, { docsDir: docs, language: 'EN', tasksFile: 'tasks/index.md' });
+  assert(outcome.ok, outcome.errors.join('; '));
+});
+
+check('C38 SECURITY a corrupt trust list trusts nothing and is never overwritten', () => {
+  const file = path.join(TEST_HOME, '.claude', 'task-flow-trusted.json');
+  const saved = fs.readFileSync(file, 'utf8');
+  try {
+    const { project, docs } = makeProject(valid, { trusted: false });
+    fs.writeFileSync(file, '{ not json');
+    assert(!loadConfig(project).ok, 'a corrupt list trusted the folder');
+    let threw = false;
+    try {
+      trustDocsDir(project, docs);
+    } catch {
+      threw = true;
+    }
+    assert(threw, 'trustDocsDir overwrote a corrupt list');
+    assertEqual(fs.readFileSync(file, 'utf8'), '{ not json', 'the corrupt list');
+  } finally {
+    fs.writeFileSync(file, saved);
+  }
 });
 
 console.log(`\n${passed}/${passed + failures.length} passed`);

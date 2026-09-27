@@ -106,7 +106,48 @@ function readRunStates() {
   return states;
 }
 
-const hasApproval = (state) => Boolean(state && String(state.approvedBy || '').trim());
+// Only a non-empty string is an approval. `true`, `1` or an object in approvedBy
+// is not something the approval gate ever writes, so it approves nothing.
+const hasApproval = (state) =>
+  Boolean(state && typeof state.approvedBy === 'string' && state.approvedBy.trim());
+
+const parsedApproval = (text) => {
+  try {
+    return hasApproval(JSON.parse(text));
+  } catch (error) {
+    return false; // not JSON: no reader will take an approval from it
+  }
+};
+
+/** The file as it will be after this tool call, or null when that cannot be
+ *  worked out. Write replaces the file; Edit (and a MultiEdit-shaped `edits`
+ *  list) replaces text in the current one. Judging the RESULT, not the fragment,
+ *  is what closes split keys, escaped keys and renamed keys: JSON.parse sees
+ *  exactly what the gate will read next time. */
+function resultingText(input, current) {
+  if (typeof input.content === 'string') return input.content;
+  const edits = Array.isArray(input.edits)
+    ? input.edits
+    : typeof input.old_string === 'string' || typeof input.new_string === 'string'
+      ? [input]
+      : null;
+  if (!edits) return null;
+
+  let text = current;
+  for (const edit of edits) {
+    if (!edit || typeof edit.old_string !== 'string' || typeof edit.new_string !== 'string') return null;
+    if (edit.old_string === '') {
+      if (text !== null) return null; // an empty old_string only ever creates a file
+      text = edit.new_string;
+      continue;
+    }
+    if (text === null || !text.includes(edit.old_string)) return null;
+    text = edit.replace_all
+      ? text.split(edit.old_string).join(edit.new_string)
+      : text.replace(edit.old_string, () => edit.new_string);
+  }
+  return text;
+}
 
 // --- the pipeline's own bookkeeping ---------------------------------------
 if (isStateFile) {
@@ -114,28 +155,23 @@ if (isStateFile) {
   // state.json. Without this the agent could grant itself approval through the
   // very directory the gate leaves open, and then write whatever it liked.
   if (path.posix.basename(relative) === 'state.json') {
-    const proposedRaw =
-      (payload.tool_input && (payload.tool_input.content ?? payload.tool_input.new_string)) || '';
-
-    let proposesApproval = false;
+    let current = null;
     try {
-      proposesApproval = hasApproval(JSON.parse(proposedRaw));
+      current = fs.readFileSync(path.resolve(projectDirRaw, payload.tool_input.file_path), 'utf8');
     } catch (error) {
-      // Not whole-file JSON (an Edit fragment, say): fall back to reading the
-      // text, so a partial edit cannot smuggle an approval past the check.
-      proposesApproval = /"approvedby"\s*:\s*"[^"]+"/i.test(String(proposedRaw));
+      current = null; // a new file
     }
 
-    if (proposesApproval) {
-      let alreadyApproved = false;
-      try {
-        const existing = readRunStates().find((entry) => entry.path === target);
-        alreadyApproved = hasApproval(existing && existing.state);
-      } catch (error) {
-        alreadyApproved = false;
+    if (!parsedApproval(current)) {
+      const next = resultingText(payload.tool_input || {}, current);
+      if (next === null) {
+        // Fail closed: an edit we cannot replay could be the one that approves.
+        block(
+          'this change to an unapproved state.json cannot be checked for "approvedBy".',
+          'Write the whole file instead, without "approvedBy" - approval is the user\'s to give.'
+        );
       }
-
-      if (!alreadyApproved) {
+      if (parsedApproval(next)) {
         block(
           'this write would fill "approvedBy" in state.json, which is the gate\'s own key.',
           'Approval is the user\'s to give through the approval gate - do not write it yourself.'

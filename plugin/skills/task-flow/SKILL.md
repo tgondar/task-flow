@@ -58,6 +58,22 @@ repository if it is missing (never one outside it), and creates an empty task li
 if there is none. Run `check` again; only exit 0 lets you go on. Do not write
 `.claude/task-flow.json` by hand — `init` is what validates the values.
 
+**A `docsDir` outside the repository has to be trusted on this machine.** The file
+is repository data, and the hooks write and delete run pages under `docsDir` on
+every turn; so an outside folder is ignored until the person confirms it. `init`
+trusts the folder it is given. When `check` instead reports `docsDir ... not
+trusted` — a configuration that came with the repository — show the person the
+resolved folder it printed and ask whether task-flow may write there. Only on a yes,
+run:
+
+```sh
+node "${CLAUDE_PLUGIN_ROOT}/scripts/config.js" trust
+```
+
+Never run `trust` without that yes, and never to get past `check` on your own:
+it is the person's consent, recorded in their home folder. A network path
+(`\\host\share`, `//host/share`) is refused outright and cannot be trusted.
+
 **`auto` does not waive this** (§0b). An auto run with no valid configuration stops
 here and says what is missing.
 

@@ -12,8 +12,14 @@
 // and the hooks run on every turn of every session in it. So every path in it is
 // an INPUT: resolved, contained and checked here, never trusted.
 //
+// That includes docsDir. The hooks write and delete run pages under it on every
+// turn, so a docsDir outside the project is only followed once the person has
+// trusted it on this machine (a list kept in their home folder, which no
+// repository writes), and a network or device path is never followed at all.
+//
 //   node config.js check [--project-dir <dir>]
 //   node config.js init  --docs-dir <dir> --tasks-file <file> [--language <tag>] [--project-dir <dir>]
+//   node config.js trust [--project-dir <dir>]
 
 'use strict';
 
@@ -58,6 +64,10 @@ function isInside(root, candidate) {
   const target = fold(path.resolve(candidate));
   return target === base || target.startsWith(base.endsWith(path.sep) ? base : base + path.sep);
 }
+
+/** `\\host\share`, `//host/share`, `\\?\C:\x`, `\\.\device`. Merely stat-ing one of
+ *  these makes Windows contact the host, and offer it the user's credentials. */
+const isNetworkOrDevicePath = (value) => /^[\\/]{2}/.test(String(value));
 
 /** Looks a variable up the way the OS does: case-insensitively on Windows. */
 function lookupEnv(env, name) {
@@ -131,9 +141,13 @@ function readRaw(projectDir) {
 /** Resolves the base documentation directory. Relative values are relative to the
  *  project; everything else must be absolute after expansion. */
 function resolveDocsDir(value, projectDir, env) {
+  const network = () => new Error('is a network or device path, which is never followed');
+  if (isNetworkOrDevicePath(String(value).trim())) throw network();
   const expanded = expandEnv(value, env);
   if (!expanded) throw new Error('is empty');
+  if (isNetworkOrDevicePath(expanded)) throw network();
   const resolved = path.resolve(projectDir, expanded);
+  if (isNetworkOrDevicePath(resolved)) throw network();
   if (path.parse(resolved).root === resolved) throw new Error(`is the root of a drive (${resolved})`);
   return resolved;
 }
@@ -173,6 +187,63 @@ function resolveStateDir(value, projectDir) {
   return resolved;
 }
 
+// --- trusting a docsDir outside the project ---------------------------------
+//
+// A repository can commit any docsDir it likes. Inside the project that is the
+// repository's own business; outside it, it is the person's disk. So an outside
+// docsDir counts only when this machine's list pairs it with this project - the
+// pair, not the project alone, so a repository that later points docsDir
+// somewhere else has to be trusted again.
+
+/** Resolved on every call, never cached: the list lives in the person's home. */
+const trustFile = () => path.join(os.homedir(), '.claude', 'task-flow-trusted.json');
+
+const samePath = (a, b) => {
+  const fold = (value) => (process.platform === 'win32' ? value.toLowerCase() : value);
+  return fold(path.resolve(a)) === fold(path.resolve(b));
+};
+
+/** The trusted pairs. An unreadable list trusts nothing. */
+function readTrusted() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(trustFile(), 'utf8').replace(/^﻿/, ''));
+    return Array.isArray(parsed && parsed.trusted) ? parsed.trusted : [];
+  } catch {
+    return [];
+  }
+}
+
+function isTrusted(projectDir, docsDir) {
+  return readTrusted().some(
+    (entry) =>
+      entry && typeof entry.project === 'string' && typeof entry.docsDir === 'string' &&
+      samePath(entry.project, projectDir) && samePath(entry.docsDir, docsDir)
+  );
+}
+
+/** Adds the pair to the list. Refuses to overwrite a list it cannot read, rather
+ *  than silently dropping the pairs already in it. */
+function trustDocsDir(projectDir, docsDir) {
+  const file = trustFile();
+  let current = { trusted: [] };
+  if (isFile(file)) {
+    try {
+      current = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
+    } catch (error) {
+      throw new Error(`${file} is not valid JSON (${error.message}); fix or remove it first`);
+    }
+    if (!current || typeof current !== 'object' || !Array.isArray(current.trusted)) {
+      throw new Error(`${file} does not hold a "trusted" list; fix or remove it first`);
+    }
+  }
+  if (!isTrusted(projectDir, docsDir)) {
+    current.trusted.push({ project: path.resolve(projectDir), docsDir: path.resolve(docsDir) });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(current, null, 2) + '\n');
+  }
+  return file;
+}
+
 /**
  * The configuration of a project, validated.
  *
@@ -203,8 +274,15 @@ function loadConfig(projectDir, { env = process.env, requireExisting = true } = 
   if (raw.docsDir === undefined) fail('docsDir', 'is required: the base folder for specs, plans, questions and run pages');
   else {
     try {
-      config.docsDir = resolveDocsDir(raw.docsDir, projectDir, env);
-      if (requireExisting && !isDirectory(config.docsDir)) fail('docsDir', `does not exist (${config.docsDir})`);
+      const docsDir = resolveDocsDir(raw.docsDir, projectDir, env);
+      if (!isInside(projectDir, docsDir) && !isTrusted(projectDir, docsDir)) {
+        // Decided before anything touches the folder: an untrusted path is not even stat-ed.
+        fail('docsDir', `is outside the project and not trusted on this machine (${docsDir}); ` +
+          'confirm the folder with the person, then run: config.js trust');
+      } else {
+        config.docsDir = docsDir;
+        if (requireExisting && !isDirectory(config.docsDir)) fail('docsDir', `does not exist (${config.docsDir})`);
+      }
     } catch (error) {
       fail('docsDir', error.message);
     }
@@ -290,6 +368,8 @@ function initConfig(projectDir, { docsDir, language = DEFAULT_LANGUAGE, tasksFil
 
   fs.mkdirSync(path.join(projectDir, '.claude'), { recursive: true });
   fs.writeFileSync(configPath(projectDir), JSON.stringify(next, null, 2) + '\n');
+  // The person just gave this folder, so it is trusted for this project.
+  if (!isInside(projectDir, resolvedDocs)) trustDocsDir(projectDir, resolvedDocs);
   return loadConfig(projectDir, { env });
 }
 
@@ -301,12 +381,16 @@ module.exports = {
   expandEnv,
   initConfig,
   isInside,
+  isNetworkOrDevicePath,
+  isTrusted,
   loadConfig,
   normalizeLanguage,
   pageLanguage,
   readRaw,
   resolveTasksFile,
   stateDirOf,
+  trustDocsDir,
+  trustFile,
 };
 
 // --- CLI -------------------------------------------------------------------
@@ -357,8 +441,25 @@ if (require.main === module) {
         process.exitCode = 1;
       }
     }
+  } else if (command === 'trust') {
+    // The consent step: run only after the person has confirmed the folder.
+    try {
+      const read = readRaw(projectDir);
+      if (!read.exists || read.error) throw new Error(`${CONFIG_FILE} ${read.error || 'is missing'}`);
+      if (read.raw.docsDir === undefined) throw new Error('docsDir is not set');
+      const docsDir = resolveDocsDir(read.raw.docsDir, projectDir, process.env);
+      if (isInside(projectDir, docsDir)) {
+        process.stdout.write(`docsDir is inside the project (${docsDir}); nothing to trust.\n`);
+      } else {
+        const file = trustDocsDir(projectDir, docsDir);
+        process.stdout.write(`Trusted ${docsDir} for ${projectDir} on this machine (${file}).\n`);
+      }
+    } catch (error) {
+      process.stderr.write(`trust failed: ${error.message}\n`);
+      process.exitCode = 1;
+    }
   } else {
-    process.stderr.write('usage: config.js check | init --docs-dir <dir> --tasks-file <file> [--language <tag>]\n');
+    process.stderr.write('usage: config.js check | trust | init --docs-dir <dir> --tasks-file <file> [--language <tag>]\n');
     process.exitCode = 2;
   }
 }
