@@ -22,6 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 const { crossesLink, loadConfig } = require('./config.js');
+const questionsData = require('./questions.js');
 
 /** The stages a run passes through, in order. `phase` names the last one COMPLETED,
  *  so the stage in flight is the one that follows it. */
@@ -725,7 +726,7 @@ function isGeneratedPage(file) {
 /** One file per run, and exactly one: any older name for the same slug goes, in the
  *  live folder and in the archive alike. Only `yyMMdd_<slug>.md` is ever removed, and
  *  only when this renderer wrote it: a file a person put in runs/ is theirs. */
-function placeDocument({ liveDir, archiveDir, fileName, slug, body, archive }) {
+function placeDocument({ liveDir, archiveDir, fileName, slug, body, archive, tail = '.md', protectExisting = false }) {
   // runs/ or runs/finished/ as a link would carry every write and delete below
   // somewhere else entirely.
   if (crossesLink(path.dirname(liveDir), archiveDir)) {
@@ -735,9 +736,15 @@ function placeDocument({ liveDir, archiveDir, fileName, slug, body, archive }) {
   fs.mkdirSync(targetDir, { recursive: true });
   const target = assertInside(targetDir, path.join(targetDir, fileName));
 
+  // A questions file written by hand holds answers nothing else holds. The run
+  // page has always been overwritten, and still is; this one is not.
+  if (protectExisting && exists(target) && !isGeneratedPage(target)) {
+    throw new Error(`${path.basename(target)} was written by hand; not overwriting it`);
+  }
+
   fs.writeFileSync(target, body, 'utf8');
 
-  const ownName = datedName(slug, '.md');
+  const ownName = datedName(slug, tail);
   for (const dir of [liveDir, archiveDir]) {
     if (!exists(dir)) continue;
     for (const name of fs.readdirSync(dir)) {
@@ -749,6 +756,67 @@ function placeDocument({ liveDir, archiveDir, fileName, slug, body, archive }) {
   return target;
 }
 
+// --- the questions page, from questions.json --------------------------------
+
+/**
+ * Generates a run's questions page from its questions.json, if it has one.
+ *
+ * Returns `{ used, file, open, error }`. `used` false means there is no
+ * questions.json and the caller falls back to the hand-written page. When the
+ * file is there but cannot be used - not JSON, not the right shape, or a page
+ * written by hand already sits where the generated one would go - `error` says
+ * why in terms of fields, never of values, the previous page is left exactly as
+ * it was, and the open count is read from that page, so the run page stays true.
+ *
+ * Where the page goes follows the rule the agent used to apply by hand: under
+ * questions/ while anything is open or the run is alive, moved to
+ * questions/resolved/ once the run is finished and nothing is open.
+ */
+function renderQuestions({ file, docsDir, slug, prefix, isDone, lang }) {
+  if (!exists(file)) return { used: false };
+  const liveDir = path.join(docsDir, QUESTIONS_DIR);
+  const archiveDir = path.join(liveDir, QUESTIONS_ARCHIVE);
+  const fileName = `${prefix}_${slug}${QUESTIONS_SUFFIX}`;
+  const previous = () => {
+    for (const dir of [liveDir, archiveDir]) {
+      const candidate = path.join(dir, fileName);
+      if (exists(candidate)) return { used: true, file: candidate, open: countOpenQuestions(candidate) };
+    }
+    return { used: true, file: null, open: 0 };
+  };
+
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+  } catch {
+    return { ...previous(), error: 'questions.json is not valid JSON' };
+  }
+  const checked = questionsData.validateQuestions(data);
+  if (!checked.ok) {
+    return { ...previous(), error: `questions.json: ${checked.errors.slice(0, 10).join('; ')}` };
+  }
+  if (data.slug !== slug) return { ...previous(), error: 'questions.json: slug does not match the run folder' };
+
+  const open = questionsData.openCount(data);
+  const created = `20${prefix.slice(0, 2)}-${prefix.slice(2, 4)}-${prefix.slice(4, 6)}`;
+  const body = questionsData.renderQuestionsMarkdown(data, { lang, created });
+  try {
+    const placed = placeDocument({
+      liveDir,
+      archiveDir,
+      fileName,
+      slug,
+      body,
+      archive: isDone && open === 0,
+      tail: QUESTIONS_SUFFIX,
+      protectExisting: true,
+    });
+    return { used: true, file: placed, open };
+  } catch (error) {
+    return { ...previous(), error: error.message };
+  }
+}
+
 // --- the run over all runs -------------------------------------------------
 
 /**
@@ -757,7 +825,7 @@ function placeDocument({ liveDir, archiveDir, fileName, slug, body, archive }) {
  */
 function renderAll({ projectDir, docsDir, slug } = {}) {
   const root = projectDir || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const result = { rendered: [], archived: [], skipped: [] };
+  const result = { rendered: [], archived: [], skipped: [], questionErrors: [] };
 
   const loaded = loadConfig(root);
   if (!loaded.exists) {
@@ -794,9 +862,29 @@ function renderAll({ projectDir, docsDir, slug } = {}) {
       if (!SAFE_SEGMENT.test(entry)) throw new Error(`run directory ${JSON.stringify(entry)} is not a safe name`);
 
       const state = readJson(statePath);
-      const questions = findQuestionsFile(targetDocs, entry, state);
-      const openQuestions = questions ? countOpenQuestions(questions.file) : 0;
       const isDone = state.phase === 'done' || String(state.status || '').toLowerCase() === 'done';
+      const prefix = runCreatedPrefix(state, statePath);
+
+      // A run with a questions.json gets its questions page generated from it; a
+      // run without one keeps the page its agent wrote by hand, as before.
+      let questions = null;
+      let openQuestions = 0;
+      const structured = renderQuestions({
+        file: path.join(stateRoot, entry, 'questions.json'),
+        docsDir: targetDocs,
+        slug: entry,
+        prefix,
+        isDone,
+        lang,
+      });
+      if (structured.error) result.questionErrors.push({ run: entry, why: structured.error });
+      if (structured.used) {
+        questions = structured.file ? { file: structured.file } : null;
+        openQuestions = structured.open;
+      } else {
+        questions = findQuestionsFile(targetDocs, entry, state);
+        openQuestions = questions ? countOpenQuestions(questions.file) : 0;
+      }
       const archive = isDone && openQuestions === 0;
 
       const depth = archive ? 2 : 1;
@@ -817,7 +905,6 @@ function renderAll({ projectDir, docsDir, slug } = {}) {
         if (resolved && exists(resolved)) artifacts[key] = path.relative(targetDocs, resolved);
       }
 
-      const prefix = runCreatedPrefix(state, statePath);
       const body = buildDocument({
         state,
         slug: entry,
@@ -860,6 +947,7 @@ module.exports = {
   buildDocument,
   readPlanTasks,
   countOpenQuestions,
+  renderQuestions,
   assertInside,
   runCreatedPrefix,
 };
@@ -885,4 +973,8 @@ if (require.main === module) {
     for (const item of outcome.skipped) process.stdout.write(`skipped   ${item.run}  (${item.why})\n`);
     if (!outcome.rendered.length && !outcome.archived.length) process.stdout.write('nothing rendered.\n');
   }
+  // Even with --quiet: the agent runs this right after writing questions.json,
+  // and a file it got wrong must not pass in silence.
+  for (const item of outcome.questionErrors) process.stderr.write(`questions ${item.run}: ${item.why}\n`);
+  if (outcome.questionErrors.length) process.exitCode = 1;
 }
