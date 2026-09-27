@@ -22,6 +22,9 @@ const path = require('path');
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-home-'));
 process.env.HOME = TEST_HOME;
 process.env.USERPROFILE = TEST_HOME;
+// The feed for the panel goes to LOCALAPPDATA (XDG_STATE_HOME elsewhere): never the real one.
+process.env.LOCALAPPDATA = TEST_HOME;
+process.env.XDG_STATE_HOME = TEST_HOME;
 const { trustDocsDir } = require('../plugin/scripts/config.js');
 
 const { renderAll } = require('../plugin/scripts/render-run.js');
@@ -982,6 +985,120 @@ console.log('\n--- free text out of state.json, again ---');
   renderAll({ projectDir: f.projectDir });
   const page = fs.existsSync(f.live()) ? fs.readFileSync(f.live(), 'utf8') : '';
   check('S26 a plan behind a link is not pasted into the page', !/SEGREDO/.test(page), page);
+}
+
+// --- F: the feed for the panel ------------------------------------------------
+// One summary per project in <LOCALAPPDATA>/task-flow/feed/ (TEST_HOME here). The
+// panel reads nothing else, so what matters is what it contains - and what it
+// must not: the absolute docs folder, or anything written where the promise
+// says the panel has no business.
+
+const { projectKey } = require('../plugin/scripts/config.js');
+const feedFile = (projectDir) => path.join(TEST_HOME, 'task-flow', 'feed', `${projectKey(projectDir)}.json`);
+const readFeed = (projectDir) => JSON.parse(fs.readFileSync(feedFile(projectDir), 'utf8'));
+
+{
+  const f = fixture({
+    state: {
+      status: 'blocked',
+      mode: 'auto',
+      buildCursor: 'T2',
+      pendingTasks: [{ id: 'T3', question: 'Which currency?' }, { id: '../x', question: 'bad id' }],
+      phaseChangedAt: '2026-09-08T18:00:00Z',
+      pr: 'https://github.com/o/r/pull/1',
+    },
+    questions: '# q\n- [ ] one\n- [ ] two\n- [x] three\n',
+  });
+  const outcome = renderAll({ projectDir: f.projectDir });
+  const feed = fs.existsSync(feedFile(f.projectDir)) ? readFeed(f.projectDir) : null;
+  const run = feed && feed.runs[0];
+  check('F1 every render writes the project feed', feed && feed.version === 1 && outcome.feed === feedFile(f.projectDir), JSON.stringify(outcome));
+  check('F2 the run is there in closed shapes', run && run.slug === 'demo' && run.status === 'blocked' && run.mode === 'auto' && run.buildCursor === 'T2' && run.phase === 'plan', JSON.stringify(run));
+  check('F3 with its plan tasks and only well-formed pending ids', run && run.tasks.length === 3 && run.tasks[0].id === 'T1' && run.pendingTasks.length === 1 && run.pendingTasks[0].id === 'T3', JSON.stringify(run && run.pendingTasks));
+  check('F4 hand-written questions become a count', run && run.questions.source === 'legacy' && run.questions.open === 2, JSON.stringify(run && run.questions));
+  check('F5 the run page is given relative to the docs folder', run && run.runPage === 'runs/260908_demo.md', run && run.runPage);
+  const text = fs.readFileSync(feedFile(f.projectDir), 'utf8');
+  check('F6 SECURITY the absolute docs folder is not in the feed', !text.toLowerCase().includes(f.docsDir.toLowerCase()) && !text.includes(JSON.stringify(f.docsDir).slice(1, -1)), f.docsDir);
+  check('F7 no temp file is left behind', fs.readdirSync(path.dirname(feedFile(f.projectDir))).every((name) => !name.endsWith('.tmp')));
+}
+
+{
+  const f = fixture({});
+  const runDir = path.join(f.projectDir, 'docs', 'pipeline', 'demo');
+  fs.writeFileSync(path.join(runDir, 'questions.json'), JSON.stringify({
+    version: 1, slug: 'demo', items: [{ id: 'Q1', kind: 'question', title: 'Which currency?', options: [{ id: 'eur', label: 'EUR' }] }],
+    consumedSubmissions: ['20260927T201500Z-a1b2c3d4'],
+  }));
+  renderAll({ projectDir: f.projectDir });
+  const run = readFeed(f.projectDir).runs[0];
+  check('F8 questions kept as data go into the feed whole, with what was consumed', run.questions.source === 'json' && run.questions.items[0].id === 'Q1' && run.questions.consumedSubmissions[0] === '20260927T201500Z-a1b2c3d4', JSON.stringify(run.questions));
+
+  fs.writeFileSync(path.join(runDir, 'questions.json'), JSON.stringify({ version: 1, slug: 'demo', items: [{ id: 'Q1', kind: 'question', title: 'x', evil: '<script>' }] }));
+  renderAll({ projectDir: f.projectDir });
+  const invalid = readFeed(f.projectDir).runs[0].questions;
+  check('F9 SECURITY an invalid questions.json never reaches the panel', invalid.source === 'invalid' && !('items' in invalid), JSON.stringify(invalid));
+}
+
+{
+  const f = fixture({ state: { status: 'weird<b>', mode: 'AUTO ', pr: 'javascript:alert(1)', branch: 'x\n## forged', updated: 'yesterday', buildCursor: '<T1>' } });
+  renderAll({ projectDir: f.projectDir });
+  const run = readFeed(f.projectDir).runs[0];
+  check('F10 SECURITY state.json values are reduced to closed shapes', run.status === 'paused' && run.mode === 'auto' && run.pr === null && run.updated === null && run.buildCursor === null && !/\n|<|>/.test(run.branch || ''), JSON.stringify(run));
+
+  fs.writeFileSync(path.join(f.projectDir, 'docs', 'pipeline', 'demo', 'state.json'), '{ broken');
+  fs.mkdirSync(path.join(f.projectDir, 'docs', 'pipeline', 'other'), { recursive: true });
+  fs.writeFileSync(path.join(f.projectDir, 'docs', 'pipeline', 'other', 'state.json'), JSON.stringify({ phase: 'spec', status: 'running', created: '2026-09-08' }));
+  renderAll({ projectDir: f.projectDir });
+  const runs = readFeed(f.projectDir).runs;
+  check('F11 an unreadable state.json is listed as unreadable and does not hide the others', runs.some((r) => r.slug === 'demo' && r.unreadable) && runs.some((r) => r.slug === 'other' && r.status === 'running'), JSON.stringify(runs));
+}
+
+/** Runs `fn` with LOCALAPPDATA/XDG_STATE_HOME pointing at `base`, then restores them. */
+function withHomeBase(base, fn) {
+  const saved = [process.env.LOCALAPPDATA, process.env.XDG_STATE_HOME];
+  process.env.LOCALAPPDATA = base;
+  process.env.XDG_STATE_HOME = base;
+  try {
+    return fn();
+  } finally {
+    [process.env.LOCALAPPDATA, process.env.XDG_STATE_HOME] = saved;
+  }
+}
+
+{
+  const f = fixture({});
+  const outcome = withHomeBase(path.join(f.projectDir, 'local'), () => renderAll({ projectDir: f.projectDir }));
+  check('F12 SECURITY a local state folder inside the project gets no feed', !fs.existsSync(path.join(f.projectDir, 'local', 'task-flow')) && /overlap/.test(outcome.feedError || ''), JSON.stringify(outcome));
+  check('F13 and the documentation is rendered all the same', fs.existsSync(f.live()), f.live());
+}
+
+{
+  const f = fixture({});
+  const outcome = withHomeBase(path.join(f.docsDir, 'local'), () => renderAll({ projectDir: f.projectDir }));
+  check('F14 SECURITY a local state folder inside the docs folder gets no feed', !fs.existsSync(path.join(f.docsDir, 'local', 'task-flow')) && /overlap/.test(outcome.feedError || ''), JSON.stringify(outcome));
+}
+
+{
+  const f = fixture({});
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-feedbase-'));
+  const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-feedelsewhere-'));
+  fs.mkdirSync(path.join(base, 'task-flow'), { recursive: true });
+  fs.symlinkSync(elsewhere, path.join(base, 'task-flow', 'feed'), 'junction');
+  const outcome = withHomeBase(base, () => renderAll({ projectDir: f.projectDir }));
+  check('F15 SECURITY a feed folder that is a link gets nothing written behind it', fs.readdirSync(elsewhere).length === 0 && /link/.test(outcome.feedError || '') && fs.existsSync(f.live()), JSON.stringify(outcome));
+}
+
+{
+  const f = fixture({});
+  const saved = [process.env.LOCALAPPDATA, process.env.XDG_STATE_HOME, process.env.HOME];
+  delete process.env.LOCALAPPDATA;
+  let outcome;
+  try {
+    outcome = process.platform === 'win32' ? renderAll({ projectDir: f.projectDir }) : { feedError: 'n/a', skipped: [] };
+  } finally {
+    [process.env.LOCALAPPDATA, process.env.XDG_STATE_HOME, process.env.HOME] = saved;
+  }
+  check('F16 no local state folder at all: a note, and the pages still render', /LOCALAPPDATA|n\/a/.test(outcome.feedError || '') && fs.existsSync(f.live()), JSON.stringify(outcome));
 }
 
 // --- report -----------------------------------------------------------------

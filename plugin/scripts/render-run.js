@@ -21,7 +21,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const { crossesLink, loadConfig } = require('./config.js');
+const { crossesLink, homeDir, homePath, isInside, loadConfig, projectKey } = require('./config.js');
+const questionsData = require('./questions.js');
 
 /** The stages a run passes through, in order. `phase` names the last one COMPLETED,
  *  so the stage in flight is the one that follows it. */
@@ -725,7 +726,7 @@ function isGeneratedPage(file) {
 /** One file per run, and exactly one: any older name for the same slug goes, in the
  *  live folder and in the archive alike. Only `yyMMdd_<slug>.md` is ever removed, and
  *  only when this renderer wrote it: a file a person put in runs/ is theirs. */
-function placeDocument({ liveDir, archiveDir, fileName, slug, body, archive }) {
+function placeDocument({ liveDir, archiveDir, fileName, slug, body, archive, tail = '.md', protectExisting = false }) {
   // runs/ or runs/finished/ as a link would carry every write and delete below
   // somewhere else entirely.
   if (crossesLink(path.dirname(liveDir), archiveDir)) {
@@ -735,9 +736,15 @@ function placeDocument({ liveDir, archiveDir, fileName, slug, body, archive }) {
   fs.mkdirSync(targetDir, { recursive: true });
   const target = assertInside(targetDir, path.join(targetDir, fileName));
 
+  // A questions file written by hand holds answers nothing else holds. The run
+  // page has always been overwritten, and still is; this one is not.
+  if (protectExisting && exists(target) && !isGeneratedPage(target)) {
+    throw new Error(`${path.basename(target)} was written by hand; not overwriting it`);
+  }
+
   fs.writeFileSync(target, body, 'utf8');
 
-  const ownName = datedName(slug, '.md');
+  const ownName = datedName(slug, tail);
   for (const dir of [liveDir, archiveDir]) {
     if (!exists(dir)) continue;
     for (const name of fs.readdirSync(dir)) {
@@ -749,6 +756,186 @@ function placeDocument({ liveDir, archiveDir, fileName, slug, body, archive }) {
   return target;
 }
 
+// --- the questions page, from questions.json --------------------------------
+
+/**
+ * Generates a run's questions page from its questions.json, if it has one.
+ *
+ * Returns `{ used, file, open, error }`. `used` false means there is no
+ * questions.json and the caller falls back to the hand-written page. When the
+ * file is there but cannot be used - not JSON, not the right shape, or a page
+ * written by hand already sits where the generated one would go - `error` says
+ * why in terms of fields, never of values, the previous page is left exactly as
+ * it was, and the open count is read from that page, so the run page stays true.
+ *
+ * Where the page goes follows the rule the agent used to apply by hand: under
+ * questions/ while anything is open or the run is alive, moved to
+ * questions/resolved/ once the run is finished and nothing is open.
+ */
+function renderQuestions({ file, stateDir, docsDir, slug, prefix, isDone, lang }) {
+  const read = questionsData.readQuestionsFile(file, stateDir, slug);
+  if (!read.exists) return { used: false };
+  const liveDir = path.join(docsDir, QUESTIONS_DIR);
+  const archiveDir = path.join(liveDir, QUESTIONS_ARCHIVE);
+  const fileName = `${prefix}_${slug}${QUESTIONS_SUFFIX}`;
+  const previous = () => {
+    for (const dir of [liveDir, archiveDir]) {
+      const candidate = path.join(dir, fileName);
+      if (exists(candidate)) return { used: true, file: candidate, open: countOpenQuestions(candidate) };
+    }
+    return { used: true, file: null, open: 0 };
+  };
+
+  if (read.errors.length) {
+    const why = read.errors.slice(0, 10).join('; ').replace(/; questions\.json: /g, '; ');
+    return { ...previous(), error: why };
+  }
+  const data = read.data;
+
+  const open = questionsData.openCount(data);
+  const created = `20${prefix.slice(0, 2)}-${prefix.slice(2, 4)}-${prefix.slice(4, 6)}`;
+  const body = questionsData.renderQuestionsMarkdown(data, { lang, created });
+  try {
+    const placed = placeDocument({
+      liveDir,
+      archiveDir,
+      fileName,
+      slug,
+      body,
+      archive: isDone && open === 0,
+      tail: QUESTIONS_SUFFIX,
+      protectExisting: true,
+    });
+    return { used: true, file: placed, open };
+  } catch (error) {
+    return { ...previous(), error: error.message };
+  }
+}
+
+// --- the feed for the panel --------------------------------------------------
+//
+// The panel shows the runs of every project on this machine, and it must never
+// read or write a docs folder - that is the promise that the documentation is
+// written by task-flow alone. So instead of the panel going to the projects,
+// every render leaves a summary of the project where the panel looks: one file
+// per project in <home>/feed/ (config.js homeDir). The panel reads nothing else.
+//
+// What goes in is what the panel shows, in closed shapes: the same discipline as
+// the run page, because a state.json is repository data and the panel is a web
+// page. The absolute docs folder does NOT go in - the panel has no use for it,
+// and not knowing it is part of why the panel cannot write there.
+
+const FEED_PHASES = [...PHASES, 'done'];
+const TASK_ID = /^T[0-9]+[a-z]?$/;
+const ISO = /^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:\d{2})?$/;
+const clip = (value, max) => (typeof value === 'string' ? plainText(value, max) : null);
+const iso = (value) => (typeof value === 'string' && ISO.test(value.trim()) ? value.trim() : null);
+
+/** One run, as the panel sees it. */
+function feedRun({ entry, state, stateRoot, docsDir, statePath }) {
+  const planPath = resolveInsideDocs(docsDir, state.artifacts && state.artifacts.plan);
+  const tasks = readPlanTasks(planPath).map((task) => ({ id: task.id, title: task.title, done: task.ticked }));
+  const idList = (value, textKey, max) =>
+    (Array.isArray(value) ? value : [])
+      .filter((item) => item && typeof item.id === 'string' && TASK_ID.test(item.id))
+      .slice(0, 100)
+      .map((item) => ({ id: item.id, [textKey]: clip(item[textKey], max) }));
+
+  // The questions go in whole when the run keeps them as data - the panel turns
+  // them into cards - and only as a count when they are a page written by hand.
+  let questions;
+  const read = questionsData.readQuestionsFile(path.join(stateRoot, entry, 'questions.json'), stateRoot, entry);
+  if (read.exists) {
+    questions = read.data
+      ? { source: 'json', items: read.data.items, consumedSubmissions: read.data.consumedSubmissions || [] }
+      : { source: 'invalid' };
+  } else {
+    const legacy = findQuestionsFile(docsDir, entry, state);
+    questions = { source: 'legacy', open: legacy ? countOpenQuestions(legacy.file) : 0 };
+  }
+
+  // The run page, relative to the docs folder, for the panel to show as a path.
+  const prefix = runCreatedPrefix(state, statePath);
+  const pageName = `${prefix}_${entry}.md`;
+  const runPage = [path.join(RUNS_DIR, pageName), path.join(RUNS_DIR, RUNS_ARCHIVE, pageName)]
+    .find((relative) => exists(path.join(docsDir, relative)));
+
+  const phase = FEED_PHASES.includes(state.phase) ? state.phase : null;
+  return {
+    slug: entry,
+    phase,
+    status: ['running', 'blocked', 'failed', 'done'].includes(String(state.status || '').toLowerCase())
+      ? String(state.status).toLowerCase()
+      : 'paused',
+    mode: String(state.mode || '').trim().toLowerCase() === 'auto' ? 'auto' : 'attended',
+    created: `20${prefix.slice(0, 2)}-${prefix.slice(2, 4)}-${prefix.slice(4, 6)}`,
+    updated: iso(state.updated),
+    phaseChangedAt: iso(state.phaseChangedAt),
+    buildCursor: typeof state.buildCursor === 'string' && TASK_ID.test(state.buildCursor) ? state.buildCursor : null,
+    tasks,
+    pendingTasks: idList(state.pendingTasks, 'question', 300),
+    skippedTasks: idList(state.skippedTasks, 'reason', 200),
+    branch: clip(state.branch, 120),
+    pr: linkTarget(state.pr),
+    runPage: runPage ? runPage.split(path.sep).join('/') : null,
+    questions,
+  };
+}
+
+/**
+ * Writes <home>/feed/<projectKey>.json for this project, atomically (a temp file
+ * renamed over the old one, so the panel never reads half a file).
+ *
+ * Returns the file written, or throws. The caller treats a throw as a note, not a
+ * failure: the feed is for the panel, and a machine without a usable home folder
+ * must still get its documentation rendered.
+ *
+ * Refused outright when the home folder sits inside the project or inside the
+ * docs folder - a feed there would put the panel's reading, and its answers,
+ * where the promise says it has no business.
+ */
+function writeFeed({ projectDir, config, docsDir }) {
+  const home = homeDir();
+  if (isInside(projectDir, home) || isInside(home, projectDir)) {
+    throw new Error('the local state folder and the project overlap');
+  }
+  if (isInside(docsDir, home) || isInside(home, docsDir)) {
+    throw new Error('the local state folder and the docs folder overlap');
+  }
+
+  const runs = [];
+  for (const entry of fs.readdirSync(config.stateDir)) {
+    if (!SAFE_SEGMENT.test(entry)) continue;
+    const statePath = path.join(config.stateDir, entry, 'state.json');
+    if (!exists(statePath)) continue;
+    try {
+      const state = readJson(statePath);
+      if (!state || typeof state !== 'object' || Array.isArray(state)) continue;
+      runs.push(feedRun({ entry, state, stateRoot: config.stateDir, docsDir, statePath }));
+    } catch {
+      runs.push({ slug: entry, unreadable: true });
+    }
+  }
+
+  const key = projectKey(projectDir);
+  const feedDir = homePath(['feed']);
+  fs.mkdirSync(feedDir, { recursive: true });
+  const file = homePath(['feed', `${key}.json`]);
+  const body = {
+    version: 1,
+    projectKey: key,
+    projectDir: path.resolve(projectDir),
+    projectName: path.basename(path.resolve(projectDir)),
+    language: config.pageLanguage || 'en',
+    generatedAt: new Date().toISOString(),
+    runs,
+  };
+  const temp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(body, null, 2) + '\n', 'utf8');
+  fs.renameSync(temp, file);
+  return file;
+}
+
 // --- the run over all runs -------------------------------------------------
 
 /**
@@ -757,7 +944,7 @@ function placeDocument({ liveDir, archiveDir, fileName, slug, body, archive }) {
  */
 function renderAll({ projectDir, docsDir, slug } = {}) {
   const root = projectDir || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const result = { rendered: [], archived: [], skipped: [] };
+  const result = { rendered: [], archived: [], skipped: [], questionErrors: [] };
 
   const loaded = loadConfig(root);
   if (!loaded.exists) {
@@ -794,9 +981,30 @@ function renderAll({ projectDir, docsDir, slug } = {}) {
       if (!SAFE_SEGMENT.test(entry)) throw new Error(`run directory ${JSON.stringify(entry)} is not a safe name`);
 
       const state = readJson(statePath);
-      const questions = findQuestionsFile(targetDocs, entry, state);
-      const openQuestions = questions ? countOpenQuestions(questions.file) : 0;
       const isDone = state.phase === 'done' || String(state.status || '').toLowerCase() === 'done';
+      const prefix = runCreatedPrefix(state, statePath);
+
+      // A run with a questions.json gets its questions page generated from it; a
+      // run without one keeps the page its agent wrote by hand, as before.
+      let questions = null;
+      let openQuestions = 0;
+      const structured = renderQuestions({
+        file: path.join(stateRoot, entry, 'questions.json'),
+        stateDir: stateRoot,
+        docsDir: targetDocs,
+        slug: entry,
+        prefix,
+        isDone,
+        lang,
+      });
+      if (structured.error) result.questionErrors.push({ run: entry, why: structured.error });
+      if (structured.used) {
+        questions = structured.file ? { file: structured.file } : null;
+        openQuestions = structured.open;
+      } else {
+        questions = findQuestionsFile(targetDocs, entry, state);
+        openQuestions = questions ? countOpenQuestions(questions.file) : 0;
+      }
       const archive = isDone && openQuestions === 0;
 
       const depth = archive ? 2 : 1;
@@ -817,7 +1025,6 @@ function renderAll({ projectDir, docsDir, slug } = {}) {
         if (resolved && exists(resolved)) artifacts[key] = path.relative(targetDocs, resolved);
       }
 
-      const prefix = runCreatedPrefix(state, statePath);
       const body = buildDocument({
         state,
         slug: entry,
@@ -846,6 +1053,14 @@ function renderAll({ projectDir, docsDir, slug } = {}) {
     }
   }
 
+  // The panel's summary of this project. Never at the documentation's expense:
+  // whatever goes wrong here is reported and the render still counts as done.
+  try {
+    result.feed = writeFeed({ projectDir: root, config, docsDir: targetDocs });
+  } catch (error) {
+    result.feedError = error.message;
+  }
+
   return result;
 }
 
@@ -860,6 +1075,8 @@ module.exports = {
   buildDocument,
   readPlanTasks,
   countOpenQuestions,
+  renderQuestions,
+  writeFeed,
   assertInside,
   runCreatedPrefix,
 };
@@ -885,4 +1102,10 @@ if (require.main === module) {
     for (const item of outcome.skipped) process.stdout.write(`skipped   ${item.run}  (${item.why})\n`);
     if (!outcome.rendered.length && !outcome.archived.length) process.stdout.write('nothing rendered.\n');
   }
+  // Even with --quiet: the agent runs this right after writing questions.json,
+  // and a file it got wrong must not pass in silence.
+  for (const item of outcome.questionErrors) process.stderr.write(`questions ${item.run}: ${item.why}\n`);
+  if (outcome.questionErrors.length) process.exitCode = 1;
+  // A note, not a failure: the documentation was rendered either way.
+  if (outcome.feedError) process.stderr.write(`panel feed not written: ${outcome.feedError}\n`);
 }

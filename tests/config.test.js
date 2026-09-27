@@ -564,5 +564,102 @@ check('C44 SECURITY a task list name with control characters is refused', () => 
   }
 });
 
+// --- the per-machine folder shared with the panel ------------------------------
+// homeDir()/homePath() decide where the feed and the answers live. Every read and
+// write between task-flow and the panel goes through them, so the security cases
+// are the ones where that folder could end up somewhere nobody chose.
+
+const { homeDir, homePath, projectKey } = require(MODULE);
+
+check('C45 on Windows the folder is LOCALAPPDATA\\task-flow, found case-insensitively', () => {
+  const base = temp('localappdata');
+  assertEqual(homeDir({ env: { LOCALAPPDATA: base }, platform: 'win32' }), path.join(base, 'task-flow'), 'home');
+  if (process.platform === 'win32') {
+    assertEqual(homeDir({ env: { localappdata: base }, platform: 'win32' }), path.join(base, 'task-flow'), 'lower-case name');
+  }
+});
+
+check('C46 elsewhere it is the XDG state folder, and a relative XDG value is ignored', () => {
+  const home = temp('xdg-home');
+  const state = path.join(home, 'state');
+  assertEqual(homeDir({ env: { XDG_STATE_HOME: state, HOME: home }, platform: 'linux' }), path.join(state, 'task-flow'), 'xdg');
+  assertEqual(
+    homeDir({ env: { XDG_STATE_HOME: 'relative/state', HOME: home }, platform: 'linux' }),
+    path.join(home, '.local', 'state', 'task-flow'),
+    'relative XDG ignored'
+  );
+});
+
+check('C47 SECURITY no LOCALAPPDATA, a relative one or a network one: refused, never guessed', () => {
+  for (const env of [{}, { LOCALAPPDATA: '' }, { LOCALAPPDATA: 'relative\\folder' }, { LOCALAPPDATA: '\\\\host\\share' }, { LOCALAPPDATA: '//host/share' }]) {
+    let threw = false;
+    try {
+      homeDir({ env, platform: 'win32' });
+    } catch {
+      threw = true;
+    }
+    assert(threw, `accepted ${JSON.stringify(env)}`);
+  }
+});
+
+check('C48 every spelling of one project gives one key, and a different project another', () => {
+  const key = projectKey('C:\\Git\\App', 'win32');
+  assert(/^[0-9a-f]{16}$/.test(key), `not 16 hex digits: ${key}`);
+  if (process.platform === 'win32') {
+    for (const spelling of ['c:/git/app', 'C:\\GIT\\APP\\', 'c:\\git\\x\\..\\app']) {
+      assertEqual(projectKey(spelling, 'win32'), key, spelling);
+    }
+  }
+  assert(projectKey('C:\\Git\\App2', 'win32') !== key, 'a different project got the same key');
+  assert(projectKey('/srv/App', 'linux') !== projectKey('/srv/app', 'linux'), 'case folded outside Windows');
+});
+
+check('C49 homePath joins plain names under the folder', () => {
+  const base = temp('homepath');
+  const options = { env: { LOCALAPPDATA: base, XDG_STATE_HOME: base }, platform: process.platform };
+  const full = homePath(['answers', 'abcdef0123456789', 'run-1'], options);
+  assertEqual(full, path.join(homeDir(options), 'answers', 'abcdef0123456789', 'run-1'), 'joined');
+});
+
+check('C50 SECURITY homePath refuses .., separators, drive letters and empty names', () => {
+  const base = temp('homepath-bad');
+  const options = { env: { LOCALAPPDATA: base, XDG_STATE_HOME: base }, platform: process.platform };
+  for (const segments of [['..'], ['answers', '..', '..'], ['a/b'], ['a\\b'], ['C:'], [''], ['.'], ['x\u0000y'], [42]]) {
+    let threw = false;
+    try {
+      homePath(segments, options);
+    } catch {
+      threw = true;
+    }
+    assert(threw, `accepted ${JSON.stringify(segments)}`);
+  }
+});
+
+check('C51 SECURITY a junction anywhere under the folder, or the folder itself, is refused', () => {
+  const base = temp('homepath-link');
+  const options = { env: { LOCALAPPDATA: base, XDG_STATE_HOME: base }, platform: process.platform };
+  const home = homeDir(options);
+  const elsewhere = temp('homepath-elsewhere');
+  fs.mkdirSync(home, { recursive: true });
+  junction(elsewhere, path.join(home, 'answers'));
+  let threw = false;
+  try {
+    homePath(['answers', 'abcdef0123456789'], options);
+  } catch (error) {
+    threw = /link/.test(error.message);
+  }
+  assert(threw, 'a linked answers folder was accepted');
+
+  const base2 = temp('homepath-link2');
+  junction(temp('homepath-elsewhere2'), path.join(base2, 'task-flow'));
+  threw = false;
+  try {
+    homePath(['feed'], { env: { LOCALAPPDATA: base2, XDG_STATE_HOME: base2 }, platform: process.platform });
+  } catch (error) {
+    threw = /link/.test(error.message);
+  }
+  assert(threw, 'a linked task-flow folder was accepted');
+});
+
 console.log(`\n${passed}/${passed + failures.length} passed`);
 if (failures.length) process.exit(1);

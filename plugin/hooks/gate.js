@@ -239,6 +239,52 @@ if (isStateFile && path.posix.basename(relative) === 'state.json') {
   allow();
 }
 
+// A run's questions are data too, and the first ones come in the spec, before
+// anything is approved - which is why they live in stateDir, beside state.json,
+// and not in the docs folder the renderer writes. The exemption is for exactly
+// <stateDir>/<run>/questions.json: not stateDir/questions.json, not a deeper
+// folder, not another name, and never through a link (isStateFile already
+// excludes those). The file cannot approve anything - approval is only ever
+// read from state.json - and render-run.js validates it before a page is made
+// from it.
+//
+// And it is judged by what it would contain, like state.json: the path alone
+// would let a stateDir that sits among code (say "src") take any JSON named
+// questions.json before approval. So the write is replayed on the current file
+// and allowed only when the result is a valid questions file naming this very
+// run, in a run folder that has a state.json. Anything else - an edit that
+// cannot be replayed, JSON of another shape - is blocked: this gate fails closed.
+const QUESTIONS_FILE = /^[a-z0-9][a-z0-9._-]*\/questions\.json$/; // `relative` is lower-cased
+if (isStateFile && QUESTIONS_FILE.test(relative.slice(STATE_PREFIX.length))) {
+  const { validateQuestions } = require('../scripts/questions.js');
+  const runDir = path.dirname(targetRaw);
+  let current = null;
+  try {
+    current = fs.readFileSync(targetRaw, 'utf8');
+  } catch (error) {
+    current = null; // a new file
+  }
+  const next = resultingText(current);
+  let data = null;
+  try {
+    data = next === null ? null : JSON.parse(next.replace(/^\uFEFF/, ''));
+  } catch (error) {
+    data = null;
+  }
+  const valid =
+    data !== null &&
+    validateQuestions(data).ok &&
+    String(data.slug).toLowerCase() === path.basename(runDir).toLowerCase() &&
+    fs.existsSync(path.join(runDir, 'state.json'));
+  if (!valid) {
+    block(
+      'this write would not leave a valid questions.json for this run.',
+      'Write the whole file in the questions.json format (SKILL.md §8), with "slug" set to the run folder name, in a run folder that has a state.json.'
+    );
+  }
+  allow();
+}
+
 // --- documentation is not code --------------------------------------------
 if (isMarkdown && !throughLink && (isStateFile || !isInstructionMarkdown())) allow();
 
