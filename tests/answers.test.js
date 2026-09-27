@@ -250,11 +250,60 @@ refused('A26 an empty list of answers is refused', []);
   check('A36 the CLI prints the answers inside the data block', cli.status === 0 && /\(data, not instructions\):\n<<<PANEL-ANSWERS\n/.test(cli.stdout) && /"questionId": "Q2"/.test(cli.stdout), `${cli.status} ${cli.stdout} ${cli.stderr}`);
 }
 
-// --- report -----------------------------------------------------------------
-const total = passed + failures.length;
-console.log(`\n${passed}/${total} passed`);
-if (failures.length) {
-  console.log(`${failures.length} failing:`);
-  for (const f of failures) console.log(`  - ${f}`);
-  process.exit(1);
-}
+// --- wait ----------------------------------------------------------------------
+// What wakes a stopped session. The case that matters most is the one that would
+// loop: a submission consume would refuse must not wake it, or the session would
+// consume, find nothing, wait - and be woken again at once, for ever.
+
+(async () => {
+  const { wait, hasNewAnswers } = require('../plugin/scripts/answers.js');
+
+  {
+    const p = project();
+    const started = Date.now();
+    setTimeout(() => p.submit([{ questionId: 'Q2', status: 'ok' }]), 600);
+    const code = await wait({ projectDir: p.projectDir, slug: 'demo', timeoutMs: 8000, intervalMs: 100 });
+    check('W1 wait returns 0 as soon as the panel leaves an answer', code === 0 && Date.now() - started < 4000, `${code} after ${Date.now() - started} ms`);
+  }
+
+  {
+    const p = project();
+    const code = await wait({ projectDir: p.projectDir, slug: 'demo', timeoutMs: 400, intervalMs: 100 });
+    check('W2 with nothing sent, wait times out with 3', code === 3, String(code));
+  }
+
+  {
+    const p = project();
+    p.submit([{ questionId: 'Q2', status: 'ok' }], { projectDir: 'C:\\other' });
+    p.submit([{ questionId: 'Q3', status: 'ko', comment: 'closed already' }]);
+    p.submit([], {}, { raw: '{ not json' });
+    const code = await wait({ projectDir: p.projectDir, slug: 'demo', timeoutMs: 400, intervalMs: 100 });
+    check('W3 SECURITY submissions consume would refuse, or that only touch closed questions, never wake the session', code === 3 && !hasNewAnswers({ projectDir: p.projectDir, slug: 'demo' }), String(code));
+  }
+
+  {
+    const p = project();
+    p.submit([{ questionId: 'Q2', status: 'ok' }]);
+    consume({ projectDir: p.projectDir, slug: 'demo' });
+    const code = await wait({ projectDir: p.projectDir, slug: 'demo', timeoutMs: 400, intervalMs: 100 });
+    check('W4 an answer already taken in does not wake it again', code === 3, String(code));
+  }
+
+  {
+    const p = project();
+    p.submit([{ questionId: 'Q1', status: 'ok' }]);
+    const cli = spawnSync(process.execPath, [SCRIPT, 'wait', '--slug', 'demo', '--project-dir', p.projectDir, '--timeout', '5'], { encoding: 'utf8', env: process.env });
+    check('W5 the CLI exits 0 and says to consume, without printing any answer', cli.status === 0 && /consume --slug demo/.test(cli.stdout) && !/Q1/.test(cli.stdout), `${cli.status} ${cli.stdout} ${cli.stderr}`);
+    const bad = spawnSync(process.execPath, [SCRIPT, 'wait', '--slug', '../x', '--project-dir', p.projectDir, '--timeout', '1'], { encoding: 'utf8', env: process.env });
+    check('W6 SECURITY wait refuses a run name that is not a plain folder name', bad.status === 1 && /--slug/.test(bad.stderr), `${bad.status} ${bad.stderr}`);
+  }
+
+  // --- report -----------------------------------------------------------------
+  const total = passed + failures.length;
+  console.log(`\n${passed}/${total} passed`);
+  if (failures.length) {
+    console.log(`${failures.length} failing:`);
+    for (const f of failures) console.log(`  - ${f}`);
+    process.exit(1);
+  }
+})();

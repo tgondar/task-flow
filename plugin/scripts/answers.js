@@ -259,7 +259,54 @@ function report(slug, outcome) {
   return lines.join('\n');
 }
 
-module.exports = { consume, report, checkSubmission, listSubmissions, MAX_SUBMISSION_BYTES };
+/**
+ * Is there something for `consume` to take? True when a submission that has not
+ * been taken in yet passes its check and answers at least one question that is
+ * still open. A submission that fails its check does not count: `consume` would
+ * refuse it, and a wait that woke the session for it would wake it again at once,
+ * for ever.
+ */
+function hasNewAnswers({ projectDir, slug }) {
+  const root = path.resolve(projectDir);
+  const { file } = openRun(root, slug);
+  const data = readQuestions(file);
+  const consumed = new Set(data.consumedSubmissions || []);
+  for (const { id, file: subFile } of listSubmissions(root, slug).files) {
+    if (consumed.has(id)) continue;
+    try {
+      const stats = fs.lstatSync(subFile);
+      if (!stats.isFile() || stats.size > MAX_SUBMISSION_BYTES) continue;
+      const checked = checkSubmission({ raw: fs.readFileSync(subFile, 'utf8'), id, projectDir: root, slug, data });
+      if (checked.ok && checked.answers.some((answer) => answer.item && questionsData.isOpen(answer.item))) return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
+/**
+ * Blocks until the panel has left an answer for this run, then returns - which
+ * is what wakes a Claude session that started it in the background. SKILL.md
+ * starts it when a run stops to wait for the user, AFTER writing status
+ * "blocked", so the Stop hook lets that turn end (stop.js only pushes "running").
+ * It prints no answer: the session wakes and runs `consume`, the one place
+ * answers are checked and taken in.
+ *
+ * Resolves 0 when there is something to consume, 3 when `timeoutMs` ran out.
+ * Checks every `intervalMs`, as FluidPlan's wait does (fs.watch is unreliable on
+ * Windows).
+ */
+async function wait({ projectDir, slug, timeoutMs = Infinity, intervalMs = 2000 }) {
+  const started = Date.now();
+  for (;;) {
+    if (hasNewAnswers({ projectDir, slug })) return 0;
+    if (Date.now() - started >= timeoutMs) return 3;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+module.exports = { consume, report, wait, hasNewAnswers, checkSubmission, listSubmissions, MAX_SUBMISSION_BYTES };
 
 // --- CLI -------------------------------------------------------------------
 
@@ -272,15 +319,26 @@ if (require.main === module) {
   const command = argv[0];
   const projectDir = value('--project-dir') || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const slug = value('--slug');
-  try {
+  (async () => {
     if (command === 'consume') {
       process.stdout.write(`${report(slug, consume({ projectDir, slug }))}\n`);
+    } else if (command === 'wait') {
+      const seconds = value('--timeout');
+      const timeoutMs = seconds === undefined ? Infinity : Number(seconds) * 1000;
+      if (!(timeoutMs > 0)) throw new Error('--timeout takes a number of seconds');
+      const code = await wait({ projectDir, slug, timeoutMs });
+      process.stdout.write(
+        code === 0
+          ? `The panel has an answer for run "${slug}". Take it in with: node answers.js consume --slug ${slug}\n`
+          : `No answer from the panel for run "${slug}" before the timeout.\n`
+      );
+      process.exitCode = code;
     } else {
-      process.stderr.write('usage: node answers.js consume --slug <run> [--project-dir <dir>]\n');
+      process.stderr.write('usage: node answers.js consume|wait --slug <run> [--project-dir <dir>] [--timeout <seconds>]\n');
       process.exitCode = 2;
     }
-  } catch (error) {
+  })().catch((error) => {
     process.stderr.write(`answers: ${error.message}\n`);
     process.exitCode = 1;
-  }
+  });
 }
