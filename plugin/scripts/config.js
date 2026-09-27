@@ -23,6 +23,7 @@
 
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -285,6 +286,73 @@ function trustDocsDir(projectDir, docsDir) {
   return file;
 }
 
+// --- the per-machine folder shared with the panel --------------------------
+//
+// The panel shows the runs of every project on this machine and collects the
+// answers to their questions. The rule it must never break is that the
+// documentation is written by task-flow alone: the panel has no path into any
+// docsDir, and does not even read one. So the two talk through a folder of their
+// own, outside every project and outside every docs folder:
+//
+//   <home>/feed/<projectKey>.json            written by task-flow, read by the panel
+//   <home>/answers/<projectKey>/<slug>/...   written by the panel, read by task-flow
+//   <home>/panel/...                         the panel's own drafts and registry
+//
+// One writer per file, so neither side ever has to merge what the other wrote.
+// The folder is per machine and deliberately NOT synced: LOCALAPPDATA on Windows
+// (not the roaming APPDATA, not OneDrive), the XDG state folder elsewhere. Every
+// machine runs its own panel over its own runs.
+
+/** The folder itself, resolved on every call from the environment, never cached.
+ *  Throws instead of guessing: an undefined LOCALAPPDATA must not quietly become
+ *  a relative folder in whatever directory a hook happens to run from, and a
+ *  network path must not make Windows contact a host and offer it credentials.
+ *  `platform` is a parameter only so the tests can reach both branches. */
+function homeDir({ env = process.env, platform = process.platform } = {}) {
+  let base;
+  if (platform === 'win32') {
+    base = lookupEnv(env, 'LOCALAPPDATA');
+    if (!base) throw new Error('LOCALAPPDATA is not defined on this machine');
+  } else {
+    const xdg = env.XDG_STATE_HOME;
+    // XDG says a relative value is invalid and must be ignored, not resolved.
+    base = xdg && path.isAbsolute(xdg) ? xdg : path.join(env.HOME || os.homedir(), '.local', 'state');
+  }
+  if (isNetworkOrDevicePath(base)) throw new Error('the local state folder is a network or device path');
+  if (!path.isAbsolute(base)) throw new Error('the local state folder is not an absolute path');
+  return path.join(path.resolve(base), 'task-flow');
+}
+
+/** A path under homeDir(), from segments the caller has already checked against
+ *  a closed shape (a project key, a run name, a submission id). Checked again
+ *  here, because this is the last place before a file is touched: no segment may
+ *  be empty, `.`/`..` or carry a separator, and nothing from the parent of the
+ *  folder down may be a link - a junction at <home>/answers would otherwise send
+ *  the panel's writes, or task-flow's reads, anywhere at all. */
+function homePath(segments, options) {
+  const home = homeDir(options);
+  for (const segment of segments) {
+    if (typeof segment !== 'string' || !segment || segment === '.' || segment === '..' || /[\\/:\0]/.test(segment)) {
+      throw new Error(`${JSON.stringify(String(segment))} is not a plain name`);
+    }
+  }
+  const full = path.join(home, ...segments);
+  if (!isInside(home, full)) throw new Error('the path leaves the local state folder');
+  if (crossesLink(path.dirname(home), full)) throw new Error('the local state folder goes through a link');
+  return full;
+}
+
+/** A project's name in that folder: the first 16 hex digits of the SHA-256 of
+ *  its absolute path. A hash and not the path, so no project path ever becomes a
+ *  file name, and every spelling of one folder gives one key - `C:\Git\app`,
+ *  `c:/git/app/` - because Windows folds case and path.resolve settles the
+ *  separators and the trailing one. 64 bits is plenty for one person's projects. */
+function projectKey(projectDir, platform = process.platform) {
+  let resolved = path.resolve(String(projectDir));
+  if (platform === 'win32') resolved = resolved.toLowerCase();
+  return crypto.createHash('sha256').update(resolved, 'utf8').digest('hex').slice(0, 16);
+}
+
 /**
  * The configuration of a project, validated.
  *
@@ -421,6 +489,8 @@ module.exports = {
   configPath,
   crossesLink,
   expandEnv,
+  homeDir,
+  homePath,
   initConfig,
   isInside,
   isNetworkOrDevicePath,
@@ -428,6 +498,7 @@ module.exports = {
   loadConfig,
   normalizeLanguage,
   pageLanguage,
+  projectKey,
   readRaw,
   resolveTasksFile,
   stateDirOf,
