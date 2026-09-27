@@ -239,6 +239,17 @@ if (isStateFile && path.posix.basename(relative) === 'state.json') {
   allow();
 }
 
+// A run's questions are data too, and the first ones come in the spec, before
+// anything is approved - which is why they live in stateDir, beside state.json,
+// and not in the docs folder the renderer writes. The exemption is for exactly
+// <stateDir>/<run>/questions.json: not stateDir/questions.json, not a deeper
+// folder, not another name, and never through a link (isStateFile already
+// excludes those). The file cannot approve anything - approval is only ever
+// read from state.json - and render-run.js validates it before a page is made
+// from it.
+const QUESTIONS_FILE = /^[a-z0-9][a-z0-9._-]*\/questions\.json$/; // `relative` is lower-cased
+if (isStateFile && QUESTIONS_FILE.test(relative.slice(STATE_PREFIX.length))) allow();
+
 // --- documentation is not code --------------------------------------------
 if (isMarkdown && !throughLink && (isStateFile || !isInstructionMarkdown())) allow();
 
