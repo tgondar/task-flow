@@ -1,6 +1,6 @@
 // Tiny DOM builder: h("div", { class: "x", onclick: fn }, child, "text"…). Text always goes through
-// text nodes; only `html` injects HTML, and it is only ever given the output of md.js, which
-// escapes everything.
+// text nodes. From FluidPlan (see NOTICE.md), minus its `html` attribute: every text the panel
+// shows comes from a feed a repository fed, and there is no way left here to turn one into markup.
 
 export function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -22,8 +22,6 @@ function applyAttrs(el, attrs, isSvg) {
     if (key === "class") {
       if (isSvg) el.setAttribute("class", value);
       else el.className = value;
-    } else if (key === "html") {
-      el.innerHTML = value;
     } else if (key === "dataset") {
       Object.assign(el.dataset, value);
     } else if (key === "style" && typeof value === "object") {

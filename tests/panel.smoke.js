@@ -96,6 +96,50 @@ async function until(browser, expression, ms = 5000) {
     await browser.goto(panel.url, 800);
     const empty = await until(browser, 'document.querySelector(".empty") && document.querySelector(".empty").textContent');
     check('U8 with no feed at all, the page explains where runs come from', /No runs yet/.test(empty || ''), empty);
+
+    // --- one run: cards, drafts, sending -----------------------------------------
+    const fresh = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'feed.sample.json'), 'utf8'));
+    Object.assign(fresh, { projectKey: key, projectDir });
+    fresh.runs.find((run) => run.slug === 'invoices').questions.items[0].why = 'Because <img src=x onerror="window.__pwned=2"> **bold**';
+    fs.writeFileSync(path.join(feedDir, `${key}.json`), JSON.stringify(fresh));
+    // Same document, new address: no load event, the page routes on hashchange.
+    await browser.eval(`location.hash = "#/run/${key}/invoices"`);
+    await until(browser, 'document.querySelectorAll(".question-card").length === 2');
+
+    const cardIds = await browser.eval('[...document.querySelectorAll(".question-card")].map((c) => c.dataset.question)');
+    const answeredIds = await browser.eval('[...document.querySelectorAll(".answered")].map((c) => c.dataset.question)');
+    check('U9 a run shows its open questions as cards and the answered ones below', JSON.stringify(cardIds) === '["Q1","Q2"]' && JSON.stringify(answeredIds) === '["Q3"]', `${cardIds} / ${answeredIds}`);
+    const why = await browser.eval('document.querySelector(\'[data-question="Q1"] .question-text\').textContent');
+    check('U10 SECURITY markup in a question stays text', !(await browser.eval('window.__pwned === 2')) && why.includes('<img') && why.includes('**bold**'), why);
+
+    const ready = () => browser.eval('document.querySelector(".send-bar .muted").textContent');
+    const sendDisabled = () => browser.eval('document.querySelector(".send-bar button").disabled');
+    await browser.eval('document.querySelectorAll(\'[data-question="Q1"] .toggle\')[3].click()');
+    check('U11 "Explain" without saying what is not ready to send', /0 answers ready/.test(await ready()) && (await sendDisabled()), await ready());
+    await browser.eval('document.querySelectorAll(\'[data-question="Q2"] input[type=radio]\')[1].click()');
+    await browser.eval(`(() => { const box = document.querySelector('[data-question="Q1"] textarea'); box.value = 'Why not files?'; box.dispatchEvent(new Event('input')); })()`);
+    check('U12 picking an option and asking in words make two answers ready', /2 answers ready/.test(await ready()) && !(await sendDisabled()), await ready());
+
+    const draftFile = path.join(TEST_HOME, 'task-flow', 'panel', 'drafts', key, 'invoices.json');
+    await sleep(900);
+    const draft = fs.existsSync(draftFile) ? JSON.parse(fs.readFileSync(draftFile, 'utf8')) : null;
+    check('U13 answers are kept as a draft on the server as they are typed', draft && draft.answers.Q2.choice === 'usd' && draft.answers.Q1.comment === 'Why not files?', JSON.stringify(draft));
+
+    await browser.eval('document.querySelector(".send-bar button").click()');
+    await until(browser, '!!document.querySelector("dialog[open]")');
+    // Two clicks on "Send", as fast as a double click.
+    await browser.eval('(() => { const buttons = document.querySelectorAll("dialog[open] .dialog-footer button"); const send = buttons[buttons.length - 1]; send.click(); send.click(); })()');
+    await until(browser, '!document.querySelector("dialog[open]") && document.querySelectorAll(".sent-note").length === 2');
+    const answersDir = path.join(TEST_HOME, 'task-flow', 'answers', key, 'invoices');
+    const files = fs.existsSync(answersDir) ? fs.readdirSync(answersDir) : [];
+    check('U14 "Send to agent" writes one submission, even on a double click', files.length === 1, files.join());
+    const submission = files.length ? JSON.parse(fs.readFileSync(path.join(answersDir, files[0]), 'utf8')) : null;
+    check('U15 it holds exactly the two answers', submission && JSON.stringify(submission.answers) === JSON.stringify([
+      { questionId: 'Q1', status: 'explain', comment: 'Why not files?' },
+      { questionId: 'Q2', status: 'ok', choice: 'usd' },
+    ]), JSON.stringify(submission && submission.answers));
+    check('U16 the sent questions say they wait for task-flow, and the draft is gone', (await browser.eval('document.querySelectorAll(".sent-note").length')) === 2 && !fs.existsSync(draftFile));
+    check('U17 still no console error', browser.problems.length === 0, browser.problems.join(' | '));
   } finally {
     await browser.close();
     await panel.close();

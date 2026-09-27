@@ -5,7 +5,7 @@ commit `755d1b24ccb09aa8d3663774e0a83d99d24cdc4c`, and have been adapted for the
 task-flow panel since:
 
 - `fsutil.mjs` — from `engine/lib/fsutil.mjs`
-- `public/js/dom.js`, `md.js`, `icons.js`, `ui.js`, `i18n.js` — from `engine/public/js/`
+- `public/js/dom.js`, `icons.js`, `ui.js`, `i18n.js` — from `engine/public/js/`
 - `public/css/tokens.css`, `base.css`, `components.css`, `fonts.css` — from `engine/public/css/`
 - the local-server protections in `server.mjs` (loopback only, Host and Origin
   checks, body limit, next free port) — after `engine/server.mjs`
@@ -38,5 +38,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-The Geist and Geist Mono fonts in `public/fonts/` are distributed under the SIL
-Open Font License 1.1; see `public/fonts/OFL.txt`.
+The Lucide icons in `public/js/icons.js` (ISC, some also MIT via Feather) and the
+Geist and Geist Mono fonts in `public/fonts/` (SIL Open Font License 1.1) keep their
+own licenses, reproduced in `public/THIRD_PARTY.md` and `public/fonts/OFL.txt`.

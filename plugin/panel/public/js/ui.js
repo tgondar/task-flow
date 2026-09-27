@@ -177,7 +177,7 @@ export function separator(vertical = false) {
 
 // --- Dialog and sheet: native <dialog>, which handles focus and the Escape key ----------------------
 
-export function dialog({ title, description, content, actions, closeLabel = "Fermer", onClose } = {}) {
+export function dialog({ title, description, content, actions, closeLabel = "Close", onClose } = {}) {
   const el = h("dialog", { class: "dialog", "aria-labelledby": "dialog-title" });
   const close = () => el.close();
   const inner = h("div", { class: "dialog-inner" },
@@ -197,7 +197,7 @@ export function dialog({ title, description, content, actions, closeLabel = "Fer
   return { el, close };
 }
 
-export function sheet({ title, description, content, side = "left", closeLabel = "Fermer" } = {}) {
+export function sheet({ title, description, content, side = "left", closeLabel = "Close" } = {}) {
   const body = h("div", { class: "sheet-body" });
   const el = h("dialog", { class: cx("sheet", side === "right" && "right"), "aria-label": title },
     h("div", { class: "sheet-inner" },

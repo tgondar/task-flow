@@ -1,5 +1,5 @@
 // Lucide icons (https://lucide.dev), a subset vendored from lucide-static@1.48.0.
-// ISC license — see engine/public/THIRD_PARTY.md. To regenerate: see the comment at the end of the file.
+// ISC license — see public/THIRD_PARTY.md. To regenerate: see the comment at the end of the file.
 export const ICONS = {
   "check": '<path d="M20 6 9 17l-5-5"/>',
   "x": '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
