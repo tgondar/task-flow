@@ -211,6 +211,7 @@ node tests/answers.test.js
 node tests/panel-feed.test.js
 node tests/panel-server.test.js
 node tests/panel-launch.test.js
+node tests/panel-flow.test.js
 node tests/panel.smoke.js  # headless Edge/Chrome; skipped without one
 bash tests/gate.e2e.sh     # real claude -p sessions; needs the CLI on PATH
 bash tests/stop.e2e.sh

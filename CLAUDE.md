@@ -21,6 +21,7 @@ node tests/answers.test.js
 node tests/panel-feed.test.js
 node tests/panel-server.test.js
 node tests/panel-launch.test.js
+node tests/panel-flow.test.js
 node tests/panel.smoke.js      # headless Edge/Chrome over CDP; skipped without one
 claude plugin validate .
 ```
