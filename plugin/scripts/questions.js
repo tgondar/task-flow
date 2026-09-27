@@ -371,6 +371,7 @@ function renderQuestionsMarkdown(data, { lang = 'en', created } = {}) {
 
 module.exports = {
   LIMITS,
+  CONTROL,
   QUESTION_ID,
   OPTION_ID,
   SUBMISSION_ID,
