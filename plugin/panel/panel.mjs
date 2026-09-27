@@ -17,7 +17,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
-import { DEFAULT_PORT, startPanel } from "./server.mjs";
+import { DEFAULT_PORT, panelToken, startPanel } from "./server.mjs";
 
 const require = createRequire(import.meta.url);
 const { homePath } = require("../scripts/config.js");
@@ -52,7 +52,10 @@ async function running() {
     return null;
   }
   try {
-    const response = await fetch(`http://127.0.0.1:${info.port}/api/projects`, { signal: AbortSignal.timeout(1500) });
+    const response = await fetch(`http://127.0.0.1:${info.port}/api/projects`, {
+      signal: AbortSignal.timeout(1500),
+      headers: { "X-Panel-Token": panelToken() },
+    });
     const body = await response.json();
     if (response.ok && Array.isArray(body.projects)) return `http://127.0.0.1:${info.port}/`;
   } catch {
@@ -61,7 +64,10 @@ async function running() {
   return null;
 }
 
+/** Opens the page with the panel's token in the address (#t=...): the page keeps
+ *  it and takes it out of the address at once (public/js/panel.js). */
 function openInBrowser(url) {
+  url = `${url}#t=${panelToken()}`;
   const [command, args] =
     process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : process.platform === "darwin" ? ["open", [url]] : ["xdg-open", [url]];
   spawn(command, args, { stdio: "ignore", detached: true }).unref();

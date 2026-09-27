@@ -1,4 +1,5 @@
 // Small file helpers shared by the server and the CLI.
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, rename, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
@@ -6,7 +7,8 @@ import path from "node:path";
 // Two-step write: a truncated file never replaces the good one.
 export async function writeAtomic(file, text) {
   await mkdir(path.dirname(file), { recursive: true });
-  const temp = `${file}.${process.pid}.tmp`;
+  // A temp name per write: two writes of one file at once must not share one.
+  const temp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   await writeFile(temp, text, "utf8");
   await rename(temp, file);
 }

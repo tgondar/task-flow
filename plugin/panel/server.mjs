@@ -18,10 +18,16 @@
 // NOTICE.md) and tightened, because what is written here reaches the model:
 //   - it listens on 127.0.0.1 only, and refuses any Host but its own (421), so a
 //     page elsewhere cannot reach it through DNS rebinding;
-//   - a write needs an Origin, and it must be this server's (403): a browser
-//     always sends one on a cross-site POST, so a page elsewhere cannot answer
-//     for the user; a local program that sends none gets nothing here it could
-//     not already do by writing a file;
+//   - every API call needs the panel's token (401), a random value kept in
+//     <home>/panel/token, which only this user can read. Loopback is not enough:
+//     another account on the same machine, or a tool confined to its own
+//     project but allowed onto localhost, can reach 127.0.0.1 - without the
+//     token it can neither read the runs nor answer for the user. The page gets
+//     the token once, in the address panel.mjs --open builds (#t=...), and keeps
+//     it in the browser. Only the change notifications (/api/events) go without
+//     it: they carry nothing but "something changed";
+//   - a write also needs this server's Origin (403): a browser always sends one
+//     on a cross-site POST, so a page elsewhere cannot answer for the user;
 //   - a write must be JSON, of bounded size;
 //   - every response forbids framing and sniffing, and the page may load only
 //     its own scripts (Content-Security-Policy, no inline script);
@@ -31,7 +37,7 @@
 //     (answers.js checkSubmission), so the panel can never write one that the
 //     pipeline would refuse - and nothing here can write an approval.
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import fs from "node:fs";
 import { readFile, rm } from "node:fs/promises";
@@ -95,9 +101,40 @@ export function panelPaths(options) {
     panel: homePath(["panel"], options),
     drafts: homePath(["panel", "drafts"], options),
     registry: homePath(["panel", "server.json"], options),
+    token: homePath(["panel", "token"], options),
     feed: homePath(["feed"], options),
   };
 }
+
+/** The panel's token: created once, then the same across restarts, so a page the
+ *  user bookmarked keeps working. 32 random bytes, hex. Written with "wx" so two
+ *  panels starting at once cannot each write their own. */
+export function panelToken(options) {
+  const file = panelPaths(options).token;
+  const read = () => {
+    const value = fs.readFileSync(file, "utf8").trim();
+    if (!/^[0-9a-f]{64}$/.test(value)) throw new Error("the panel token file is not a token");
+    return value;
+  };
+  try {
+    return read();
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  try {
+    fs.writeFileSync(file, randomBytes(32).toString("hex") + "\n", { flag: "wx" });
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+  }
+  return read();
+}
+
+const sameToken = (given, expected) => {
+  const a = Buffer.from(String(given ?? ""));
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+};
 
 /**
  * Starts the panel. Tries the next ports when the first is taken; `port: 0` lets
@@ -107,6 +144,7 @@ export function panelPaths(options) {
 export async function startPanel({ port = DEFAULT_PORT, quiet = false, register = true, env } = {}) {
   const options = env ? { env } : undefined;
   const paths = panelPaths(options); // throws on a link: the panel does not start
+  const token = panelToken(options);
   const sent = new Map(); // clientToken -> submissionId, so a double click writes once
 
   let listening = port;
@@ -136,6 +174,9 @@ export async function startPanel({ port = DEFAULT_PORT, quiet = false, register 
   }
 
   async function api(req, res, url, pathname) {
+    if (pathname !== "/api/events" && !sameToken(req.headers["x-panel-token"], token)) {
+      throw httpError(401, "the panel's token is missing or wrong - open the panel with panel.mjs --open");
+    }
     if (req.method !== "GET") {
       const origin = req.headers.origin;
       if (origin !== `http://${HOST}:${listening}` && origin !== `http://localhost:${listening}`) {
@@ -204,7 +245,6 @@ export async function startPanel({ port = DEFAULT_PORT, quiet = false, register 
 
   function projectsView() {
     const projects = readFeeds(options);
-    for (const project of projects) clearConsumed(project);
     return projects.map((project) =>
       project.unreadable
         ? { projectKey: project.projectKey, unreadable: true }
@@ -296,13 +336,23 @@ export async function startPanel({ port = DEFAULT_PORT, quiet = false, register 
     const dir = homePath(["answers", project.projectKey, run.slug], options);
     await writeAtomic(path.join(dir, `${submissionId}.json`), raw);
     sent.set(`${project.projectKey}/${run.slug}/${body.clientToken}`, submissionId);
+    if (sent.size > 500) sent.delete(sent.keys().next().value); // oldest first
     await rm(draftFile(project.projectKey, run.slug), { force: true });
     return { submissionId };
   }
 
   /** The panel's own clean-up: a submission task-flow has taken in (its id is in
    *  the run's consumedSubmissions, as the feed shows) is no longer needed. Only
-   *  file names of the panel's own shape are touched. */
+   *  file names of the panel's own shape are touched. It runs on a timer, never
+   *  on a request: a GET must not delete anything. */
+  function sweep() {
+    try {
+      for (const project of readFeeds(options)) clearConsumed(project);
+    } catch {
+      /* the next sweep tries again */
+    }
+  }
+
   function clearConsumed(project) {
     if (project.unreadable) return;
     for (const run of project.runs) {
@@ -386,9 +436,16 @@ export async function startPanel({ port = DEFAULT_PORT, quiet = false, register 
       /* nothing to clean up */
     }
   };
-  const close = () => new Promise((resolve) => server.close(() => cleanup().then(resolve)));
+  sweep();
+  const sweeper = setInterval(sweep, 30000);
+  sweeper.unref();
+  const close = () =>
+    new Promise((resolve) => {
+      clearInterval(sweeper);
+      server.close(() => cleanup().then(resolve));
+    });
   if (!quiet) console.log(`task-flow panel: ${url}`);
-  return { server, port: listening, url, close };
+  return { server, port: listening, url, token, close, sweep };
 }
 
 async function sendFile(res, file) {

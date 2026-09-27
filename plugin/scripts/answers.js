@@ -64,19 +64,16 @@ function openRun(projectDir, slug) {
   const runDir = path.join(loaded.config.stateDir, slug);
   const file = path.join(runDir, 'questions.json');
   if (!isInside(loaded.config.stateDir, file)) throw new Error('the run folder leaves stateDir');
-  return { loaded, file };
+  return { loaded, file, stateDir: loaded.config.stateDir, slug };
 }
 
-function readQuestions(file) {
-  let data;
-  try {
-    data = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
-  } catch (error) {
-    throw new Error(error.code === 'ENOENT' ? 'this run has no questions.json' : 'questions.json is not valid JSON');
-  }
-  const checked = questionsData.validateQuestions(data);
-  if (!checked.ok) throw new Error(`questions.json: ${checked.errors.slice(0, 5).join('; ')}`);
-  return data;
+/** The run's questions, through the one safe reader (questions.js): a plain file
+ *  of bounded size in its run folder, valid, naming this run. */
+function readQuestions({ file, stateDir, slug }) {
+  const read = questionsData.readQuestionsFile(file, stateDir, slug);
+  if (!read.exists) throw new Error('this run has no questions.json');
+  if (read.errors.length) throw new Error(read.errors.slice(0, 5).join('; '));
+  return read.data;
 }
 
 /** The submissions the panel left for this run, oldest first. Only file names of
@@ -106,7 +103,7 @@ function listSubmissions(projectDir, slug) {
 function checkSubmission({ raw, id, projectDir, slug, data }) {
   let sub;
   try {
-    sub = JSON.parse(raw.replace(/^﻿/, ''));
+    sub = JSON.parse(raw.replace(/^\uFEFF/, ''));
   } catch {
     return { ok: false, why: 'not valid JSON' };
   }
@@ -179,8 +176,9 @@ function writeAtomic(file, text) {
  */
 function consume({ projectDir, slug }) {
   const root = path.resolve(projectDir);
-  const { file } = openRun(root, slug);
-  const data = readQuestions(file);
+  const run = openRun(root, slug);
+  const { file } = run;
+  const data = readQuestions(run);
   const consumed = new Set(data.consumedSubmissions || []);
   const outcome = { taken: [], explanations: [], notTaken: [], rejected: [] };
 
@@ -268,8 +266,7 @@ function report(slug, outcome) {
  */
 function hasNewAnswers({ projectDir, slug }) {
   const root = path.resolve(projectDir);
-  const { file } = openRun(root, slug);
-  const data = readQuestions(file);
+  const data = readQuestions(openRun(root, slug));
   const consumed = new Set(data.consumedSubmissions || []);
   for (const { id, file: subFile } of listSubmissions(root, slug).files) {
     if (consumed.has(id)) continue;

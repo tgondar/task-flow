@@ -10,8 +10,32 @@ import { renderHome } from "./home.js";
 
 const app = document.getElementById("app");
 
-export async function getJson(url, options) {
-  const response = await fetch(url, options);
+// The panel's token (server.mjs): every API call carries it. The page gets it
+// once, in the address panel.mjs --open builds - #t=<token> - and keeps it in
+// this browser, so a bookmark of the plain address keeps working. It is taken
+// out of the address at once, so it is not left in the history or on screen.
+const TOKEN_KEY = "task-flow-panel:token";
+function takeToken() {
+  const match = /^#t=([0-9a-f]{64})$/.exec(location.hash);
+  if (match) {
+    try {
+      localStorage.setItem(TOKEN_KEY, match[1]);
+    } catch {
+      /* storage blocked: the token lives for this page only */
+    }
+    history.replaceState(null, "", location.pathname);
+    return match[1];
+  }
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+const token = takeToken();
+
+export async function getJson(url, options = {}) {
+  const response = await fetch(url, { ...options, headers: { ...(options.headers ?? {}), "X-Panel-Token": token ?? "" } });
   let body = null;
   try {
     body = await response.json();
@@ -64,6 +88,10 @@ async function boot() {
     return;
   }
   document.title = t("app.title");
+  if (!token) {
+    app.replaceChildren(h("h1", {}, t("app.title")), h("p", { class: "empty", role: "alert" }, t("app.noToken")));
+    return;
+  }
   window.addEventListener("hashchange", route);
   await route();
   listen();

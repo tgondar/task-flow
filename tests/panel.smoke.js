@@ -69,7 +69,13 @@ async function until(browser, expression, ms = 5000) {
   const browser = await openBrowser({ width: 1200, height: 900 });
   try {
     await browser.goto(panel.url, 800);
+    const noKey = await until(browser, 'document.querySelector(".empty") && document.querySelector(".empty").textContent');
+    check('U0 SECURITY a browser without the key is told how to get it, and sees no run', /does not have the panel's key/.test(noKey || '') && (await browser.eval('document.querySelectorAll(".run-row").length')) === 0, noKey);
+    // A new document, not a hash change: the page reads the key when it loads.
+    await browser.goto("about:blank", 100);
+    await browser.goto(`${panel.url}#t=${panel.token}`, 800);
     await until(browser, 'document.querySelectorAll(".run-row").length === 3');
+    check('U0b the key is taken out of the address at once', (await browser.eval('location.hash')) === '', await browser.eval('location.href'));
 
     const rows = await browser.eval('[...document.querySelectorAll(".run-row")].map((row) => row.dataset.slug)');
     check('U1 the home view lists every run, waiting ones first', JSON.stringify(rows) === JSON.stringify(['pdf-cleanup', 'invoices', 'old-report']), JSON.stringify(rows));

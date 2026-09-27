@@ -129,7 +129,7 @@ export function sortRuns(runs) {
 export function parseFeed(raw, key) {
   let data;
   try {
-    data = JSON.parse(String(raw).replace(/^﻿/, ""));
+    data = JSON.parse(String(raw).replace(/^\uFEFF/, ""));
   } catch {
     return { projectKey: key, unreadable: true };
   }

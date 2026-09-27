@@ -772,8 +772,9 @@ function placeDocument({ liveDir, archiveDir, fileName, slug, body, archive, tai
  * questions/ while anything is open or the run is alive, moved to
  * questions/resolved/ once the run is finished and nothing is open.
  */
-function renderQuestions({ file, docsDir, slug, prefix, isDone, lang }) {
-  if (!exists(file)) return { used: false };
+function renderQuestions({ file, stateDir, docsDir, slug, prefix, isDone, lang }) {
+  const read = questionsData.readQuestionsFile(file, stateDir, slug);
+  if (!read.exists) return { used: false };
   const liveDir = path.join(docsDir, QUESTIONS_DIR);
   const archiveDir = path.join(liveDir, QUESTIONS_ARCHIVE);
   const fileName = `${prefix}_${slug}${QUESTIONS_SUFFIX}`;
@@ -785,17 +786,11 @@ function renderQuestions({ file, docsDir, slug, prefix, isDone, lang }) {
     return { used: true, file: null, open: 0 };
   };
 
-  let data;
-  try {
-    data = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
-  } catch {
-    return { ...previous(), error: 'questions.json is not valid JSON' };
+  if (read.errors.length) {
+    const why = read.errors.slice(0, 10).join('; ').replace(/; questions\.json: /g, '; ');
+    return { ...previous(), error: why };
   }
-  const checked = questionsData.validateQuestions(data);
-  if (!checked.ok) {
-    return { ...previous(), error: `questions.json: ${checked.errors.slice(0, 10).join('; ')}` };
-  }
-  if (data.slug !== slug) return { ...previous(), error: 'questions.json: slug does not match the run folder' };
+  const data = read.data;
 
   const open = questionsData.openCount(data);
   const created = `20${prefix.slice(0, 2)}-${prefix.slice(2, 4)}-${prefix.slice(4, 6)}`;
@@ -849,18 +844,11 @@ function feedRun({ entry, state, stateRoot, docsDir, statePath }) {
   // The questions go in whole when the run keeps them as data - the panel turns
   // them into cards - and only as a count when they are a page written by hand.
   let questions;
-  const questionsFile = path.join(stateRoot, entry, 'questions.json');
-  if (exists(questionsFile)) {
-    let data = null;
-    try {
-      data = JSON.parse(fs.readFileSync(questionsFile, 'utf8').replace(/^﻿/, ''));
-    } catch {
-      data = null;
-    }
-    questions =
-      data && questionsData.validateQuestions(data).ok && data.slug === entry
-        ? { source: 'json', items: data.items, consumedSubmissions: data.consumedSubmissions || [] }
-        : { source: 'invalid' };
+  const read = questionsData.readQuestionsFile(path.join(stateRoot, entry, 'questions.json'), stateRoot, entry);
+  if (read.exists) {
+    questions = read.data
+      ? { source: 'json', items: read.data.items, consumedSubmissions: read.data.consumedSubmissions || [] }
+      : { source: 'invalid' };
   } else {
     const legacy = findQuestionsFile(docsDir, entry, state);
     questions = { source: 'legacy', open: legacy ? countOpenQuestions(legacy.file) : 0 };
@@ -1002,6 +990,7 @@ function renderAll({ projectDir, docsDir, slug } = {}) {
       let openQuestions = 0;
       const structured = renderQuestions({
         file: path.join(stateRoot, entry, 'questions.json'),
+        stateDir: stateRoot,
         docsDir: targetDocs,
         slug: entry,
         prefix,

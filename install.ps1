@@ -58,7 +58,9 @@ if ($RemovePanel) {
         try {
             $info = Get-Content -Raw -Path $registry | ConvertFrom-Json
             $process = Get-Process -Id ([int]$info.pid) -ErrorAction Stop
-            if ($process.ProcessName -eq 'node') {
+            # A process id can be reused: stop it only if it is node running panel.mjs.
+            $commandLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)").CommandLine
+            if ($process.ProcessName -eq 'node' -and $commandLine -like '*panel.mjs*') {
                 Stop-Process -Id $process.Id -Force
                 Write-Output "Stopped the panel (process $($process.Id))."
             }
@@ -129,7 +131,10 @@ if (-not $NoPanel) {
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
         Register-ScheduledTask -TaskName $panelTask -Action $action -Trigger $trigger -Settings $settings -Description 'task-flow panel: the runs on this machine and the questions waiting for you, on http://127.0.0.1:5190/' -Force | Out-Null
         Start-ScheduledTask -TaskName $panelTask
-        Write-Output "Registered and started the panel: http://127.0.0.1:5190/ (remove it with -RemovePanel)."
+        # Open it once through panel.mjs: that hands this browser the panel's key.
+        Start-Sleep -Seconds 2
+        & $node $panelScript --open
+        Write-Output "Registered and started the panel (remove it with -RemovePanel). Open it again any time with: node '$panelScript' --open"
     }
 }
 

@@ -472,16 +472,19 @@ for (const value of [true, 1, { by: 'me' }, ['me']]) {
 // it must still count as code.
 {
   const root = makeProject({ approved: false });
-  const q = (...parts) => payloadFor(root, win(root, '.claude', 'task-flow', ...parts), { content: '{"version":1}' });
+  // A valid questions file for run "demo" (makeProject gives it a state.json).
+  const VALID = JSON.stringify({ version: 1, slug: 'demo', items: [{ id: 'Q1', kind: 'question', title: 'Which currency?' }] });
+  const q = (...parts) => payloadFor(root, win(root, '.claude', 'task-flow', ...parts), { content: VALID });
 
   check('T29a an unapproved run may write its questions.json', ALLOW, runGate(root, q('demo', 'questions.json')));
   check('T29b in any casing, with forward slashes', ALLOW,
-    runGate(root, payloadFor(root, `${root.replace(/\\/g, '/')}/.claude/Task-Flow/DEMO/Questions.JSON`, { content: '{}' })));
+    runGate(root, payloadFor(root, `${root.replace(/\\/g, '/')}/.claude/Task-Flow/DEMO/Questions.JSON`, { content: VALID })));
   check('T29c a relative path to it', ALLOW,
-    runGate(root, payloadFor(root, '.claude/task-flow/demo/questions.json', { content: '{}' })));
-  check('T29d an Edit of it', ALLOW,
+    runGate(root, payloadFor(root, '.claude/task-flow/demo/questions.json', { content: VALID })));
+  fs.writeFileSync(path.join(root, '.claude', 'task-flow', 'demo', 'questions.json'), VALID);
+  check('T29d an Edit of it that keeps it valid', ALLOW,
     runGate(root, payloadFor(root, win(root, '.claude', 'task-flow', 'demo', 'questions.json'), {
-      tool: 'Edit', content: undefined, extra: { old_string: '1', new_string: '2' },
+      tool: 'Edit', content: null, extra: { old_string: 'Which currency?', new_string: 'Which currency on invoices?' },
     })));
 
   check('T29e SECURITY stateDir/questions.json (no run folder) is code', BLOCK, runGate(root, q('questions.json')));
@@ -503,6 +506,27 @@ for (const value of [true, 1, { by: 'me' }, ['me']]) {
     })));
   check('T29n SECURITY and writing code still needs approval after a questions.json write', BLOCK,
     runGate(root, payloadFor(root, win(root, 'src', 'app.js'))));
+
+  // The content is judged too: the path alone would let any JSON through.
+  const at = win(root, '.claude', 'task-flow', 'demo', 'questions.json');
+  check('T29o SECURITY text that is not JSON is blocked', BLOCK, runGate(root, payloadFor(root, at, { content: 'module.exports = 1;' })));
+  check('T29p SECURITY JSON of another shape is blocked', BLOCK, runGate(root, payloadFor(root, at, { content: '{"name":"app","dependencies":{}}' })));
+  check('T29q SECURITY a questions file naming another run is blocked', BLOCK,
+    runGate(root, payloadFor(root, at, { content: VALID.replace('"slug":"demo"', '"slug":"other"') })));
+  check('T29r SECURITY an approvedBy smuggled into questions.json is blocked', BLOCK,
+    runGate(root, payloadFor(root, at, { content: VALID.replace('"version":1', '"version":1,"approvedBy":"me"') })));
+  check('T29s SECURITY an Edit that would break it is blocked', BLOCK,
+    runGate(root, payloadFor(root, at, { tool: 'Edit', content: null, extra: { old_string: '"version":1', new_string: '"version":2' } })));
+  check('T29t SECURITY an Edit that cannot be replayed is blocked', BLOCK,
+    runGate(root, payloadFor(root, at, { tool: 'Edit', content: null, extra: { old_string: 'not in the file', new_string: 'x' } })));
+  fs.mkdirSync(path.join(root, '.claude', 'task-flow', 'nostate'), { recursive: true });
+  check('T29u SECURITY a run folder without a state.json is not a run', BLOCK,
+    runGate(root, payloadFor(root, win(root, '.claude', 'task-flow', 'nostate', 'questions.json'), { content: VALID.replace('"slug":"demo"', '"slug":"nostate"') })));
+
+  // A stateDir among code: the exemption must not open it to other JSON.
+  const code = makeProject({ approved: false, stateDir: 'src' });
+  check('T29v SECURITY with stateDir "src", a JSON file named questions.json that is not one is still code', BLOCK,
+    runGate(code, payloadFor(code, win(code, 'src', 'demo', 'questions.json'), { content: '{"i18n":{"en":"Hello"}}' })));
 }
 
 // --- report ---------------------------------------------------------------

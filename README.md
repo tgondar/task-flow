@@ -168,8 +168,9 @@ Know what you are installing:
   from a run's `state.json` is echoed back to the model by the hooks.
 - **The panel has no way into the documentation.** It reads only the per-project
   summaries task-flow leaves for it, writes only answer files in its own folder,
-  listens on `127.0.0.1` only, refuses foreign `Host` headers and cross-site
-  writes, and cannot approve a run. An answer reaches the model as data, after
+  listens on `127.0.0.1` only, answers only callers holding its key (kept in
+  your local folder; `panel.mjs --open` hands it to your browser once), refuses
+  foreign `Host` headers and cross-site writes, and cannot approve a run. An answer reaches the model as data, after
   `answers.js` has checked it against the run's open questions.
 - **The approval gate is a guardrail, not a sandbox.** It stops code being written
   by drift before a plan is approved. It does not stop an agent determined to get

@@ -40,6 +40,11 @@ const DATE = /^\d{4}-\d{2}-\d{2}$/;
 /** How long each kind of text may be. Over the limit is an error, not a silent
  *  cut: a cut answer is a different answer. */
 const LIMITS = { title: 300, label: 200, text: 2000, comment: 4000, list: 50 };
+const MAX_ERRORS = 20;
+
+/** Far above any real file (50 items of bounded text), far below what could slow
+ *  a hook down: the renderer runs on every turn, from the Stop hook. */
+const MAX_FILE_BYTES = 1024 * 1024;
 
 /** Line breaks and tabs are fine in prose; every other control character is a
  *  way to make a terminal or a page show something that is not in the file. That
@@ -52,12 +57,17 @@ const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u2027-\u20
 
 function validator() {
   const errors = [];
-  const fail = (where, what) => errors.push(`${where}: ${what}`);
+  // Twenty errors say everything useful about a file; a file built to produce a
+  // million of them must not get to spend the memory.
+  const fail = (where, what) => {
+    if (errors.length < MAX_ERRORS) errors.push(`${where}: ${what}`);
+  };
 
   const onlyKeys = (value, where, allowed) => {
     for (const key of Object.keys(value)) {
-      // A key is text too: named only when it looks like an ordinary field name.
-      if (!allowed.includes(key)) fail(where, /^[A-Za-z0-9_]{1,40}$/.test(key) ? `unknown field "${key}"` : 'unknown field');
+      // A key is text someone else chose, and this message reaches the model:
+      // it is never repeated, only counted.
+      if (!allowed.includes(key)) fail(where, 'has a field that is not part of the format');
     }
   };
   const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -92,7 +102,12 @@ function validator() {
       fail(where, 'must be a list');
       return [];
     }
-    if (value.length > LIMITS.list) fail(where, `has more than ${LIMITS.list} entries`);
+    // Over the limit is an error, and only the first entries are looked at: a
+    // list of a million items must not be walked to find that out.
+    if (value.length > LIMITS.list) {
+      fail(where, `has more than ${LIMITS.list} entries`);
+      return value.slice(0, LIMITS.list);
+    }
     return value;
   };
 
@@ -205,7 +220,10 @@ function validateQuestions(data) {
   if (data.consumedSubmissions !== undefined && !Array.isArray(data.consumedSubmissions)) {
     v.fail('consumedSubmissions', 'must be a list');
   }
-  (Array.isArray(data.consumedSubmissions) ? data.consumedSubmissions : []).forEach((id, i) =>
+  if (Array.isArray(data.consumedSubmissions) && data.consumedSubmissions.length > 10000) {
+    v.fail('consumedSubmissions', 'has more than 10000 entries');
+  }
+  (Array.isArray(data.consumedSubmissions) ? data.consumedSubmissions.slice(0, 10000) : []).forEach((id, i) =>
     v.pattern(id, `consumedSubmissions[${i}]`, SUBMISSION_ID, 'a submission id', { required: true })
   );
 
@@ -281,14 +299,15 @@ const STRINGS = {
  *  a heading, a list item, a block quote, a table row - and above all a new
  *  `- [ ]`, which is what the renderer counts as an open question. What can act
  *  in the middle of a line - emphasis, a link, an HTML tag, a table cell, a code
- *  span - is escaped with a backslash rather than removed, because this is the
- *  user's own answer and it should read as they wrote it. */
+ *  span, a markdown viewer's comment (%%) or highlight (==) marker - is escaped with a backslash
+ *  rather than removed, because this is the user's own answer and it should read
+ *  as they wrote it. */
 function inline(value) {
   if (typeof value !== 'string') return '';
   return value
     .replace(/\s+/g, ' ')
     .trim()
-    .replace(/[\\`*_[\]<>|~#]/g, (c) => `\\${c}`);
+    .replace(/[\\`*_[\]<>|~#%=]/g, (c) => `\\${c}`);
 }
 
 const when = (iso) => (typeof iso === 'string' ? iso.slice(0, 16).replace('T', ' ') : '');
@@ -369,7 +388,41 @@ function renderQuestionsMarkdown(data, { lang = 'en', created } = {}) {
   ].join('\n');
 }
 
+/**
+ * Reads a run's questions.json the one safe way: a plain file (not a link, not a
+ * FIFO or a device a repository could put there), directly in its run folder
+ * under stateDir, no bigger than MAX_FILE_BYTES - checked before a byte is read.
+ * Returns `{ exists, data, errors }`: `exists` false when there is no file;
+ * `errors` non-empty when it cannot be used, in terms of fields, never values.
+ */
+function readQuestionsFile(file, stateDir, slug) {
+  const fs = require('fs');
+  const path = require('path');
+  const { crossesLink } = require('./config.js');
+  let stats;
+  try {
+    stats = fs.lstatSync(file);
+  } catch {
+    return { exists: false, data: null, errors: [] };
+  }
+  if (crossesLink(stateDir, file) || !stats.isFile()) return { exists: true, data: null, errors: ['questions.json is not a plain file'] };
+  if (path.dirname(path.dirname(file)) !== path.resolve(stateDir)) return { exists: true, data: null, errors: ['questions.json is not in its run folder'] };
+  if (stats.size > MAX_FILE_BYTES) return { exists: true, data: null, errors: [`questions.json is larger than ${MAX_FILE_BYTES} bytes`] };
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+  } catch {
+    return { exists: true, data: null, errors: ['questions.json is not valid JSON'] };
+  }
+  const checked = validateQuestions(data);
+  if (!checked.ok) return { exists: true, data: null, errors: checked.errors.map((e) => `questions.json: ${e}`) };
+  if (data.slug !== slug) return { exists: true, data: null, errors: ['questions.json: slug does not match the run folder'] };
+  return { exists: true, data, errors: [] };
+}
+
 module.exports = {
+  MAX_FILE_BYTES,
+  readQuestionsFile,
   LIMITS,
   CONTROL,
   QUESTION_ID,

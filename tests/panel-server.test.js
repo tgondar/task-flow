@@ -77,11 +77,11 @@ function tree(root) {
   const base = `127.0.0.1:${panel.port}`;
   const origin = `http://${base}`;
 
-  function request(method, url, { host = base, headers = {}, body } = {}) {
+  function request(method, url, { host = base, headers = {}, body, token = panel.token } = {}) {
     return new Promise((resolve) => {
       const data = body === undefined ? null : typeof body === 'string' ? body : JSON.stringify(body);
       const req = http.request(
-        { host: '127.0.0.1', port: panel.port, method, path: url, headers: { Host: host, ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {}), ...headers } },
+        { host: '127.0.0.1', port: panel.port, method, path: url, headers: { Host: host, ...(token ? { 'X-Panel-Token': token } : {}), ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {}), ...headers } },
         (res) => {
           const chunks = [];
           res.on('data', (c) => chunks.push(c));
@@ -180,7 +180,9 @@ function tree(root) {
   fs.writeFileSync(path.join(HOME, 'feed', `${key}.json`), JSON.stringify(consumed));
   fs.writeFileSync(path.join(answersDir, 'notes.txt'), 'not ours');
   await request('GET', '/api/projects');
-  check('S26 a consumed submission is cleared by the panel; other files are left alone', !fs.existsSync(path.join(answersDir, files[0])) && fs.existsSync(path.join(answersDir, 'notes.txt')), fs.readdirSync(answersDir).join());
+  check('S26a SECURITY a GET deletes nothing, not even a consumed submission', fs.existsSync(path.join(answersDir, files[0])));
+  panel.sweep();
+  check('S26 a consumed submission is cleared by the sweep of the panel; other files are left alone', !fs.existsSync(path.join(answersDir, files[0])) && fs.existsSync(path.join(answersDir, 'notes.txt')), fs.readdirSync(answersDir).join());
 
   // --- where it wrote ---------------------------------------------------------------
 
@@ -189,7 +191,27 @@ function tree(root) {
   check('S27 SECURITY it wrote only under answers/ and panel/ (and the test wrote the feed)', newOrChanged.every((file) => /^(answers|panel|feed)[\\/]/.test(file)), newOrChanged.join());
   check('S28 SECURITY it wrote nothing in the project or the docs folder', JSON.stringify(tree(docsDir)) === JSON.stringify(before.docs) && JSON.stringify(tree(projectDir)) === JSON.stringify(before.project));
 
+  // --- the token ---------------------------------------------------------------------
+  check('S31 SECURITY without the token, the API gives nothing: not the runs, not a run, no send', [
+    (await request('GET', '/api/projects', { token: null })).status,
+    (await request('GET', runUrl('run'), { token: null })).status,
+    (await request('POST', runUrl('submit'), { token: null, body: { answers: [{ questionId: 'Q2', status: 'ok' }], clientToken: 'token-none' }, headers: { Origin: origin, 'Content-Type': 'application/json' } })).status,
+  ].every((status) => status === 401));
+  const wrong = await request('GET', '/api/projects', { token: 'f'.repeat(64) });
+  check('S32 SECURITY a wrong token is refused, and the refusal carries no data', wrong.status === 401 && !/invoices/.test(wrong.text), wrong.text);
+  const tokenFile = path.join(HOME, 'panel', 'token');
+  check('S33 the token is 64 hex digits, kept in the folder of the panel', /^[0-9a-f]{64}$/.test(fs.readFileSync(tokenFile, 'utf8').trim()) && fs.readFileSync(tokenFile, 'utf8').trim() === panel.token);
+  const events = await new Promise((resolve) => {
+    const req = http.request({ host: '127.0.0.1', port: panel.port, path: '/api/events', headers: { Host: base } }, (res) => { resolve(res.statusCode); req.destroy(); });
+    req.on('error', () => resolve(0));
+    req.end();
+  });
+  check('S34 the change notifications need no token (they carry nothing)', events === 200, String(events));
+
   await panel.close();
+  const again = await startPanel({ port: 0, quiet: true, register: false });
+  check('S35 the token survives a restart, so a bookmarked page keeps working', again.token === panel.token);
+  await again.close();
   check('S29 closing removes its registry entry', !fs.existsSync(path.join(HOME, 'panel', 'server.json')));
 
   // --- refusing to start ------------------------------------------------------------

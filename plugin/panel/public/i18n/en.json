@@ -96,5 +96,6 @@
   "send.cancel": "Cancel",
   "send.confirm": "Send",
   "send.done": "Sent. task-flow takes the answers in at its next step.",
-  "send.failed": "Not sent"
+  "send.failed": "Not sent",
+  "app.noToken": "This browser does not have the panel's key yet. Open the panel once with: node <plugin>/panel/panel.mjs --open - it opens this page with the key, and this browser keeps it."
 }
