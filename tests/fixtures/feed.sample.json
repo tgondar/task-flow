@@ -1,0 +1,155 @@
+{
+  "version": 1,
+  "projectKey": "fea0c9e12c17e9da",
+  "projectDir": "C:workdemo-project",
+  "projectName": "demo-project",
+  "language": "en",
+  "generatedAt": "2026-09-27T20:15:00.000Z",
+  "runs": [
+    {
+      "slug": "invoices",
+      "phase": "plan",
+      "status": "blocked",
+      "mode": "auto",
+      "created": "2026-09-27",
+      "updated": "2026-09-27T20:10:00Z",
+      "phaseChangedAt": "2026-09-27T19:00:00Z",
+      "buildCursor": "T2",
+      "tasks": [
+        {
+          "id": "T1",
+          "title": "Invoice model",
+          "done": true
+        },
+        {
+          "id": "T2",
+          "title": "Currency on invoices",
+          "done": false
+        },
+        {
+          "id": "T3",
+          "title": "PDF export",
+          "done": false
+        }
+      ],
+      "pendingTasks": [
+        {
+          "id": "T2",
+          "question": "Which currency on invoices?"
+        }
+      ],
+      "skippedTasks": [],
+      "branch": "feature/invoices",
+      "pr": null,
+      "runPage": "runs/260927_invoices.md",
+      "questions": {
+        "source": "json",
+        "items": [
+          {
+            "id": "Q1",
+            "kind": "decision",
+            "phase": "spec",
+            "title": "Where invoices are stored",
+            "chosen": "PostgreSQL",
+            "options": [
+              {
+                "id": "pg",
+                "label": "PostgreSQL",
+                "chosen": true
+              },
+              {
+                "id": "files",
+                "label": "PDF files only"
+              }
+            ],
+            "why": "Queries by customer and date.",
+            "ifOverruled": "T1 changes.",
+            "rounds": [
+              {
+                "round": 1,
+                "verdict": "agree",
+                "passages": [
+                  "spec §2"
+                ]
+              }
+            ],
+            "createdAt": "2026-09-27T18:00:00Z",
+            "answer": null
+          },
+          {
+            "id": "Q2",
+            "kind": "question",
+            "task": "T2",
+            "title": "Which currency on invoices?",
+            "options": [
+              {
+                "id": "eur",
+                "label": "EUR"
+              },
+              {
+                "id": "usd",
+                "label": "USD"
+              }
+            ],
+            "why": "The spec is silent.",
+            "urgent": true,
+            "createdAt": "2026-09-27T20:00:00Z"
+          },
+          {
+            "id": "Q3",
+            "kind": "question",
+            "phase": "plan",
+            "title": "Keep the old export?",
+            "why": "Two customers use it.",
+            "answer": {
+              "status": "ok",
+              "via": "conversation",
+              "at": "2026-09-27T19:30:00Z"
+            }
+          }
+        ],
+        "consumedSubmissions": []
+      }
+    },
+    {
+      "slug": "old-report",
+      "phase": "done",
+      "status": "done",
+      "mode": "attended",
+      "created": "2026-09-20",
+      "updated": "2026-09-21T10:00:00Z",
+      "phaseChangedAt": null,
+      "buildCursor": null,
+      "tasks": [],
+      "pendingTasks": [],
+      "skippedTasks": [],
+      "branch": null,
+      "pr": "https://github.com/example/app/pull/12",
+      "runPage": "runs/finished/260920_old-report.md",
+      "questions": {
+        "source": "legacy",
+        "open": 0
+      }
+    },
+    {
+      "slug": "pdf-cleanup",
+      "phase": "build",
+      "status": "running",
+      "mode": "attended",
+      "created": "2026-09-26",
+      "updated": "2026-09-27T20:12:00Z",
+      "phaseChangedAt": null,
+      "buildCursor": null,
+      "tasks": [],
+      "pendingTasks": [],
+      "skippedTasks": [],
+      "branch": null,
+      "pr": null,
+      "runPage": "runs/260926_pdf-cleanup.md",
+      "questions": {
+        "source": "legacy",
+        "open": 1
+      }
+    }
+  ]
+}

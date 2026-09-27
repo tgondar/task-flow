@@ -21,7 +21,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { crossesLink, loadConfig } = require('./config.js');
+const { crossesLink, homeDir, homePath, isInside, loadConfig, projectKey } = require('./config.js');
 const questionsData = require('./questions.js');
 
 /** The stages a run passes through, in order. `phase` names the last one COMPLETED,
@@ -817,6 +817,137 @@ function renderQuestions({ file, docsDir, slug, prefix, isDone, lang }) {
   }
 }
 
+// --- the feed for the panel --------------------------------------------------
+//
+// The panel shows the runs of every project on this machine, and it must never
+// read or write a docs folder - that is the promise that the documentation is
+// written by task-flow alone. So instead of the panel going to the projects,
+// every render leaves a summary of the project where the panel looks: one file
+// per project in <home>/feed/ (config.js homeDir). The panel reads nothing else.
+//
+// What goes in is what the panel shows, in closed shapes: the same discipline as
+// the run page, because a state.json is repository data and the panel is a web
+// page. The absolute docs folder does NOT go in - the panel has no use for it,
+// and not knowing it is part of why the panel cannot write there.
+
+const FEED_PHASES = [...PHASES, 'done'];
+const TASK_ID = /^T[0-9]+[a-z]?$/;
+const ISO = /^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:\d{2})?$/;
+const clip = (value, max) => (typeof value === 'string' ? plainText(value, max) : null);
+const iso = (value) => (typeof value === 'string' && ISO.test(value.trim()) ? value.trim() : null);
+
+/** One run, as the panel sees it. */
+function feedRun({ entry, state, stateRoot, docsDir, statePath }) {
+  const planPath = resolveInsideDocs(docsDir, state.artifacts && state.artifacts.plan);
+  const tasks = readPlanTasks(planPath).map((task) => ({ id: task.id, title: task.title, done: task.ticked }));
+  const idList = (value, textKey, max) =>
+    (Array.isArray(value) ? value : [])
+      .filter((item) => item && typeof item.id === 'string' && TASK_ID.test(item.id))
+      .slice(0, 100)
+      .map((item) => ({ id: item.id, [textKey]: clip(item[textKey], max) }));
+
+  // The questions go in whole when the run keeps them as data - the panel turns
+  // them into cards - and only as a count when they are a page written by hand.
+  let questions;
+  const questionsFile = path.join(stateRoot, entry, 'questions.json');
+  if (exists(questionsFile)) {
+    let data = null;
+    try {
+      data = JSON.parse(fs.readFileSync(questionsFile, 'utf8').replace(/^﻿/, ''));
+    } catch {
+      data = null;
+    }
+    questions =
+      data && questionsData.validateQuestions(data).ok && data.slug === entry
+        ? { source: 'json', items: data.items, consumedSubmissions: data.consumedSubmissions || [] }
+        : { source: 'invalid' };
+  } else {
+    const legacy = findQuestionsFile(docsDir, entry, state);
+    questions = { source: 'legacy', open: legacy ? countOpenQuestions(legacy.file) : 0 };
+  }
+
+  // The run page, relative to the docs folder, for the panel to show as a path.
+  const prefix = runCreatedPrefix(state, statePath);
+  const pageName = `${prefix}_${entry}.md`;
+  const runPage = [path.join(RUNS_DIR, pageName), path.join(RUNS_DIR, RUNS_ARCHIVE, pageName)]
+    .find((relative) => exists(path.join(docsDir, relative)));
+
+  const phase = FEED_PHASES.includes(state.phase) ? state.phase : null;
+  return {
+    slug: entry,
+    phase,
+    status: ['running', 'blocked', 'failed', 'done'].includes(String(state.status || '').toLowerCase())
+      ? String(state.status).toLowerCase()
+      : 'paused',
+    mode: String(state.mode || '').trim().toLowerCase() === 'auto' ? 'auto' : 'attended',
+    created: `20${prefix.slice(0, 2)}-${prefix.slice(2, 4)}-${prefix.slice(4, 6)}`,
+    updated: iso(state.updated),
+    phaseChangedAt: iso(state.phaseChangedAt),
+    buildCursor: typeof state.buildCursor === 'string' && TASK_ID.test(state.buildCursor) ? state.buildCursor : null,
+    tasks,
+    pendingTasks: idList(state.pendingTasks, 'question', 300),
+    skippedTasks: idList(state.skippedTasks, 'reason', 200),
+    branch: clip(state.branch, 120),
+    pr: linkTarget(state.pr),
+    runPage: runPage ? runPage.split(path.sep).join('/') : null,
+    questions,
+  };
+}
+
+/**
+ * Writes <home>/feed/<projectKey>.json for this project, atomically (a temp file
+ * renamed over the old one, so the panel never reads half a file).
+ *
+ * Returns the file written, or throws. The caller treats a throw as a note, not a
+ * failure: the feed is for the panel, and a machine without a usable home folder
+ * must still get its documentation rendered.
+ *
+ * Refused outright when the home folder sits inside the project or inside the
+ * docs folder - a feed there would put the panel's reading, and its answers,
+ * where the promise says it has no business.
+ */
+function writeFeed({ projectDir, config, docsDir }) {
+  const home = homeDir();
+  if (isInside(projectDir, home) || isInside(home, projectDir)) {
+    throw new Error('the local state folder and the project overlap');
+  }
+  if (isInside(docsDir, home) || isInside(home, docsDir)) {
+    throw new Error('the local state folder and the docs folder overlap');
+  }
+
+  const runs = [];
+  for (const entry of fs.readdirSync(config.stateDir)) {
+    if (!SAFE_SEGMENT.test(entry)) continue;
+    const statePath = path.join(config.stateDir, entry, 'state.json');
+    if (!exists(statePath)) continue;
+    try {
+      const state = readJson(statePath);
+      if (!state || typeof state !== 'object' || Array.isArray(state)) continue;
+      runs.push(feedRun({ entry, state, stateRoot: config.stateDir, docsDir, statePath }));
+    } catch {
+      runs.push({ slug: entry, unreadable: true });
+    }
+  }
+
+  const key = projectKey(projectDir);
+  const feedDir = homePath(['feed']);
+  fs.mkdirSync(feedDir, { recursive: true });
+  const file = homePath(['feed', `${key}.json`]);
+  const body = {
+    version: 1,
+    projectKey: key,
+    projectDir: path.resolve(projectDir),
+    projectName: path.basename(path.resolve(projectDir)),
+    language: config.pageLanguage || 'en',
+    generatedAt: new Date().toISOString(),
+    runs,
+  };
+  const temp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(body, null, 2) + '\n', 'utf8');
+  fs.renameSync(temp, file);
+  return file;
+}
+
 // --- the run over all runs -------------------------------------------------
 
 /**
@@ -933,6 +1064,14 @@ function renderAll({ projectDir, docsDir, slug } = {}) {
     }
   }
 
+  // The panel's summary of this project. Never at the documentation's expense:
+  // whatever goes wrong here is reported and the render still counts as done.
+  try {
+    result.feed = writeFeed({ projectDir: root, config, docsDir: targetDocs });
+  } catch (error) {
+    result.feedError = error.message;
+  }
+
   return result;
 }
 
@@ -948,6 +1087,7 @@ module.exports = {
   readPlanTasks,
   countOpenQuestions,
   renderQuestions,
+  writeFeed,
   assertInside,
   runCreatedPrefix,
 };
@@ -977,4 +1117,6 @@ if (require.main === module) {
   // and a file it got wrong must not pass in silence.
   for (const item of outcome.questionErrors) process.stderr.write(`questions ${item.run}: ${item.why}\n`);
   if (outcome.questionErrors.length) process.exitCode = 1;
+  // A note, not a failure: the documentation was rendered either way.
+  if (outcome.feedError) process.stderr.write(`panel feed not written: ${outcome.feedError}\n`);
 }

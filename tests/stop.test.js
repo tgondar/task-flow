@@ -23,6 +23,9 @@ const path = require('path');
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-home-'));
 process.env.HOME = TEST_HOME;
 process.env.USERPROFILE = TEST_HOME;
+// The feed for the panel goes to LOCALAPPDATA (XDG_STATE_HOME elsewhere): never the real one.
+process.env.LOCALAPPDATA = TEST_HOME;
+process.env.XDG_STATE_HOME = TEST_HOME;
 const { trustDocsDir } = require('../plugin/scripts/config.js');
 
 const STOP = path.join(__dirname, '..', 'plugin', 'hooks', 'stop.js');
