@@ -142,7 +142,7 @@ check('Q1 a complete file is valid', validateQuestions(sample()).ok, validateQue
   const data = sample();
   data.items[1].answer = { status: 'ok', via: 'panel', at: AT, comment: 'x'.repeat(LIMITS.comment + 1) };
   const long = validateQuestions(data);
-  const controls = ['a\u0007b', 'a\u001b[2Jb', 'a‮b', 'a b'].map((comment) => {
+  const controls = ['a\u0007b', 'a\u001b[2Jb', 'a\u202Eb', 'a\u2028b'].map((comment) => {
     const d = sample();
     d.items[1].answer = { status: 'ok', via: 'panel', at: AT, comment };
     return validateQuestions(d).ok;

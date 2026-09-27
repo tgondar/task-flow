@@ -1,0 +1,343 @@
+/* shadcn/ui components recreated in CSS, same names and same variants as the React library:
+   https://ui.shadcn.com/docs/components. The functions in js/ui.js set these classes. */
+
+/* --- Button ----------------------------------------------------------------------------------- */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem;
+  height: 2.25rem; padding: 0.5rem 1rem;
+  border: 1px solid transparent; border-radius: var(--radius-md);
+  font-size: 0.875rem; font-weight: 500; line-height: 1; white-space: nowrap;
+  background: var(--primary); color: var(--primary-foreground);
+  box-shadow: var(--shadow-xs);
+  transition: background-color 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s;
+  text-decoration: none; user-select: none;
+}
+.btn:hover { background: color-mix(in oklab, var(--primary) 90%, transparent); }
+.btn:focus-visible { border-color: var(--ring); box-shadow: var(--focus-ring); }
+.btn:disabled, .btn[aria-disabled="true"] { opacity: 0.5; pointer-events: none; }
+.btn .icon { width: 1rem; height: 1rem; }
+.btn-secondary { background: var(--secondary); color: var(--secondary-foreground); }
+.btn-secondary:hover { background: color-mix(in oklab, var(--secondary) 80%, transparent); }
+.btn-outline { background: var(--background); color: var(--foreground); border-color: var(--border); }
+.btn-outline:hover { background: var(--accent); color: var(--accent-foreground); }
+:root[data-theme="dark"] .btn-outline { background: color-mix(in oklab, var(--input) 30%, transparent); border-color: var(--input); }
+:root[data-theme="dark"] .btn-outline:hover { background: color-mix(in oklab, var(--input) 50%, transparent); }
+.btn-ghost { background: transparent; color: var(--foreground); box-shadow: none; }
+.btn-ghost:hover { background: var(--accent); color: var(--accent-foreground); }
+.btn-destructive { background: var(--destructive); color: var(--destructive-foreground); }
+.btn-destructive:hover { background: color-mix(in oklab, var(--destructive) 90%, transparent); }
+.btn-link { background: transparent; color: var(--primary); box-shadow: none; height: auto; padding: 0; text-decoration: underline; text-decoration-color: transparent; }
+.btn-link:hover { background: transparent; text-decoration-color: currentColor; }
+.btn-sm { height: 2rem; padding: 0 0.75rem; gap: 0.375rem; border-radius: var(--radius-md); font-size: 0.8125rem; }
+.btn-link.btn-sm { height: auto; padding: 0; }
+.btn-lg { height: 2.5rem; padding: 0 1.5rem; }
+.btn-icon { width: 2.25rem; padding: 0; }
+.btn-icon.btn-sm { width: 2rem; }
+
+/* --- Badge ------------------------------------------------------------------------------------ */
+.badge {
+  display: inline-flex; align-items: center; gap: 0.25rem; width: fit-content;
+  padding: 0.125rem 0.5rem; border: 1px solid transparent; border-radius: var(--radius-md);
+  font-size: 0.75rem; font-weight: 500; line-height: 1rem; white-space: nowrap;
+  background: var(--primary); color: var(--primary-foreground);
+}
+.badge .icon { width: 0.75rem; height: 0.75rem; }
+.badge-secondary { background: var(--secondary); color: var(--secondary-foreground); }
+.badge-outline { background: transparent; color: var(--foreground); border-color: var(--border); }
+.badge-destructive { background: var(--destructive); color: var(--destructive-foreground); }
+.badge-mono { font-family: var(--font-mono); font-weight: 500; }
+/* Soft variants for the states (accepted, to change, question, rejected). */
+.badge-success, .badge-warning, .badge-info, .badge-danger {
+  --tone: var(--success);
+  background: color-mix(in oklab, var(--tone) 12%, transparent);
+  color: var(--tone);
+  border-color: color-mix(in oklab, var(--tone) 30%, transparent);
+}
+.badge-warning { --tone: var(--warning); }
+.badge-info { --tone: var(--info); }
+.badge-danger { --tone: var(--destructive); }
+.badge-danger-outline { background: transparent; color: var(--destructive); border-color: color-mix(in oklab, var(--destructive) 45%, transparent); }
+
+/* --- Card ------------------------------------------------------------------------------------- */
+.card {
+  display: flex; flex-direction: column; gap: 1.5rem;
+  padding: 1.5rem 0;
+  background: var(--card); color: var(--card-foreground);
+  border: 1px solid var(--border); border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-sm);
+}
+.card-header { display: grid; gap: 0.375rem; padding: 0 1.5rem; }
+.card-title { font-size: 1rem; font-weight: 600; line-height: 1.35; letter-spacing: -0.01em; }
+.card-description { color: var(--muted-foreground); font-size: 0.875rem; }
+.card-content { padding: 0 1.5rem; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; min-width: 0; }
+.card-footer { padding: 0 1.5rem; display: flex; align-items: center; gap: 0.5rem; }
+.card-footer.bordered { border-top: 1px solid var(--border); padding-top: 1.25rem; }
+
+/* --- Alert ------------------------------------------------------------------------------------ */
+.alert {
+  --tone: var(--foreground);
+  position: relative; display: grid; grid-template-columns: 1rem minmax(0, 1fr); column-gap: 0.75rem; row-gap: 0.125rem;
+  align-items: start; width: 100%;
+  padding: 0.75rem 1rem; border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--card); color: var(--card-foreground); font-size: 0.875rem;
+}
+.alert > .icon { color: var(--tone); transform: translateY(0.125rem); }
+.alert-title { grid-column: 2; font-weight: 500; line-height: 1.4; }
+.alert-description { grid-column: 2; color: var(--muted-foreground); display: grid; gap: 0.375rem; }
+.alert-description p + p { margin-top: 0; }
+.alert-actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+.alert-destructive { --tone: var(--destructive); color: var(--destructive); }
+.alert-destructive .alert-description { color: color-mix(in oklab, var(--destructive) 85%, var(--foreground)); }
+.alert-info, .alert-warning, .alert-success {
+  background: color-mix(in oklab, var(--tone) 6%, var(--card));
+  border-color: color-mix(in oklab, var(--tone) 25%, var(--border));
+}
+.alert-info { --tone: var(--info); }
+.alert-warning { --tone: var(--warning); }
+.alert-success { --tone: var(--success); }
+
+/* --- Tabs ------------------------------------------------------------------------------------- */
+.tabs { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.75rem; min-width: 0; }
+.tabs-list {
+  display: inline-flex; align-items: center; width: fit-content; max-width: 100%; overflow-x: auto;
+  height: 2.25rem; padding: 3px; border-radius: var(--radius-lg);
+  background: var(--muted); color: var(--muted-foreground);
+}
+.tabs-trigger {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.375rem;
+  height: 100%; padding: 0.25rem 0.625rem; border: 1px solid transparent; border-radius: var(--radius-md);
+  background: transparent; color: var(--muted-foreground); font-size: 0.875rem; font-weight: 500; white-space: nowrap;
+  transition: color 0.15s, box-shadow 0.15s;
+}
+.tabs-trigger:hover { color: var(--foreground); }
+.tabs-trigger[aria-selected="true"] { background: var(--background); color: var(--foreground); box-shadow: var(--shadow-sm); }
+:root[data-theme="dark"] .tabs-trigger[aria-selected="true"] { background: color-mix(in oklab, var(--input) 30%, transparent); border-color: var(--input); }
+.tabs-trigger .count { font-variant-numeric: tabular-nums; color: var(--muted-foreground); font-size: 0.75rem; }
+
+/* --- Accordion (details / summary) ------------------------------------------------------------- */
+.accordion { border-bottom: 1px solid var(--border); }
+.accordion > summary {
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  padding: 0.875rem 0; list-style: none; cursor: pointer;
+  font-size: 0.875rem; font-weight: 500; border-radius: var(--radius-md);
+}
+.accordion > summary::-webkit-details-marker { display: none; }
+.accordion > summary:hover .accordion-label { text-decoration: underline; text-underline-offset: 4px; }
+.accordion > summary .chevron { color: var(--muted-foreground); transition: transform 0.2s; }
+.accordion[open] > summary .chevron { transform: rotate(180deg); }
+.accordion-label { display: inline-flex; align-items: center; gap: 0.5rem; }
+.accordion-content { padding: 0 0 1rem; font-size: 0.875rem; }
+.accordion-flush { border-bottom: 0; }
+.accordion-flush > summary { padding: 0.25rem 0; }
+
+/* --- Toggle group (verdicts) ------------------------------------------------------------------- */
+.toggle-group { display: inline-flex; align-items: stretch; border-radius: var(--radius-md); box-shadow: var(--shadow-xs); max-width: 100%; }
+.toggle {
+  --tone: var(--foreground);
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem;
+  height: 2.25rem; min-width: 2.25rem; padding: 0 0.75rem;
+  border: 1px solid var(--input); background: transparent; color: var(--foreground);
+  font-size: 0.875rem; font-weight: 500; white-space: nowrap;
+  transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+}
+.toggle-group .toggle { border-radius: 0; margin-left: -1px; }
+.toggle-group .toggle:first-child { border-top-left-radius: var(--radius-md); border-bottom-left-radius: var(--radius-md); margin-left: 0; }
+.toggle-group .toggle:last-child { border-top-right-radius: var(--radius-md); border-bottom-right-radius: var(--radius-md); }
+.toggle:hover { background: var(--muted); color: var(--muted-foreground); }
+.toggle:focus-visible { position: relative; z-index: 1; border-color: var(--ring); }
+.toggle[aria-pressed="true"] {
+  position: relative; z-index: 1;
+  background: color-mix(in oklab, var(--tone) 12%, transparent); color: var(--tone);
+  border-color: color-mix(in oklab, var(--tone) 55%, transparent);
+}
+.toggle:disabled { opacity: 0.5; pointer-events: none; }
+.toggle.tone-ok { --tone: var(--success); }
+.toggle.tone-ko { --tone: var(--destructive); }
+.toggle.tone-modify { --tone: var(--warning); }
+.toggle.tone-explain { --tone: var(--info); }
+.toggle-group.compact .toggle { height: 2rem; min-width: 2rem; padding: 0 0.5rem; }
+
+/* --- Radio cards, radio, checkbox ---------------------------------------------------------------- */
+.radio-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(13.5rem, 1fr)); gap: 0.75rem; }
+.radio-card {
+  position: relative; display: grid; grid-template-columns: 1rem 1fr; gap: 0.25rem 0.75rem; align-content: start;
+  padding: 1rem; border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--card); cursor: pointer; transition: border-color 0.15s, background-color 0.15s, box-shadow 0.15s;
+}
+.radio-card:hover { background: color-mix(in oklab, var(--accent) 60%, transparent); }
+.radio-card:has(input:checked) { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+.radio-card:has(input:focus-visible) { box-shadow: 0 0 0 1px var(--primary), var(--focus-ring); }
+.radio-card > input { grid-row: 1; margin: 0.125rem 0 0; }
+.radio-card .rc-title { font-weight: 500; line-height: 1.4; display: flex; flex-wrap: wrap; align-items: center; gap: 0.375rem; }
+.radio-card .rc-body { grid-column: 2; display: grid; gap: 0.5rem; color: var(--muted-foreground); font-size: 0.8125rem; }
+.radio-card .rc-meta { display: flex; flex-wrap: wrap; gap: 0.375rem; }
+/* A long cost or effort must wrap inside its card rather than widen it. */
+.radio-card .rc-meta .badge { white-space: normal; max-width: 100%; }
+.radio-card.other { border-style: dashed; }
+.pros-cons { display: grid; gap: 0.25rem; list-style: none; padding: 0; margin: 0; }
+.pros-cons li { display: grid; grid-template-columns: 0.875rem 1fr; gap: 0.375rem; align-items: start; margin: 0; color: var(--foreground); }
+.pros-cons li .icon { width: 0.875rem; height: 0.875rem; margin-top: 0.1875rem; }
+.pros-cons .pro .icon { color: var(--success); }
+.pros-cons .con .icon { color: var(--destructive); }
+
+input[type="radio"], input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none; flex-shrink: 0;
+  width: 1rem; height: 1rem; margin: 0; border: 1px solid var(--input); background: var(--background);
+  box-shadow: var(--shadow-xs); display: inline-grid; place-content: center; cursor: pointer;
+}
+:root[data-theme="dark"] input[type="radio"], :root[data-theme="dark"] input[type="checkbox"] { background: color-mix(in oklab, var(--input) 30%, transparent); }
+input[type="radio"] { border-radius: 999px; }
+input[type="radio"]:checked { border-color: var(--primary); }
+input[type="radio"]:checked::before { content: ""; width: 0.5rem; height: 0.5rem; border-radius: 999px; background: var(--primary); }
+input[type="checkbox"] { border-radius: 4px; }
+input[type="checkbox"]:checked { background: var(--primary); border-color: var(--primary); }
+input[type="checkbox"]:checked::before {
+  content: ""; width: 0.625rem; height: 0.375rem; margin-top: -0.125rem;
+  border-left: 2px solid var(--primary-foreground); border-bottom: 2px solid var(--primary-foreground); transform: rotate(-45deg);
+}
+input[type="radio"]:focus-visible, input[type="checkbox"]:focus-visible { border-color: var(--ring); box-shadow: var(--focus-ring); }
+
+/* --- Input, textarea, select ------------------------------------------------------------------- */
+.input, .textarea, .select {
+  width: 100%; min-width: 0;
+  border: 1px solid var(--input); border-radius: var(--radius-md);
+  background: transparent; color: var(--foreground); box-shadow: var(--shadow-xs);
+  font-size: 0.875rem; transition: border-color 0.15s, box-shadow 0.15s;
+}
+:root[data-theme="dark"] .input, :root[data-theme="dark"] .textarea, :root[data-theme="dark"] .select { background: color-mix(in oklab, var(--input) 30%, transparent); }
+.input { height: 2.25rem; padding: 0.25rem 0.75rem; }
+.textarea { min-height: 4rem; padding: 0.5rem 0.75rem; resize: vertical; line-height: 1.5; field-sizing: content; }
+.select { height: 2.25rem; padding: 0 2rem 0 0.75rem; appearance: none; -webkit-appearance: none; cursor: pointer; }
+.select-wrap { position: relative; display: block; }
+.select-wrap > .icon { position: absolute; right: 0.625rem; top: 50%; transform: translateY(-50%); color: var(--muted-foreground); opacity: 0.6; }
+.input::placeholder, .textarea::placeholder { color: var(--muted-foreground); }
+.input:focus-visible, .textarea:focus-visible, .select:focus-visible { border-color: var(--ring); box-shadow: var(--focus-ring); }
+.input[aria-invalid="true"], .textarea[aria-invalid="true"] {
+  border-color: var(--destructive);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--destructive) 20%, transparent);
+}
+.field { display: grid; gap: 0.375rem; }
+.field-hint { font-size: 0.8125rem; color: var(--muted-foreground); }
+.field-hint.error { color: var(--destructive); }
+.label { font-size: 0.875rem; font-weight: 500; }
+
+/* --- Slider ------------------------------------------------------------------------------------ */
+.slider { appearance: none; -webkit-appearance: none; width: 100%; height: 1rem; background: transparent; cursor: pointer; }
+.slider::-webkit-slider-runnable-track { height: 0.375rem; border-radius: 999px; background: linear-gradient(to right, var(--primary) var(--fill, 50%), var(--muted) var(--fill, 50%)); }
+.slider::-moz-range-track { height: 0.375rem; border-radius: 999px; background: var(--muted); }
+.slider::-moz-range-progress { height: 0.375rem; border-radius: 999px; background: var(--primary); }
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 1rem; height: 1rem; margin-top: -0.3125rem; border-radius: 999px;
+  border: 1px solid var(--primary); background: var(--background); box-shadow: var(--shadow-sm); transition: box-shadow 0.15s;
+}
+.slider::-moz-range-thumb { width: 1rem; height: 1rem; border-radius: 999px; border: 1px solid var(--primary); background: var(--background); box-shadow: var(--shadow-sm); }
+.slider:hover::-webkit-slider-thumb, .slider:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px color-mix(in oklab, var(--ring) 50%, transparent); }
+.slider:focus-visible { box-shadow: none; }
+
+/* --- Progress ---------------------------------------------------------------------------------- */
+.progress { position: relative; display: flex; width: 100%; height: 0.5rem; overflow: hidden; border-radius: 999px; background: color-mix(in oklab, var(--primary) 20%, transparent); }
+.progress > span { height: 100%; transition: width 0.3s; }
+.progress .seg-ok { background: var(--success); }
+.progress .seg-modify { background: var(--warning); }
+.progress .seg-explain { background: var(--info); }
+.progress .seg-ko { background: var(--destructive); }
+.progress.neutral { background: var(--muted); }
+
+/* --- Tooltip, hover card, popover ---------------------------------------------------------------- */
+.floating {
+  position: fixed; z-index: 60; max-width: min(20rem, calc(100vw - 1rem));
+  pointer-events: none; animation: float-in 0.12s ease-out;
+}
+.floating.tooltip {
+  padding: 0.375rem 0.75rem; border-radius: var(--radius-md);
+  background: var(--primary); color: var(--primary-foreground); font-size: 0.75rem; line-height: 1.4;
+  text-wrap: balance;
+}
+.floating.hover-card {
+  width: 18rem; padding: 1rem; border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--popover); color: var(--popover-foreground); box-shadow: var(--shadow-md); font-size: 0.8125rem;
+  pointer-events: auto;
+}
+.hover-card .hc-title { font-weight: 600; font-size: 0.875rem; display: flex; align-items: center; gap: 0.375rem; margin-bottom: 0.25rem; }
+.hover-card .hc-text { color: var(--muted-foreground); }
+.tt-title { display: block; font-weight: 600; }
+.tt-row { display: flex; align-items: center; gap: 0.375rem; }
+.tt-swatch { width: 0.625rem; height: 0.625rem; border-radius: 2px; flex-shrink: 0; }
+@keyframes float-in { from { opacity: 0; transform: translateY(2px); } }
+
+/* --- Dialog, sheet (native dialog) ------------------------------------------------------------ */
+.dialog, .sheet {
+  padding: 0; border: 1px solid var(--border); color: var(--foreground); background: var(--background);
+  box-shadow: var(--shadow-lg);
+}
+.dialog::backdrop, .sheet::backdrop { background: var(--overlay); }
+.dialog { width: min(32rem, calc(100vw - 2rem)); border-radius: var(--radius-lg); }
+.dialog[open] { animation: dialog-in 0.15s ease-out; }
+.dialog-inner { display: grid; gap: 1rem; padding: 1.5rem; }
+.dialog-header { display: grid; gap: 0.5rem; }
+.dialog-title { font-size: 1.125rem; font-weight: 600; }
+.dialog-description { color: var(--muted-foreground); }
+.dialog-footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.5rem; }
+.dialog-close { position: absolute; top: 0.75rem; right: 0.75rem; }
+@keyframes dialog-in { from { opacity: 0; transform: scale(0.97); } }
+.sheet {
+  position: fixed; inset: 0 auto 0 0; margin: 0; height: 100dvh; max-height: none;
+  width: min(20rem, 85vw); border-width: 0 1px 0 0; border-radius: 0;
+}
+.sheet.right { inset: 0 0 0 auto; border-width: 0 0 0 1px; width: min(26rem, 92vw); }
+.sheet[open] { animation: sheet-in 0.2s ease-out; }
+.sheet.right[open] { animation-name: sheet-in-right; }
+.sheet-inner { display: flex; flex-direction: column; height: 100%; }
+.sheet-header { display: grid; gap: 0.25rem; padding: 1rem 1rem 0.75rem; border-bottom: 1px solid var(--border); position: relative; }
+.sheet-title { font-weight: 600; font-size: 1rem; }
+.sheet-description { color: var(--muted-foreground); font-size: 0.8125rem; }
+.sheet-body { flex: 1; overflow: auto; padding: 1rem; }
+@keyframes sheet-in { from { transform: translateX(-100%); } }
+@keyframes sheet-in-right { from { transform: translateX(100%); } }
+
+/* --- Toast (sonner style) ----------------------------------------------------------------------- */
+.toaster { position: fixed; right: 1rem; bottom: 1rem; z-index: 70; display: grid; gap: 0.5rem; width: min(22rem, calc(100vw - 2rem)); }
+.toast {
+  display: grid; grid-template-columns: 1rem 1fr auto; gap: 0.75rem; align-items: start;
+  padding: 1rem; border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--popover); color: var(--popover-foreground); box-shadow: var(--shadow-lg);
+  font-size: 0.8125rem; animation: toast-in 0.2s ease-out;
+}
+.toast > .icon { margin-top: 0.125rem; color: var(--muted-foreground); }
+.toast.success > .icon { color: var(--success); }
+.toast.error > .icon { color: var(--destructive); }
+.toast.info > .icon { color: var(--info); }
+.toast-title { font-weight: 500; }
+.toast-text { color: var(--muted-foreground); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(0.5rem); } }
+
+/* --- Table ------------------------------------------------------------------------------------- */
+.table-wrap { width: 100%; overflow-x: auto; }
+/* Edge shadows: visible only when there is content left to scroll on that side. The first two
+   gradients follow the content (local) and hide the shadows once the end is reached. */
+.table-wrap, .v-diagram-wrap {
+  --scroll-bg: var(--card);
+  --scroll-shadow: color-mix(in oklab, var(--foreground) 16%, transparent);
+  background:
+    linear-gradient(to right, var(--scroll-bg) 40%, transparent) left / 1.5rem 100% no-repeat local,
+    linear-gradient(to left, var(--scroll-bg) 40%, transparent) right / 1.5rem 100% no-repeat local,
+    radial-gradient(farthest-side at 0 50%, var(--scroll-shadow), transparent) left / 0.625rem 100% no-repeat scroll,
+    radial-gradient(farthest-side at 100% 50%, var(--scroll-shadow), transparent) right / 0.625rem 100% no-repeat scroll;
+}
+.table { width: 100%; border-collapse: collapse; font-size: 0.875rem; caption-side: bottom; }
+.table th { height: 2.5rem; padding: 0 0.5rem; text-align: left; vertical-align: middle; font-weight: 500; color: var(--foreground); white-space: nowrap; }
+.table td { padding: 0.5rem; vertical-align: top; }
+.table tr { border-bottom: 1px solid var(--border); }
+.table tbody tr:last-child { border-bottom: 0; }
+.table tbody tr:hover { background: color-mix(in oklab, var(--muted) 50%, transparent); }
+.table caption { margin-top: 1rem; color: var(--muted-foreground); font-size: 0.8125rem; }
+
+/* --- Kbd, separator, skeleton, avatar-like medal -------------------------------------------------- */
+.kbd {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.25rem;
+  height: 1.25rem; min-width: 1.25rem; padding: 0 0.25rem; border-radius: var(--radius-sm);
+  background: var(--muted); color: var(--muted-foreground); font: 500 0.75rem var(--font-sans);
+}
+.separator { height: 1px; width: 100%; background: var(--border); border: 0; margin: 0; }
+.separator.vertical { width: 1px; height: 1rem; }
+.skeleton { background: var(--accent); border-radius: var(--radius-md); animation: pulse 2s ease-in-out infinite; }
