@@ -1,0 +1,5 @@
+{
+  "name": "task-flow",
+  "description": "The /task-flow pipeline: spec -> plan -> build -> tests -> harden -> review -> PR, with its approval gate, continuation hook and run renderer. Active only in repositories that declare a .claude/task-flow.json.",
+  "author": { "name": "tgondar" }
+}

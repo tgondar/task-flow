@@ -1,0 +1,14 @@
+{
+  "name": "task-flow",
+  "description": "The task-flow pipeline for Claude Code, as a single plugin shared by every repository.",
+  "owner": {
+    "name": "tgondar"
+  },
+  "plugins": [
+    {
+      "name": "task-flow",
+      "source": "./plugin",
+      "description": "Take an already-refined idea to a PR: spec, plan, build, tests, harden, review, one fresh subagent per phase."
+    }
+  ]
+}
