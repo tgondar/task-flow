@@ -15,8 +15,9 @@
 // does not stop an agent set on getting around it.
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { CONFIG_FILE, stateDirOf } = require('../scripts/config.js');
+const { CONFIG_FILE, crossesLink, stateDirOf } = require('../scripts/config.js');
 
 const ALLOW = 0;
 const BLOCK = 2;
@@ -27,6 +28,17 @@ const block = (why, whatToDo) => {
   process.stderr.write(`GATE: ${why}\n      ${whatToDo}\n`);
   process.exit(BLOCK);
 };
+
+// A crash is not a verdict. Claude Code treats exit 1 as a non-blocking hook
+// error, so an uncaught exception would let the write through: this gate fails
+// closed, and that includes its own bugs.
+process.on('uncaughtException', (error) => {
+  process.stderr.write(
+    `GATE: the gate itself failed (${error && error.message}), so the write is refused.\n` +
+      '      Report it, or set TASK_FLOW_GATE=off deliberately.\n'
+  );
+  process.exit(BLOCK);
+});
 
 // Lower-cased, forward-slashed, and with '..' resolved. Windows paths arrive
 // with backslashes in tool_input.file_path but with forward slashes in
@@ -46,6 +58,9 @@ let payload;
 try {
   payload = JSON.parse(fs.readFileSync(0, 'utf8'));
 } catch (error) {
+  payload = null;
+}
+if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
   // Fail closed. An unreadable payload must never become a silent pass.
   block(
     'the hook payload could not be parsed, so the write cannot be classified.',
@@ -53,22 +68,18 @@ try {
   );
 }
 
-const projectDirRaw = process.env.CLAUDE_PROJECT_DIR || payload.cwd || '';
-const projectDir = normalise(projectDirRaw);
-const target = normalise(payload.tool_input && payload.tool_input.file_path);
-
-// Not a file-shaped tool call: nothing here to classify.
-if (!target) allow();
+const input = payload.tool_input && typeof payload.tool_input === 'object' ? payload.tool_input : {};
 
 // --- only in a project that opted in --------------------------------------
 // Installed as a plugin, this hook runs in every repository on the machine.
 // .claude/task-flow.json is the opt-in; a project without one is none of the
 // gate's business, and failing closed there would block every code edit in it.
+const projectDirRaw = process.env.CLAUDE_PROJECT_DIR || payload.cwd || '';
 if (!projectDirRaw) allow();
 
 // The state directory is where writes are allowed without approval, so it must
 // be a real subfolder of the project: '..' or '.' would turn everything into
-// "bookkeeping". config.js refuses both.
+// "bookkeeping". config.js refuses both, and a stateDir reached through a link.
 let stateDirRaw;
 try {
   stateDirRaw = stateDirOf(projectDirRaw);
@@ -81,17 +92,52 @@ try {
 }
 if (stateDirRaw === null) allow();
 
+// The file this call writes. A relative path is resolved against the project
+// before it is classified - as text it could pass for bookkeeping. A call with
+// no path at all resolves to the project itself, which is code.
+const fileRaw =
+  typeof input.file_path === 'string' ? input.file_path
+    : typeof input.notebook_path === 'string' ? input.notebook_path
+      : '';
+const targetRaw = path.resolve(projectDirRaw, fileRaw);
+const projectDir = normalise(projectDirRaw);
 const stateDir = normalise(stateDirRaw);
+const target = normalise(targetRaw);
+const insideProject = target.startsWith(projectDir + '/');
 
-const relative = target.startsWith(projectDir + '/')
-  ? target.slice(projectDir.length + 1)
-  : target;
+const relative = insideProject ? target.slice(projectDir.length + 1) : target;
+
+// A link inside the project can point anywhere, so a path that goes through one
+// gets no exemption. Only the project's own folders are walked: a repository
+// cannot plant links anywhere else.
+const throughLink = insideProject && crossesLink(projectDirRaw, targetRaw);
 
 const STATE_PREFIX = stateDir.slice(projectDir.length + 1) + '/';
-const isStateFile = relative.startsWith(STATE_PREFIX);
+const isStateFile = insideProject && !throughLink && relative.startsWith(STATE_PREFIX);
 const isMarkdown = relative.endsWith('.md');
 
-/** Every approvedBy the runs currently record, as written on disk. */
+// --- markdown that is really instructions ---------------------------------
+// Documentation is not code, but some markdown is read by the agent as orders:
+// commands, agents, skills and rules under any .claude folder, and a CLAUDE.md
+// outside the project (a parent folder's is loaded into this session). Those
+// need approval like code. The auto-memory and plan-mode folders are the
+// harness's own notes, and stay open.
+const home = normalise(os.homedir());
+function isInstructionMarkdown() {
+  if (/(^|\/)\.claude\//.test(target)) {
+    if (target.startsWith(home + '/.claude/plans/')) return false;
+    const projects = home + '/.claude/projects/';
+    if (target.startsWith(projects)) {
+      const parts = target.slice(projects.length).split('/');
+      if (parts.length > 2 && parts[1] === 'memory') return false;
+    }
+    return true;
+  }
+  const base = path.posix.basename(target);
+  return !insideProject && (base === 'claude.md' || base === 'claude.local.md');
+}
+
+/** Every run the state folder holds, as written on disk. */
 function readRunStates() {
   const states = [];
   for (const task of fs.readdirSync(stateDirRaw)) {
@@ -111,9 +157,18 @@ function readRunStates() {
 const hasApproval = (state) =>
   Boolean(state && typeof state.approvedBy === 'string' && state.approvedBy.trim());
 
+// A finished run approves nothing more. state.json stays in the repository, so
+// without this an approval months old would keep the gate open for good.
+// "Finished" is what the renderer and SKILL.md §8b/§8c call it.
+const isFinished = (state) =>
+  String(state.phase || '') === 'done' ||
+  ['done', 'failed'].includes(String(state.status || '').toLowerCase());
+
+const approvesNow = (state) => hasApproval(state) && !isFinished(state);
+
 const parsedApproval = (text) => {
   try {
-    return hasApproval(JSON.parse(text));
+    return approvesNow(JSON.parse(text));
   } catch (error) {
     return false; // not JSON: no reader will take an approval from it
   }
@@ -124,7 +179,7 @@ const parsedApproval = (text) => {
  *  list) replaces text in the current one. Judging the RESULT, not the fragment,
  *  is what closes split keys, escaped keys and renamed keys: JSON.parse sees
  *  exactly what the gate will read next time. */
-function resultingText(input, current) {
+function resultingText(current) {
   if (typeof input.content === 'string') return input.content;
   const edits = Array.isArray(input.edits)
     ? input.edits
@@ -150,45 +205,47 @@ function resultingText(input, current) {
 }
 
 // --- the pipeline's own bookkeeping ---------------------------------------
-if (isStateFile) {
-  // ...with one exception. state.json lives here, and approval lives in
-  // state.json. Without this the agent could grant itself approval through the
-  // very directory the gate leaves open, and then write whatever it liked.
-  if (path.posix.basename(relative) === 'state.json') {
-    let current = null;
-    try {
-      current = fs.readFileSync(path.resolve(projectDirRaw, payload.tool_input.file_path), 'utf8');
-    } catch (error) {
-      current = null; // a new file
-    }
+// The pipeline keeps state.json in stateDir, and markdown notes there are
+// harmless. Any other file under stateDir is code like anywhere else, so a
+// stateDir of "src" does not open the source tree.
+if (isStateFile && path.posix.basename(relative) === 'state.json') {
+  // Approval lives in state.json. Without this check the agent could grant
+  // itself approval through the very directory the gate leaves open, and then
+  // write whatever it liked. A finished run counts as unapproved here too, so
+  // reopening one does not bring its old approval back to life.
+  let current = null;
+  try {
+    current = fs.readFileSync(targetRaw, 'utf8');
+  } catch (error) {
+    current = null; // a new file
+  }
 
-    if (!parsedApproval(current)) {
-      const next = resultingText(payload.tool_input || {}, current);
-      if (next === null) {
-        // Fail closed: an edit we cannot replay could be the one that approves.
-        block(
-          'this change to an unapproved state.json cannot be checked for "approvedBy".',
-          'Write the whole file instead, without "approvedBy" - approval is the user\'s to give.'
-        );
-      }
-      if (parsedApproval(next)) {
-        block(
-          'this write would fill "approvedBy" in state.json, which is the gate\'s own key.',
-          'Approval is the user\'s to give through the approval gate - do not write it yourself.'
-        );
-      }
+  if (!parsedApproval(current)) {
+    const next = resultingText(current);
+    if (next === null) {
+      // Fail closed: an edit we cannot replay could be the one that approves.
+      block(
+        'this change to an unapproved state.json cannot be checked for "approvedBy".',
+        'Write the whole file instead, without "approvedBy" - approval is the user\'s to give.'
+      );
+    }
+    if (parsedApproval(next)) {
+      block(
+        'this write would give state.json a live "approvedBy", which is the gate\'s own key.',
+        'Approval is the user\'s to give through the approval gate - do not write it yourself.'
+      );
     }
   }
   allow();
 }
 
 // --- documentation is not code --------------------------------------------
-if (isMarkdown) allow();
+if (isMarkdown && !throughLink && (isStateFile || !isInstructionMarkdown())) allow();
 
 // --- everything else needs an approved run --------------------------------
 let approvedTask = null;
 try {
-  approvedTask = (readRunStates().find((entry) => hasApproval(entry.state)) || {}).task || null;
+  approvedTask = (readRunStates().find((entry) => approvesNow(entry.state)) || {}).task || null;
 } catch (error) {
   // Fail closed: no readable state means no evidence of approval.
   block(
@@ -199,7 +256,7 @@ try {
 
 if (!approvedTask) {
   block(
-    `writing ${relative} is code, and no run under ${STATE_PREFIX} has "approvedBy" filled.`,
+    `writing ${relative} needs approval, and no unfinished run under ${STATE_PREFIX} has "approvedBy" filled.`,
     'Ask the user to approve the plan. Do not edit state.json to get past this.'
   );
 }

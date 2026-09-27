@@ -14,6 +14,12 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// The gate reads the home folder (the trust list, and where .claude instructions
+// live). These tests get a home of their own; the hook inherits it.
+const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-home-'));
+process.env.HOME = TEST_HOME;
+process.env.USERPROFILE = TEST_HOME;
+
 const GATE = path.join(__dirname, '..', 'plugin', 'hooks', 'gate.js');
 const ALLOW = 0;
 const BLOCK = 2;
@@ -129,7 +135,7 @@ const win = (root, ...parts) => [root, ...parts].join('\\').replace(/\//g, '\\')
 {
   const root = makeProject({ approved: false });
   check('T4 files under the stateDir are allowed', ALLOW,
-    runGate(root, payloadFor(root, win(root, '.claude', 'task-flow', 'demo', 'notes.txt'))));
+    runGate(root, payloadFor(root, win(root, '.claude', 'task-flow', 'demo', 'notes.md'))));
 }
 
 // --- T5: traversal must not masquerade as the state directory -------------
@@ -234,7 +240,7 @@ const win = (root, ...parts) => [root, ...parts].join('\\').replace(/\//g, '\\')
   check('T15a unapproved code is blocked under a custom stateDir', BLOCK,
     runGate(root, payloadFor(root, win(root, 'src', 'Foo.cs'))));
   check('T15b bookkeeping under the custom stateDir is allowed', ALLOW,
-    runGate(root, payloadFor(root, win(root, 'docs', 'pipeline', 'demo', 'notes.txt'))));
+    runGate(root, payloadFor(root, win(root, 'docs', 'pipeline', 'demo', 'notes.md'))));
   check('T15c the default stateDir is not special when stateDir says otherwise', BLOCK,
     runGate(root, payloadFor(root, win(root, '.claude', 'task-flow', 'demo', 'notes.txt'))));
 }
@@ -353,6 +359,111 @@ for (const value of [true, 1, { by: 'me' }, ['me']]) {
   fs.writeFileSync(file, JSON.stringify({ task: 'demo', phase: 'plan', approvedBy: value }));
   check(`T23 approvedBy ${JSON.stringify(value)} on disk does not approve code`, BLOCK,
     runGate(root, payloadFor(root, win(root, 'src', 'Foo.cs'))));
+}
+
+// --- T24: a finished run approves nothing -----------------------------------
+// Security: state.json stays in the repository. Without this, one approval would
+// keep the gate open long after its run closed - or come committed in a clone.
+{
+  const stateFile = (root, task = 'demo') => path.join(root, '.claude', 'task-flow', task, 'state.json');
+  const put = (root, task, state) => {
+    fs.mkdirSync(path.dirname(stateFile(root, task)), { recursive: true });
+    fs.writeFileSync(stateFile(root, task), JSON.stringify(state));
+  };
+  let root = makeProject({ approved: false });
+  put(root, 'demo', { task: 'demo', phase: 'done', status: 'done', approvedBy: 'user' });
+  check('T24a an approved run that is done does not approve code', BLOCK, runGate(root, payloadFor(root, win(root, 'src', 'Foo.cs'))));
+
+  root = makeProject({ approved: false });
+  put(root, 'demo', { task: 'demo', phase: 'build', status: 'failed', approvedBy: 'user' });
+  check('T24b an approved run that failed does not approve code', BLOCK, runGate(root, payloadFor(root, win(root, 'src', 'Foo.cs'))));
+
+  root = makeProject({ approved: false });
+  put(root, 'old', { task: 'old', phase: 'done', status: 'done', approvedBy: 'user' });
+  put(root, 'demo', { task: 'demo', phase: 'plan', status: 'running', approvedBy: 'user' });
+  check('T24c an unfinished approved run still approves code', ALLOW, runGate(root, payloadFor(root, win(root, 'src', 'Foo.cs'))));
+
+  root = makeProject({ approved: false });
+  put(root, 'demo', { task: 'demo', phase: 'done', status: 'done', approvedBy: 'user' });
+  check('T24d reopening a finished approved run through Edit is blocked', BLOCK,
+    runGate(root, payloadFor(root, win(root, '.claude', 'task-flow', 'demo', 'state.json'), {
+      tool: 'Edit', content: null, extra: { old_string: '"phase":"done","status":"done"', new_string: '"phase":"plan","status":"running"' },
+    })));
+}
+
+// --- T25: the gate fails closed on anything it did not expect ----------------
+// Security: exit 1 is a non-blocking hook error in Claude Code, so a crash on a
+// strange payload would let the write through.
+{
+  const root = makeProject({ approved: false });
+  for (const stdin of ['null', '[1,2]', '"text"', '42']) {
+    check(`T25 payload ${stdin} is refused, not crashed on`, BLOCK, runGate(root, stdin),
+      (r) => (/GATE:/.test(r.stderr) ? null : 'stderr should carry the gate\'s own message'));
+  }
+  const odd = JSON.stringify({ cwd: root, tool_name: 'Write', tool_input: 'not an object' });
+  check('T25 a tool_input that is not an object is treated as code', BLOCK, runGate(root, odd));
+}
+
+// --- T26: markdown that is really instructions needs approval ---------------
+// Security: commands, agents, skills and a CLAUDE.md outside the project are read
+// by the agent as orders; "documentation is not code" must not cover them.
+{
+  const root = makeProject({ approved: false });
+  const home = (...parts) => [TEST_HOME, ...parts].join('\\');
+  check('T26a a command under the project .claude/ is blocked', BLOCK,
+    runGate(root, payloadFor(root, win(root, '.claude', 'commands', 'evil.md'))));
+  check('T26b an agent under ~/.claude/ is blocked', BLOCK,
+    runGate(root, payloadFor(root, home('.claude', 'agents', 'evil.md'))));
+  check('T26c a CLAUDE.md in a parent folder is blocked', BLOCK,
+    runGate(root, payloadFor(root, [path.dirname(root), 'CLAUDE.md'].join('\\'))));
+  check('T26d the auto-memory folder stays open', ALLOW,
+    runGate(root, payloadFor(root, home('.claude', 'projects', 'C--x', 'memory', 'note.md'))));
+  check('T26e the plan-mode folder stays open', ALLOW,
+    runGate(root, payloadFor(root, home('.claude', 'plans', 'plan.md'))));
+  check('T26f other markdown outside the project stays open', ALLOW,
+    runGate(root, payloadFor(root, [path.dirname(root), 'notes', 'idea.md'].join('\\'))));
+  check('T26g the project CLAUDE.md stays open', ALLOW,
+    runGate(root, payloadFor(root, win(root, 'CLAUDE.md'))));
+}
+{
+  const root = makeProject({ approved: true });
+  check('T26h with an approved run, a project command may be written', ALLOW,
+    runGate(root, payloadFor(root, win(root, '.claude', 'commands', 'tool.md'))));
+}
+
+// --- T27: only state.json and notes are bookkeeping in the stateDir ---------
+// Security: a stateDir of "src" would otherwise make the source tree bookkeeping.
+{
+  let root = makeProject({ approved: false });
+  check('T27a a script in the stateDir is code', BLOCK,
+    runGate(root, payloadFor(root, win(root, '.claude', 'task-flow', 'demo', 'x.js'))));
+
+  root = makeProject({ approved: false, withStateDir: true, stateDir: 'src', config: { stateDir: 'src' } });
+  check('T27b stateDir "src" does not open the source tree', BLOCK,
+    runGate(root, payloadFor(root, win(root, 'src', 'app.js'))));
+
+  root = makeProject({ approved: false });
+  check('T27c a relative path is resolved before it is classified', BLOCK,
+    runGate(root, payloadFor(root, '.claude/task-flow/demo/x.js')));
+  check('T27d a relative state.json still gets the self-approval check', BLOCK,
+    runGate(root, payloadFor(root, '.claude/task-flow/demo/state.json', { content: JSON.stringify({ task: 'demo', approvedBy: 'me' }) })));
+}
+
+// --- T28: a path through a link inside the project gets no exemption ---------
+// Security: a repository can commit a link (a junction on Windows) that makes an
+// inside-looking path land in src/ or in ~/.claude.
+{
+  const root = makeProject({ approved: false });
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-gate-link-'));
+  fs.symlinkSync(outside, path.join(root, 'linked'), 'junction');
+  check('T28a markdown through a link in the project is not free', BLOCK,
+    runGate(root, payloadFor(root, win(root, 'linked', 'notes.md'))));
+
+  fs.symlinkSync(path.join(root, 'src'), path.join(root, '.claude', 'task-flow', 'evil'), 'junction');
+  check('T28b a file in a linked run folder is code', BLOCK,
+    runGate(root, payloadFor(root, win(root, '.claude', 'task-flow', 'evil', 'notes.md'))));
+  check('T28c a state.json in a linked run folder is code', BLOCK,
+    runGate(root, payloadFor(root, win(root, '.claude', 'task-flow', 'evil', 'state.json'), { content: '{}' })));
 }
 
 // --- report ---------------------------------------------------------------

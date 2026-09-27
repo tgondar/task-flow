@@ -21,7 +21,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { loadConfig } = require('./config.js');
+const { crossesLink, loadConfig } = require('./config.js');
 
 /** The stages a run passes through, in order. `phase` names the last one COMPLETED,
  *  so the stage in flight is the one that follows it. */
@@ -164,6 +164,8 @@ function assertInside(dir, candidate) {
   if (target !== root && !target.startsWith(root + path.sep)) {
     throw new Error(`refusing to touch ${target}: outside ${root}`);
   }
+  // A link inside the folder can lead anywhere; the text of the path says nothing then.
+  if (crossesLink(root, target)) throw new Error(`refusing to touch ${target}: it goes through a link`);
   return target;
 }
 
@@ -306,7 +308,8 @@ function readPlanTasks(planPath) {
     const line = raw.trim();
     const heading = TASK_HEADING.exec(line);
     if (heading) {
-      awaitingStateLine = { id: heading[1], title: heading[2].trim(), ticked: false, stated: false };
+      // The title is printed on the page: plain text, like everything else read from a file.
+      awaitingStateLine = { id: heading[1], title: plainText(heading[2], 160), ticked: false, stated: false };
       tasks.push(awaitingStateLine);
       inDiscovered = false;
       continue;
@@ -332,7 +335,7 @@ function readPlanTasks(planPath) {
       if (found) {
         tasks.push({
           id: found[2],
-          title: found[3].replace(/\*\*/g, '').trim(),
+          title: plainText(found[3], 160),
           ticked: found[1].toLowerCase() === 'x',
           stated: true,
         });
@@ -344,6 +347,13 @@ function readPlanTasks(planPath) {
 
 /** This run's questions file, wherever it ended up: still open under questions/,
  *  already moved to questions/resolved/, or named in state.artifacts.questions. */
+/** `yyMMdd_<slug><tail>`, exactly. A suffix match is not enough: for runs `a_b`
+ *  and `b`, `260101_a_b.md` ends in `_b.md`, and run `b` would take it for its own. */
+function datedName(slug, tail) {
+  const literal = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^\\d{6}_${literal(slug)}${literal(tail)}$`);
+}
+
 function findQuestionsFile(docsDir, slug, state) {
   const declared = state.artifacts && state.artifacts.questions;
   if (declared) {
@@ -353,13 +363,13 @@ function findQuestionsFile(docsDir, slug, state) {
       return { file: candidate, archived: path.basename(path.dirname(candidate)) === QUESTIONS_ARCHIVE };
     }
   }
-  const suffix = `_${slug}${QUESTIONS_SUFFIX}`;
+  const ownName = datedName(slug, QUESTIONS_SUFFIX);
   for (const [dir, archived] of [
     [path.join(docsDir, QUESTIONS_DIR), false],
     [path.join(docsDir, QUESTIONS_DIR, QUESTIONS_ARCHIVE), true],
   ]) {
     if (!exists(dir)) continue;
-    const hit = fs.readdirSync(dir).find((name) => name.endsWith(suffix));
+    const hit = fs.readdirSync(dir).find((name) => ownName.test(name));
     if (hit) return { file: path.join(dir, hit), archived };
   }
   return null;
@@ -381,7 +391,14 @@ function countOpenQuestions(file) {
 function link(label, docsRelativePath, depth) {
   if (!docsRelativePath) return null;
   const up = '../'.repeat(depth);
-  return `[${label}](${up}${docsRelativePath.split(path.sep).join('/')})`;
+  // A file name is chosen by whoever wrote the file: a `)` in it would end the
+  // link and turn the rest of the name into page markup. The characters that
+  // can end or open markup are percent-encoded; everything else stays readable.
+  const target = docsRelativePath
+    .split(path.sep)
+    .join('/')
+    .replace(/[()[\]<>\s%]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`);
+  return `[${label}](${up}${target})`;
 }
 
 /** Free text out of state.json, reduced to something that cannot forge page
@@ -706,20 +723,25 @@ function isGeneratedPage(file) {
 }
 
 /** One file per run, and exactly one: any older name for the same slug goes, in the
- *  live folder and in the archive alike. Only `*_<slug>.md` is ever removed, and
+ *  live folder and in the archive alike. Only `yyMMdd_<slug>.md` is ever removed, and
  *  only when this renderer wrote it: a file a person put in runs/ is theirs. */
 function placeDocument({ liveDir, archiveDir, fileName, slug, body, archive }) {
+  // runs/ or runs/finished/ as a link would carry every write and delete below
+  // somewhere else entirely.
+  if (crossesLink(path.dirname(liveDir), archiveDir)) {
+    throw new Error(`refusing to write under ${liveDir}: it goes through a link`);
+  }
   const targetDir = archive ? archiveDir : liveDir;
   fs.mkdirSync(targetDir, { recursive: true });
   const target = assertInside(targetDir, path.join(targetDir, fileName));
 
   fs.writeFileSync(target, body, 'utf8');
 
-  const suffix = `_${slug}.md`;
+  const ownName = datedName(slug, '.md');
   for (const dir of [liveDir, archiveDir]) {
     if (!exists(dir)) continue;
     for (const name of fs.readdirSync(dir)) {
-      if (!name.endsWith(suffix)) continue;
+      if (!ownName.test(name)) continue;
       const stale = assertInside(dir, path.join(dir, name));
       if (stale !== target && isGeneratedPage(stale)) fs.unlinkSync(stale);
     }

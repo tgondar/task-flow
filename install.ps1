@@ -41,7 +41,9 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 
 # --- 1. the marketplace ------------------------------------------------------
 $known = (& claude plugin marketplace list 2>&1) -join "`n"
-if ($known -match "(?m)\b$marketplace\b") {
+# The whole name, not a word inside a longer one: \b matches before a hyphen, so
+# a marketplace called task-flow-x would pass for this one and get "refreshed".
+if ($known -match "(?m)(?<![\w-])$([regex]::Escape($marketplace))(?![\w-])") {
     Write-Output "Marketplace '$marketplace' already added; refreshing it."
     & claude plugin marketplace update $marketplace
 } else {

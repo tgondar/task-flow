@@ -924,6 +924,66 @@ console.log('\n--- free text out of state.json, again ---');
   check('S21 and the reason says it is not trusted', /not trusted/.test((out.skipped[0] || {}).why || ''), JSON.stringify(out.skipped));
 }
 
+// --- S22: a plan heading cannot put markup on the page ----------------------
+// Security: task titles come from the plan, a file anyone with the docs folder can
+// write. The page is read as generated truth.
+{
+  const f = fixture({ plan: '## T1 · <img src=x onerror=alert(1)> [click me](javascript:alert(1)) ![](https://attacker.example/p.png)\n\n- [ ] estado\n' });
+  renderAll({ projectDir: f.projectDir });
+  const page = fs.readFileSync(f.live(), 'utf8');
+  check('S22 no HTML tag from a heading', !/<img/i.test(page), page);
+  check('S22 no link from a heading', !/\]\(javascript/i.test(page), page);
+  check('S22 no image or remote URL from a heading', !/!\[|attacker\.example/.test(page), page);
+}
+
+// --- S23: a file name cannot end a link and start another --------------------
+{
+  const f = fixture();
+  const name = 'a) [PR approved](evil.html) (b.md';
+  fs.writeFileSync(path.join(f.docsDir, 'ideas', name), '# x');
+  const statePath = path.join(f.projectDir, 'docs', 'pipeline', 'demo', 'state.json');
+  const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  fs.writeFileSync(statePath, JSON.stringify({ ...state, artifacts: { ...state.artifacts, review: `ideas/${name}` } }));
+  renderAll({ projectDir: f.projectDir });
+  const page = fs.readFileSync(f.live(), 'utf8');
+  check('S23 a ")" in a file name does not forge a second link', !/\[PR approved\]\(/.test(page), page);
+}
+
+// --- S24: runs whose names end alike keep their own pages --------------------
+{
+  const f = fixture({ slug: 'b' });
+  const other = path.join(f.projectDir, 'docs', 'pipeline', 'a_b');
+  fs.mkdirSync(other, { recursive: true });
+  fs.writeFileSync(path.join(other, 'state.json'), JSON.stringify({
+    task: 'a_b', phase: 'plan', status: 'running', created: '2026-09-08', updated: '2026-09-08T18:36:23Z',
+  }));
+  renderAll({ projectDir: f.projectDir });
+  check('S24 run a_b keeps its page when run b renders', fs.existsSync(path.join(f.liveDir, '260908_a_b.md')), ls(f.liveDir).join(','));
+  check('S24 and run b has its own', fs.existsSync(path.join(f.liveDir, '260908_b.md')), ls(f.liveDir).join(','));
+}
+
+// --- S25: runs/ as a link is never written through ----------------------------
+{
+  const f = fixture();
+  const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-render-link-'));
+  fs.symlinkSync(elsewhere, f.liveDir, 'junction');
+  const out = renderAll({ projectDir: f.projectDir });
+  check('S25 nothing is rendered through a linked runs/', out.rendered.length === 0 && out.archived.length === 0, JSON.stringify(out));
+  check('S25 and the link target is untouched', fs.readdirSync(elsewhere).length === 0, fs.readdirSync(elsewhere).join(','));
+}
+
+// --- S26: a plan reached through a link is not read -------------------------
+{
+  const f = fixture({ plan: null });
+  const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-render-linkplan-'));
+  fs.writeFileSync(path.join(elsewhere, '260908_demo.plan.md'), '## T1 · SEGREDO ATRAVES DE LIGACAO\n');
+  fs.rmSync(path.join(f.docsDir, 'plans'), { recursive: true, force: true });
+  fs.symlinkSync(elsewhere, path.join(f.docsDir, 'plans'), 'junction');
+  renderAll({ projectDir: f.projectDir });
+  const page = fs.existsSync(f.live()) ? fs.readFileSync(f.live(), 'utf8') : '';
+  check('S26 a plan behind a link is not pasted into the page', !/SEGREDO/.test(page), page);
+}
+
 // --- report -----------------------------------------------------------------
 const total = passed + failures.length;
 console.log(`\n${passed}/${total} passed`);

@@ -81,14 +81,38 @@ try {
 }
 if (stateDir === null) letItStop();
 
-/** Every run the pipeline currently knows about. Any failure here means "no runs". */
+// --- what this hook may say about a run -------------------------------------
+// Everything this hook writes to stderr with exit 2 is read by the model as an
+// instruction to act on. state.json is repository data - a cloned repository
+// can commit one - so no free text from it is ever echoed: a run is named by its
+// folder (a closed shape, the same one the renderer requires), its phase only
+// if it is one of the known phases, its cursor only if it looks like a task id.
+const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const PHASES = ['idea', 'spec', 'plan', 'build', 'tests', 'harden', 'review', 'done'];
+const shownPhase = (value) => (PHASES.includes(value) ? value : 'an unknown phase');
+const shownCursor = (value) =>
+  typeof value === 'string' && /^Td+[a-z]?$/i.test(value) ? value : 'no cursor';
+
+/** Where the loop guards live: the person's own folder, never a shared temp
+ *  directory another user could plant a link in. */
+const guardFile = (kind, sessionKey) => {
+  const dir = path.join(os.homedir(), '.claude', 'task-flow-guards');
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, `${kind}-${sessionKey}.json`);
+};
+
+/** Every run the pipeline currently knows about, each tagged with its folder
+ *  name as `$dir`. Any failure here means "no runs". */
 function readRuns() {
   const runs = [];
   for (const task of fs.readdirSync(stateDir)) {
+    if (!SAFE_SEGMENT.test(task)) continue; // the renderer skips it too
     const statePath = path.join(stateDir, task, 'state.json');
     if (!fs.existsSync(statePath)) continue;
     try {
-      runs.push(JSON.parse(fs.readFileSync(statePath, 'utf8')));
+      const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+      if (!state || typeof state !== 'object' || Array.isArray(state)) continue;
+      runs.push({ ...state, $dir: task });
     } catch (error) {
       // One corrupt state.json must not hide the others, and must not block.
       continue;
@@ -153,8 +177,8 @@ try {
       if (tasksTime >= changedAt) continue;
 
       const sessionKey = String(payload.session_id || 'nosession').replace(/[^A-Za-z0-9_-]/g, '');
-      const guardPath = path.join(os.tmpdir(), `task-flow-tasks-${sessionKey}.json`);
-      const signature = `${run.task}|${run.phaseChangedAt}`;
+      const guardPath = guardFile('tasks', sessionKey);
+      const signature = `${run.$dir}|${run.phaseChangedAt}`;
       let guard = { signature: null, consecutive: 0 };
       try {
         guard = JSON.parse(fs.readFileSync(guardPath, 'utf8'));
@@ -164,14 +188,14 @@ try {
       if (guard.signature !== signature) guard = { signature, consecutive: 0 };
       if (guard.consecutive >= TASKS_SYNC_MAX_PUSHES) {
         process.stderr.write(
-          `STOP-HOOK: the task list is still older than the last phase change of "${run.task}"; ` +
+          `STOP-HOOK: the task list is still older than the last phase change of "${run.$dir}"; ` +
             'not pushing again. Say so in the reply.\n'
         );
         break;
       }
       fs.writeFileSync(guardPath, JSON.stringify({ signature, consecutive: guard.consecutive + 1 }));
       keepGoing(
-        `the task list was not updated after the last phase change of run "${run.task}".`,
+        `the task list was not updated after the last phase change of run "${run.$dir}".`,
         `Update this run's entry in ${tasksFile} now (its detail and the document links; its status only ` +
           'if this run created the entry), as SKILL.md §8b requires at every phase change, then carry on.'
       );
@@ -194,14 +218,13 @@ if (!live) letItStop();
 // --- loop protection -------------------------------------------------------
 // The signature is what a phase of real work necessarily changes. If it has not
 // moved, the push did nothing, and pushing again will do nothing either.
-const signature = [live.task, live.phase, live.buildCursor, live.updated].join('|');
+const signature = [live.$dir, live.phase, live.buildCursor, live.updated].join('|');
 
 const sessionKey = String(payload.session_id || 'nosession').replace(/[^A-Za-z0-9_-]/g, '');
-const guardPath = path.join(os.tmpdir(), `task-flow-stop-${sessionKey}.json`);
 
 let guard = { signature: null, consecutive: 0 };
 try {
-  guard = JSON.parse(fs.readFileSync(guardPath, 'utf8'));
+  guard = JSON.parse(fs.readFileSync(guardFile('stop', sessionKey), 'utf8'));
 } catch (error) {
   // No guard yet, or an unreadable one: start the budget over.
 }
@@ -210,14 +233,14 @@ if (guard.signature !== signature) guard = { signature, consecutive: 0 };
 
 if (guard.consecutive >= MAX_PUSHES_WITHOUT_PROGRESS) {
   letItStop(
-    `giving up: ${MAX_PUSHES_WITHOUT_PROGRESS} pushes made no progress on "${live.task}" ` +
-      `(still ${live.phase}/${live.buildCursor || 'no cursor'}). Letting the turn end so the ` +
+    `giving up: ${MAX_PUSHES_WITHOUT_PROGRESS} pushes made no progress on "${live.$dir}" ` +
+      `(still ${shownPhase(live.phase)}/${shownCursor(live.buildCursor)}). Letting the turn end so the ` +
       'session is not trapped. Look at why the run is not advancing.'
   );
 }
 
 try {
-  fs.writeFileSync(guardPath, JSON.stringify({ signature, consecutive: guard.consecutive + 1 }));
+  fs.writeFileSync(guardFile('stop', sessionKey), JSON.stringify({ signature, consecutive: guard.consecutive + 1 }));
 } catch (error) {
   // If the budget cannot be persisted, the hook cannot count - and a hook that
   // cannot count is exactly the trap this file exists to avoid.
@@ -225,7 +248,7 @@ try {
 }
 
 keepGoing(
-  `run "${live.task}" is still ${live.phase} and its status is "running".`,
+  `run "${live.$dir}" is still ${shownPhase(live.phase)} and its status is "running".`,
   'Carry on to the next phase. Do not hand the turn back: the only stops are the approval gate, ' +
     'a red test run, and a genuine block - and each of those takes status out of "running" first.'
 );

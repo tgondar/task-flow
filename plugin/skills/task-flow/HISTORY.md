@@ -113,3 +113,37 @@ Every rule below comes from something that went wrong, or nearly did, in them.
   the file's modification time, never its content — because whoever owns the task
   list reads it, not the PR, and the prose rule to update it was the one that got
   forgotten.
+
+## A repository is untrusted input
+
+A security review before the first public release looked at the plugin the way
+an attacker would: someone who can commit to a repository the user later clones and
+opens. The hooks run on every turn of every conversation there, so anything they
+read from the repository is an input, never a fact.
+
+- **A `docsDir` outside the repository needs the person's trust, per machine.** The
+  Stop hook writes and deletes run pages under it on every turn; a committed
+  configuration could otherwise point that at any folder, or at a network share that
+  Windows would contact with the user's credentials. The trust is a project/folder
+  pair kept in the home folder, so repointing `docsDir` needs trusting again, and
+  network paths are refused outright.
+- **Only folder variables expand.** The expansion is printed in messages the model
+  reads, so an arbitrary variable was a way to show it a secret.
+- **The renderer only deletes pages it generated**, and matches its own page names
+  exactly: a suffix match let one run's name swallow another's.
+- **The gate judges an edit by its result.** Checking the new text alone missed a
+  key split across the old and new text, an escaped key, a renamed key and a
+  non-string value; replaying the edit and parsing the file catches them all at
+  once. Only an unfinished run's approval counts, because `state.json` stays in the
+  repository and an old approval would otherwise keep the gate open for good.
+- **Markdown that is instructions is not documentation.** Commands, agents and
+  skills under a `.claude` folder, and a `CLAUDE.md` outside the project, need
+  approval like code; the harness's own memory and plan folders do not.
+- **A link is never "inside".** Containment was checked on the text of a path, and a
+  committed link (a junction on Windows) makes an inside-looking path land anywhere.
+  Links are detected without following them, so their target is never touched.
+- **The hooks never echo `state.json`.** What a hook prints with exit 2 is read by
+  the model as something to act on; a run is named by its folder, and phases and
+  cursors only when they have the expected shape.
+- **The gate fails closed on its own bugs too.** Exit 1 is a non-blocking hook error,
+  so an uncaught exception would have let the write through.

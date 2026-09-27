@@ -35,16 +35,16 @@ case "$SCRATCH" in
   *"/.claude/"*) echo "ABORT: scratch dir is under ~/.claude." >&2; exit 1 ;;
 esac
 
-# The hook writes its loop guard to node's temp dir, which is not the shell's.
-# On Windows node reports a drive path; find needs the POSIX form.
-NODE_TMP_RAW="$(node -e 'process.stdout.write(require("os").tmpdir())')"
+# The hook writes its loop guard under ~/.claude/task-flow-guards, as node sees
+# the home folder. On Windows node reports a drive path; find needs the POSIX form.
+GUARD_DIR_RAW="$(node -e 'const p=require("path").join(require("os").homedir(),".claude","task-flow-guards");require("fs").mkdirSync(p,{recursive:true});process.stdout.write(p)')"
 if command -v cygpath >/dev/null 2>&1; then
-  NODE_TMP="$(cygpath -u "$NODE_TMP_RAW")"
+  GUARD_DIR="$(cygpath -u "$GUARD_DIR_RAW")"
 else
-  NODE_TMP="$NODE_TMP_RAW"
+  GUARD_DIR="$GUARD_DIR_RAW"
 fi
-if [ ! -d "$NODE_TMP" ]; then
-  echo "ABORT: cannot reach node's temp dir ($NODE_TMP_RAW -> $NODE_TMP)." >&2
+if [ ! -d "$GUARD_DIR" ]; then
+  echo "ABORT: cannot reach the guard folder ($GUARD_DIR_RAW -> $GUARD_DIR)." >&2
   exit 1
 fi
 
@@ -90,7 +90,7 @@ guards_since_marker() {
     value="$(node -e 'try{process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).consecutive||0))}catch(e){process.stdout.write("0")}' "$file")"
     [ "$value" -gt "$best" ] && best="$value"
   done <<EOF
-$(find "$NODE_TMP" -maxdepth 1 -name 'task-flow-stop-*.json' -newer "$SCRATCH/.marker" 2>/dev/null)
+$(find "$GUARD_DIR" -maxdepth 1 -name 'stop-*.json' -newer "$SCRATCH/.marker" 2>/dev/null)
 EOF
   echo "$best"
 }

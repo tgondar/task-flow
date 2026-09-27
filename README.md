@@ -127,6 +127,29 @@ SHA as the version, so every commit on `main` is an update; with auto-update on,
 sessions pick it up in the background (or run `/plugin marketplace update task-flow`
 to force it, and `/reload-plugins` inside a running session).
 
+## Trust model
+
+Know what you are installing:
+
+- **The hooks run on every turn, in every repository**, as you. They act only where
+  `.claude/task-flow.json` exists, but the code runs everywhere.
+- **Every commit on `main` reaches you** through auto-update, with no release step
+  in between. Installing task-flow means trusting this repository's `main` the way
+  you trust any code you run. If you would rather review updates first, turn
+  auto-update off for the marketplace (`autoUpdate` in `~/.claude/settings.json`)
+  and update by hand with `/plugin marketplace update task-flow`.
+- **The review personas come from a second plugin**, agent-skills, which updates
+  on its own schedule. `agents/security-auditor.md` and `agents/code-reviewer.md`
+  load its persona files at run time.
+- **A repository's configuration is untrusted input.** Paths in
+  `.claude/task-flow.json` are contained and checked; a `docsDir` outside the
+  repository needs your per-machine trust; only folder variables (`HOME`,
+  `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `OneDrive*`) expand in it; and nothing
+  from a run's `state.json` is echoed back to the model by the hooks.
+- **The approval gate is a guardrail, not a sandbox.** It stops code being written
+  by drift before a plan is approved. It does not stop an agent determined to get
+  around it (Bash is not gated), and it is not meant to.
+
 ## Layout
 
 ```

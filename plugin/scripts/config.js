@@ -65,6 +65,31 @@ function isInside(root, candidate) {
   return target === base || target.startsWith(base.endsWith(path.sep) ? base : base + path.sep);
 }
 
+/** True when a folder or file between `root` (exclusive) and `candidate`
+ *  (inclusive) is a symbolic link or a junction. Only lstat: a link is never
+ *  followed, so its target - which may be anywhere, a network share included - is
+ *  never touched. A path that does not exist yet stops the walk: nothing below a
+ *  missing folder can be a link. Text containment is the caller's job. */
+function crossesLink(root, candidate) {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return false;
+  let current = path.resolve(root);
+  for (const part of relative.split(path.sep)) {
+    current = path.join(current, part);
+    let stats;
+    try {
+      stats = fs.lstatSync(current);
+    } catch {
+      return false;
+    }
+    if (stats.isSymbolicLink()) return true;
+  }
+  return false;
+}
+
+/** Inside by text, and without a link on the way. */
+const isPlainlyInside = (root, candidate) => isInside(root, candidate) && !crossesLink(root, candidate);
+
 /** `\\host\share`, `//host/share`, `\\?\C:\x`, `\\.\device`. Merely stat-ing one of
  *  these makes Windows contact the host, and offer it the user's credentials. */
 const isNetworkOrDevicePath = (value) => /^[\\/]{2}/.test(String(value));
@@ -79,11 +104,20 @@ function lookupEnv(env, name) {
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+/** The variables a docsDir may name: the ones that locate a person's own folders.
+ *  The value is repository data and its expansion ends up in messages the model
+ *  reads, so `${GITHUB_TOKEN}` must not be a way to put a secret in front of it. */
+const FOLDER_VARIABLES = ['HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA'];
+const isFolderVariable = (name) =>
+  /^onedrive/i.test(name) || FOLDER_VARIABLES.some((known) => known.toLowerCase() === name.toLowerCase());
+
 /** Expands `%NAME%`, `${NAME}` and a leading `~`.
  *
  *  An undefined variable is an error, never an empty string: `%DOCS%/notes`
  *  expanded to `/notes` would be an absolute path somewhere nobody chose, and
- *  expanded to `notes` would silently become a folder inside the repository. */
+ *  expanded to `notes` would silently become a folder inside the repository.
+ *  Only folder variables expand (FOLDER_VARIABLES), and an error names the
+ *  variable, never its value. */
 function expandEnv(value, env = process.env) {
   if (typeof value !== 'string') throw new Error('is not a string');
   let text = value.trim();
@@ -92,6 +126,9 @@ function expandEnv(value, env = process.env) {
   }
   const replace = (whole, name) => {
     if (!ENV_NAME.test(name)) throw new Error(`${whole} is not a variable name`);
+    if (!isFolderVariable(name)) {
+      throw new Error(`${whole} is not allowed: only ${FOLDER_VARIABLES.join(', ')} and OneDrive* name folders`);
+    }
     const found = lookupEnv(env, name);
     if (found === undefined || found === '') throw new Error(`${whole} is not defined on this machine`);
     return found;
@@ -159,6 +196,8 @@ function resolveDocsDir(value, projectDir, env) {
 function resolveTasksFile(value, docsDir) {
   if (typeof value !== 'string' || !value.trim()) throw new Error('is empty');
   const trimmed = value.trim();
+  // The name is printed in hook messages the model reads: no line breaks in it.
+  if (/[\u0000-\u001f\u007f]/.test(trimmed)) throw new Error('contains control characters');
   if (path.isAbsolute(trimmed) || /^[A-Za-z]:/.test(trimmed)) {
     throw new Error('must be relative to docsDir, not absolute');
   }
@@ -171,6 +210,7 @@ function resolveTasksFile(value, docsDir) {
   if (!isInside(docsDir, resolved) || resolved === path.resolve(docsDir)) {
     throw new Error(`leaves docsDir (${withExtension})`);
   }
+  if (crossesLink(docsDir, resolved)) throw new Error(`leaves docsDir through a link (${withExtension})`);
   return resolved;
 }
 
@@ -184,6 +224,7 @@ function resolveStateDir(value, projectDir) {
   if (!isInside(projectDir, resolved) || path.resolve(projectDir) === resolved) {
     throw new Error(`is not a folder inside the project (${setting})`);
   }
+  if (crossesLink(projectDir, resolved)) throw new Error(`leaves the project through a link (${setting})`);
   return resolved;
 }
 
@@ -275,7 +316,7 @@ function loadConfig(projectDir, { env = process.env, requireExisting = true } = 
   else {
     try {
       const docsDir = resolveDocsDir(raw.docsDir, projectDir, env);
-      if (!isInside(projectDir, docsDir) && !isTrusted(projectDir, docsDir)) {
+      if (!isPlainlyInside(projectDir, docsDir) && !isTrusted(projectDir, docsDir)) {
         // Decided before anything touches the folder: an untrusted path is not even stat-ed.
         fail('docsDir', `is outside the project and not trusted on this machine (${docsDir}); ` +
           'confirm the folder with the person, then run: config.js trust');
@@ -369,7 +410,7 @@ function initConfig(projectDir, { docsDir, language = DEFAULT_LANGUAGE, tasksFil
   fs.mkdirSync(path.join(projectDir, '.claude'), { recursive: true });
   fs.writeFileSync(configPath(projectDir), JSON.stringify(next, null, 2) + '\n');
   // The person just gave this folder, so it is trusted for this project.
-  if (!isInside(projectDir, resolvedDocs)) trustDocsDir(projectDir, resolvedDocs);
+  if (!isPlainlyInside(projectDir, resolvedDocs)) trustDocsDir(projectDir, resolvedDocs);
   return loadConfig(projectDir, { env });
 }
 
@@ -378,6 +419,7 @@ module.exports = {
   DEFAULT_STATE_DIR,
   PAGE_LANGUAGES,
   configPath,
+  crossesLink,
   expandEnv,
   initConfig,
   isInside,
@@ -448,7 +490,7 @@ if (require.main === module) {
       if (!read.exists || read.error) throw new Error(`${CONFIG_FILE} ${read.error || 'is missing'}`);
       if (read.raw.docsDir === undefined) throw new Error('docsDir is not set');
       const docsDir = resolveDocsDir(read.raw.docsDir, projectDir, process.env);
-      if (isInside(projectDir, docsDir)) {
+      if (isPlainlyInside(projectDir, docsDir)) {
         process.stdout.write(`docsDir is inside the project (${docsDir}); nothing to trust.\n`);
       } else {
         const file = trustDocsDir(projectDir, docsDir);
