@@ -197,3 +197,19 @@ among several, that was waiting on them.
   dropped, since its PR link and branch are still worth finding. A finished run
   that still has something waiting on it (feed.mjs `waitsOnUser`) stays in the
   open list - being done is not the same as being closed out.
+- **`CLAUDE_PROJECT_DIR` is not trusted blindly against `payload.cwd` any more.**
+  Both hooks tried `CLAUDE_PROJECT_DIR` first because it is meant to be a stable
+  anchor for the session's project root. But a background session that isolates
+  its edits with `EnterWorktree` keeps that env var pointing at the original
+  checkout for the whole session - it does not follow the worktree - while
+  every real tool call, and `payload.cwd`, correctly target the worktree. An
+  approved, running run then lived only under the worktree's `stateDir`, which
+  the stale env var never looked at: `gate.js` blocked every write forever
+  ("no unfinished run... has approvedBy filled"), and `stop.js` saw no running
+  run at all and let the turn end. Both hooks now look for positive evidence
+  before trusting `CLAUDE_PROJECT_DIR` over `payload.cwd`: `gate.js` checks
+  which of the two candidates actually contains the file this call is writing;
+  `stop.js` checks which of the two actually has a running run under its
+  `stateDir`. Either can still win - this is not "prefer cwd", it is "prefer
+  whichever one the evidence points at" - so the ordinary case (both point at
+  the same project) is unchanged.

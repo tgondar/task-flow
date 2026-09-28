@@ -529,6 +529,32 @@ for (const value of [true, 1, { by: 'me' }, ['me']]) {
     runGate(code, payloadFor(code, win(code, 'src', 'demo', 'questions.json'), { content: '{"i18n":{"en":"Hello"}}' })));
 }
 
+// --- T30: a worktree session with a stale CLAUDE_PROJECT_DIR --------------
+// A background session that isolates its edits with EnterWorktree keeps
+// CLAUDE_PROJECT_DIR pointing at the original checkout for the life of the
+// session, but the run actually lives - approved - in the worktree, and every
+// tool call's payload.cwd correctly targets it. The gate must follow the file
+// being written, not the stale env var, or an approved run is blocked forever.
+{
+  const mainCheckout = makeProject({ approved: false }); // no run of interest here
+  const worktree = makeProject({ approved: true });
+  const payload = JSON.parse(payloadFor(worktree, win(worktree, 'src', 'Foo.cs')));
+  payload.cwd = worktree.replace(/\//g, '\\');
+  check('T30a an approved run in the worktree is allowed despite a stale CLAUDE_PROJECT_DIR', ALLOW,
+    runGate(worktree, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: mainCheckout.replace(/\\/g, '/') }));
+}
+{
+  // The reverse must still work: when the file being written is under
+  // CLAUDE_PROJECT_DIR (the ordinary case), that stays authoritative even if
+  // payload.cwd happens to point elsewhere.
+  const root = makeProject({ approved: false });
+  const elsewhere = makeProject({ approved: true });
+  const payload = JSON.parse(payloadFor(root, win(root, 'src', 'Foo.cs')));
+  payload.cwd = elsewhere.replace(/\//g, '\\');
+  check('T30b CLAUDE_PROJECT_DIR still wins when the file is under it', BLOCK,
+    runGate(root, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: root.replace(/\\/g, '/') }));
+}
+
 // --- report ---------------------------------------------------------------
 const total = passed + failures.length;
 console.log(`\n${passed}/${total} passed`);

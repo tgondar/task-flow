@@ -488,6 +488,31 @@ function withTaskList({ phaseChangedAt, tasksTime, status = 'blocked' }) {
     { code: fs.existsSync(path.join(os.tmpdir(), `task-flow-stop-${key}.json`)) ? 1 : 0 });
 }
 
+// --- T42: a worktree session with a stale CLAUDE_PROJECT_DIR --------------
+// EnterWorktree does not update CLAUDE_PROJECT_DIR for the rest of the session,
+// so a run pushed forward inside a worktree would otherwise look unfindable:
+// the env var still names the original checkout, which has no running run at
+// all. The hook must find the run under payload.cwd instead of giving up.
+{
+  const mainCheckout = makeProject([], { withStateDir: false }); // opted in, no runs
+  const worktree = makeProject([{ status: 'running', phase: 'build' }]);
+  const payload = JSON.parse(payloadFor(worktree));
+  payload.cwd = worktree.replace(/\//g, '\\');
+  check('T42a a running run in the worktree is still pushed despite a stale CLAUDE_PROJECT_DIR', BLOCK,
+    runStop(worktree, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: mainCheckout.replace(/\\/g, '/') }));
+}
+{
+  // The reverse must still work: when CLAUDE_PROJECT_DIR itself has the running
+  // run, that stays authoritative even if payload.cwd points elsewhere (e.g. a
+  // stray Bash cd within the same, non-worktree session).
+  const root = makeProject([{ status: 'running', phase: 'build' }]);
+  const elsewhere = makeProject([], { withStateDir: false });
+  const payload = JSON.parse(payloadFor(root));
+  payload.cwd = elsewhere.replace(/\//g, '\\');
+  check('T42b CLAUDE_PROJECT_DIR still wins when it has the running run', BLOCK,
+    runStop(root, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: root.replace(/\\/g, '/') }));
+}
+
 // --- report ---------------------------------------------------------------
 const total = passed + failures.length;
 console.log(`\n${passed}/${total} passed`);

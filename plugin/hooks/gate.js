@@ -70,11 +70,39 @@ if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
 
 const input = payload.tool_input && typeof payload.tool_input === 'object' ? payload.tool_input : {};
 
+// The file this call writes, read early because it decides which of the two
+// project-root candidates below is the real one.
+const fileRaw =
+  typeof input.file_path === 'string' ? input.file_path
+    : typeof input.notebook_path === 'string' ? input.notebook_path
+      : '';
+
 // --- only in a project that opted in --------------------------------------
 // Installed as a plugin, this hook runs in every repository on the machine.
 // .claude/task-flow.json is the opt-in; a project without one is none of the
 // gate's business, and failing closed there would block every code edit in it.
-const projectDirRaw = process.env.CLAUDE_PROJECT_DIR || payload.cwd || '';
+//
+// CLAUDE_PROJECT_DIR is tried first because it is meant to be a stable anchor
+// for the session's project root. But it is fixed when the session starts and
+// does not follow EnterWorktree: a background session that isolates its edits
+// into a worktree keeps CLAUDE_PROJECT_DIR pointing at the original checkout,
+// while every real tool call - and payload.cwd - targets the worktree. That
+// stale value would make the gate look for approval in the wrong checkout and
+// block every write forever, even an approved one. So when the file being
+// written sits under payload.cwd but not under CLAUDE_PROJECT_DIR, payload.cwd
+// is where the work is actually happening, and it wins.
+const envProjectDir = process.env.CLAUDE_PROJECT_DIR || '';
+const cwdProjectDir = payload.cwd || '';
+const isUnder = (dir, file) => {
+  if (!dir || !file) return false;
+  const normDir = normalise(dir);
+  const normFile = normalise(file);
+  return normFile === normDir || normFile.startsWith(normDir + '/');
+};
+const projectDirRaw =
+  path.isAbsolute(fileRaw) && !isUnder(envProjectDir, fileRaw) && isUnder(cwdProjectDir, fileRaw)
+    ? cwdProjectDir
+    : envProjectDir || cwdProjectDir || '';
 if (!projectDirRaw) allow();
 
 // The state directory is where writes are allowed without approval, so it must
@@ -92,13 +120,9 @@ try {
 }
 if (stateDirRaw === null) allow();
 
-// The file this call writes. A relative path is resolved against the project
-// before it is classified - as text it could pass for bookkeeping. A call with
-// no path at all resolves to the project itself, which is code.
-const fileRaw =
-  typeof input.file_path === 'string' ? input.file_path
-    : typeof input.notebook_path === 'string' ? input.notebook_path
-      : '';
+// A relative path is resolved against the project before it is classified - as
+// text it could pass for bookkeeping. A call with no path at all resolves to
+// the project itself, which is code.
 const targetRaw = path.resolve(projectDirRaw, fileRaw);
 const projectDir = normalise(projectDirRaw);
 const stateDir = normalise(stateDirRaw);
