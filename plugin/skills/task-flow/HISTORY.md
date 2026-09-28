@@ -193,10 +193,14 @@ among several, that was waiting on them.
 - **The home view lists open runs, not every run.** Long-lived projects finish
   many runs, and a page that keeps listing them all buries the ones that still
   need the user. A finished run (`status: "done"` and nothing waiting on it) is
-  folded into a collapsed "finished" accordion per project instead of being
-  dropped, since its PR link and branch are still worth finding. A finished run
-  that still has something waiting on it (feed.mjs `waitsOnUser`) stays in the
-  open list - being done is not the same as being closed out.
+  left off the home view entirely instead of being dropped in with the open
+  ones. (An earlier version folded it into a collapsed "finished" accordion per
+  project instead, reachable in one click since its PR link and branch are
+  still worth finding - dropped after the user asked to see only the open
+  runs; if this is revisited, the run's own page and its docs `runs/finished/`
+  folder are still there.) A finished run that still has something waiting on
+  it (feed.mjs `waitsOnUser`) stays in the open list - being done is not the
+  same as being closed out.
 - **`CLAUDE_PROJECT_DIR` is not trusted blindly against `payload.cwd` any more.**
   Both hooks tried `CLAUDE_PROJECT_DIR` first because it is meant to be a stable
   anchor for the session's project root. But a background session that isolates

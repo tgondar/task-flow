@@ -6,7 +6,7 @@
 // innerHTML in this file, and a PR link is only rendered when the server has
 // already reduced it to an http(s) URL.
 import { h } from "./dom.js";
-import { badge, button, accordion } from "./ui.js";
+import { badge, button } from "./ui.js";
 
 /** A run is finished once it is done and nothing on it still waits for the
  *  user (feed.mjs: a done run with open questions still waits). */
@@ -100,20 +100,11 @@ export function renderHome(root, { projects, t, go }) {
   if (projects.some((project) => project.unreadable)) body.push(h("p", { class: "empty" }, t("home.unreadable")));
   for (const project of readable) {
     const open = project.runs.filter((run) => !isFinished(run));
-    const finished = project.runs.filter(isFinished);
     const children = open.length
       ? [h("ul", { class: "runs" }, open.map((run) => runRow(project, run, t, go)))]
-      : finished.length
+      : project.runs.length
       ? [h("p", { class: "empty" }, t("home.allFinished"))]
       : [];
-    if (finished.length) {
-      children.push(
-        accordion({
-          label: t("home.finished", { count: finished.length }),
-          content: () => h("ul", { class: "runs" }, finished.map((run) => runRow(project, run, t, go))),
-        })
-      );
-    }
     body.push(
       h(
         "section",

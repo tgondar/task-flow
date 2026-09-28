@@ -11,8 +11,6 @@
   "home.waiting_other": "{count} runs waiting for you",
   "home.nothingWaiting": "Nothing is waiting for you.",
   "home.generated": "summary written {ago}",
-  "home.finished_one": "{count} finished run",
-  "home.finished_other": "{count} finished runs",
   "home.allFinished": "Every run here is finished.",
   "status.waiting": "waiting for you",
   "status.running": "running",

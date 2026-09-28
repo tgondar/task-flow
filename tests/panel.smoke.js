@@ -79,11 +79,7 @@ async function until(browser, expression, ms = 5000) {
 
     const rows = await browser.eval('[...document.querySelectorAll(".run-row")].map((row) => row.dataset.slug)');
     check('U1 the home view lists open runs, waiting ones first, and hides finished ones', JSON.stringify(rows) === JSON.stringify(['pdf-cleanup', 'invoices']), JSON.stringify(rows));
-    const accordionLabel = await browser.eval('document.querySelector(".accordion summary").textContent');
-    check('U1b a finished run is folded into a "finished" accordion instead', /1 finished run/.test(accordionLabel), accordionLabel);
-    await browser.eval('document.querySelector(".accordion summary").click()');
-    await until(browser, 'document.querySelectorAll(".run-row").length === 3');
-    check('U1c opening it reveals the finished run', (await browser.eval('document.querySelectorAll(".run-row").length')) === 3);
+    check('U1b a finished run has no accordion or any other way to reveal it', (await browser.eval('document.querySelector(".accordion")')) === null);
     const summary = await browser.eval('document.querySelector(".panel-summary").textContent');
     check('U2 it says how many runs wait for the user', /2 runs waiting for you/.test(summary), summary);
     const invoices = await browser.eval('document.querySelector(\'[data-slug="invoices"]\').textContent');

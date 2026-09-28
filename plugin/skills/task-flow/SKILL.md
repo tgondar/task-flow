@@ -627,8 +627,8 @@ instead of a second later, and the work is done either way.
 ### Answers from the panel
 
 The user may answer from the **task-flow panel** — a local page listing the open
-runs of every project on the machine, with finished runs folded into a collapsed
-"finished" section per project — instead of the conversation. The panel cannot
+runs of every project on the machine, with finished runs left off the home view
+entirely — instead of the conversation. The panel cannot
 write to the docs folder, to `stateDir`, or to anything of the run's: it leaves
 the answers in a folder of its own, and **you take them in** with
 
