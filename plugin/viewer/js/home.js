@@ -5,8 +5,9 @@
 // so it only ever enters the page as a text node (dom.js h). There is no
 // innerHTML in this file, and a PR link is only rendered when the server has
 // already reduced it to an http(s) URL.
-import { h } from "./dom.js";
-import { badge, button } from "./ui.js";
+window.TFV = window.TFV || {};
+(function () {
+const { h, badge, button } = window.TFV;
 
 /** A run is finished once it is done and nothing on it still waits for the
  *  user (feed.mjs: a done run with open questions still waits). */
@@ -17,7 +18,7 @@ function isFinished(run) {
 const PHASES = ["idea", "spec", "plan", "build", "tests", "harden", "review"];
 
 /** "3 minutes ago", from an ISO time; empty when there is none. */
-export function ago(iso, t, now = Date.now()) {
+function ago(iso, t, now = Date.now()) {
   const then = Date.parse(iso ?? "");
   if (Number.isNaN(then)) return "";
   const minutes = Math.max(0, Math.round((now - then) / 60000));
@@ -82,7 +83,7 @@ function runRow(project, run, t, go) {
   );
 }
 
-export function renderHome(root, { projects, t, go }) {
+function renderHome(root, { projects, t, go }) {
   const readable = projects.filter((project) => !project.unreadable);
   const waiting = readable.flatMap((project) => project.runs).filter((run) => run.waitsOnUser).length;
 
@@ -116,3 +117,6 @@ export function renderHome(root, { projects, t, go }) {
   }
   root.replaceChildren(header, projects.length ? summary : null, ...body);
 }
+
+Object.assign(window.TFV, { ago, renderHome });
+})();

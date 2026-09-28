@@ -1,11 +1,12 @@
-{
-  "app.title": "task-flow panel",
+// Same dictionary the old panel served as i18n/en.json, as a plain object
+// instead of a JSON file: `fetch()` of a local file is blocked over file://
+// (see dom.js), so there is nothing here that could load it at runtime.
+window.TFV_I18N_EN = {
+  "app.title": "task-flow viewer",
   "app.subtitle": "Runs on this machine, and the questions waiting for you.",
-  "app.theme": "Toggle theme",
-  "app.offline": "The panel lost its server. It retries on its own.",
   "app.error": "Something went wrong: {message}",
   "home.empty.title": "No runs yet",
-  "home.empty.body": "The panel shows what task-flow leaves in its local folder every time it renders a run page. Start a run with /task-flow in a configured project, and it appears here.",
+  "home.empty.body": "The viewer shows what task-flow leaves in its local folder every time it renders a run page. Start a run with /task-flow in a configured project, and it appears here.",
   "home.unreadable": "A project's summary could not be read. It will be read again when task-flow next renders it.",
   "home.waiting_one": "{count} run waiting for you",
   "home.waiting_other": "{count} runs waiting for you",
@@ -32,6 +33,7 @@
   "run.legacy": "questions only in the .md",
   "run.invalid": "its questions.json could not be read",
   "run.unreadable": "its state could not be read",
+  "run.notFound": "This run could not be found - it may have finished and moved, or the folder was re-read mid-change.",
   "run.page": "run page: {path}",
   "run.open": "Answer",
   "run.view": "Open",
@@ -86,7 +88,7 @@
   "answer.status.modify": "Change",
   "answer.status.explain": "Explain",
   "answer.line": "via {via}, {when}:",
-  "answer.via.panel": "the panel",
+  "answer.via.panel": "the viewer",
   "answer.via.conversation": "the conversation",
   "send.button": "Send to agent",
   "send.ready_one": "{count} answer ready",
@@ -98,5 +100,10 @@
   "send.confirm": "Send",
   "send.done": "Sent. task-flow takes the answers in at its next step.",
   "send.failed": "Not sent",
-  "app.noToken": "This browser does not have the panel's key yet. Open the panel once with: node <plugin>/panel/panel.mjs --open - it opens this page with the key, and this browser keeps it."
-}
+  "pick.button": "Choose the task-flow folder…",
+  "pick.retry": "Choose the folder again…",
+  "pick.body": "Pick the task-flow folder to see your runs and answer their questions - no install, nothing running in the background.",
+  "pick.hint": "That is the folder task-flow writes to on this machine: %LOCALAPPDATA%\\task-flow (Windows) or $XDG_STATE_HOME/task-flow / ~/.local/state/task-flow (Linux/macOS).",
+  "pick.denied": "That folder could not be used - access was not granted, or a different folder was picked.",
+  "pick.unsupported": "This browser cannot open a local folder (no File System Access API). Open this page in Chrome or Edge instead.",
+};

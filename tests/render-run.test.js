@@ -22,7 +22,7 @@ const path = require('path');
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-home-'));
 process.env.HOME = TEST_HOME;
 process.env.USERPROFILE = TEST_HOME;
-// The feed for the panel goes to LOCALAPPDATA (XDG_STATE_HOME elsewhere): never the real one.
+// The feed for the viewer goes to LOCALAPPDATA (XDG_STATE_HOME elsewhere): never the real one.
 process.env.LOCALAPPDATA = TEST_HOME;
 process.env.XDG_STATE_HOME = TEST_HOME;
 const { trustDocsDir } = require('../plugin/scripts/config.js');
@@ -987,11 +987,11 @@ console.log('\n--- free text out of state.json, again ---');
   check('S26 a plan behind a link is not pasted into the page', !/SEGREDO/.test(page), page);
 }
 
-// --- F: the feed for the panel ------------------------------------------------
+// --- F: the feed for the viewer ------------------------------------------------
 // One summary per project in <LOCALAPPDATA>/task-flow/feed/ (TEST_HOME here). The
-// panel reads nothing else, so what matters is what it contains - and what it
+// viewer reads nothing else, so what matters is what it contains - and what it
 // must not: the absolute docs folder, or anything written where the promise
-// says the panel has no business.
+// says the viewer has no business.
 
 const { projectKey } = require('../plugin/scripts/config.js');
 const feedFile = (projectDir) => path.join(TEST_HOME, 'task-flow', 'feed', `${projectKey(projectDir)}.json`);
@@ -1036,7 +1036,7 @@ const readFeed = (projectDir) => JSON.parse(fs.readFileSync(feedFile(projectDir)
   fs.writeFileSync(path.join(runDir, 'questions.json'), JSON.stringify({ version: 1, slug: 'demo', items: [{ id: 'Q1', kind: 'question', title: 'x', evil: '<script>' }] }));
   renderAll({ projectDir: f.projectDir });
   const invalid = readFeed(f.projectDir).runs[0].questions;
-  check('F9 SECURITY an invalid questions.json never reaches the panel', invalid.source === 'invalid' && !('items' in invalid), JSON.stringify(invalid));
+  check('F9 SECURITY an invalid questions.json never reaches the viewer', invalid.source === 'invalid' && !('items' in invalid), JSON.stringify(invalid));
 }
 
 {

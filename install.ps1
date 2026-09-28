@@ -13,13 +13,13 @@
 #      With no "version" in plugin.json, every commit on main is an update;
 #   4. puts a forwarder at ~/.claude/commands/task-flow.md, so the pipeline is
 #      invoked as /task-flow (plugin skills can otherwise only be invoked with their
-#      prefix, /task-flow:task-flow);
-#   5. registers the task-flow panel to start when you log on to Windows (a
-#      scheduled task for your user, no admin rights), and starts it now. The panel
-#      is a local page, http://127.0.0.1:5190/, listing the runs of every project on
-#      this machine and taking your answers to their questions. -NoPanel skips this
-#      step; -RemovePanel only removes the scheduled task and stops the panel.
-#      task-flow works the same without the panel.
+#      prefix, /task-flow:task-flow).
+#
+# There is no background service to install: the runs of every project on this
+# machine, and their open questions, are read straight off disk by opening
+# plugin/viewer/index.html in the browser - see that folder's own comments for
+# why it needs no server. -OpenViewer opens it once, from the marketplace's own
+# copy of this repository, after installing.
 #
 # Each repository still has to be configured once - the skill asks for the docs
 # folder, the language and the task list the first time it runs there.
@@ -32,45 +32,13 @@ param(
     # this repository before pushing it).
     [string]$Source = 'tgondar/task-flow',
     [string]$ClaudeDir = (Join-Path $env:USERPROFILE '.claude'),
-    # Install everything but the panel's logon task.
-    [switch]$NoPanel,
-    # Remove the panel's logon task, stop the panel, and do nothing else.
-    [switch]$RemovePanel
+    # Open the viewer once after installing.
+    [switch]$OpenViewer
 )
 
 $ErrorActionPreference = 'Stop'
 $marketplace = 'task-flow'
 $plugin = 'task-flow@task-flow'
-$panelTask = 'task-flow panel'
-
-if ($RemovePanel) {
-    $existing = Get-ScheduledTask -TaskName $panelTask -ErrorAction SilentlyContinue
-    if ($existing) {
-        Stop-ScheduledTask -TaskName $panelTask -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $panelTask -Confirm:$false
-        Write-Output "Removed the scheduled task '$panelTask'."
-    } else {
-        Write-Output "No scheduled task '$panelTask' to remove."
-    }
-    # The panel records its own process; stop that one, and only if it is node.
-    $registry = Join-Path $env:LOCALAPPDATA 'task-flow\panel\server.json'
-    if (Test-Path $registry) {
-        try {
-            $info = Get-Content -Raw -Path $registry | ConvertFrom-Json
-            $process = Get-Process -Id ([int]$info.pid) -ErrorAction Stop
-            # A process id can be reused: stop it only if it is node running panel.mjs.
-            $commandLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)").CommandLine
-            if ($process.ProcessName -eq 'node' -and $commandLine -like '*panel.mjs*') {
-                Stop-Process -Id $process.Id -Force
-                Write-Output "Stopped the panel (process $($process.Id))."
-            }
-        } catch {
-            Write-Output 'The panel was not running.'
-        }
-        Remove-Item -Path $registry -Force -ErrorAction SilentlyContinue
-    }
-    return
-}
 
 if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
     throw 'The claude CLI is not on PATH.'
@@ -114,28 +82,17 @@ $target = Join-Path $commands 'task-flow.md'
 Copy-Item -Path $shim -Destination $target -Force
 Write-Output "Installed the /task-flow forwarder at $target."
 
-# --- 5. the panel ----------------------------------------------------------------
-# The task runs the panel from the marketplace's own copy of this repository,
-# which keeps one path across updates (the plugin cache folder is named after the
-# commit and changes with every update). A hidden PowerShell window starts node, so
-# nothing appears on screen at logon.
-if (-not $NoPanel) {
-    $panelScript = Join-Path $ClaudeDir 'plugins\marketplaces\task-flow\plugin\panel\panel.mjs'
-    if (-not (Test-Path $panelScript)) {
-        Write-Output "The panel was not registered: $panelScript is not there (run 'claude plugin marketplace update task-flow' and install again)."
-    } else {
-        $node = (Get-Command node).Source
-        $command = "& '" + $node.Replace("'", "''") + "' '" + $panelScript.Replace("'", "''") + "' --quiet"
-        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -Command "' + $command + '"')
-        $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
-        Register-ScheduledTask -TaskName $panelTask -Action $action -Trigger $trigger -Settings $settings -Description 'task-flow panel: the runs on this machine and the questions waiting for you, on http://127.0.0.1:5190/' -Force | Out-Null
-        Start-ScheduledTask -TaskName $panelTask
-        # Open it once through panel.mjs: that hands this browser the panel's key.
-        Start-Sleep -Seconds 2
-        & $node $panelScript --open
-        Write-Output "Registered and started the panel (remove it with -RemovePanel). Open it again any time with: node '$panelScript' --open"
-    }
+# --- the viewer ----------------------------------------------------------------
+# From the marketplace's own copy of this repository, which keeps one path across
+# updates (the plugin cache folder is named after the commit and changes with
+# every update).
+$viewerPage = Join-Path $ClaudeDir 'plugins\marketplaces\task-flow\plugin\viewer\index.html'
+if (Test-Path $viewerPage) {
+    Write-Output "The viewer is at: $viewerPage"
+    Write-Output '(open it in Chrome or Edge; it asks once for the task-flow folder and needs nothing running in the background)'
+    if ($OpenViewer) { Start-Process $viewerPage }
+} else {
+    Write-Output "The viewer was not found at $viewerPage (run 'claude plugin marketplace update task-flow' and install again)."
 }
 
 Write-Output ''

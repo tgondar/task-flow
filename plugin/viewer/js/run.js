@@ -7,40 +7,34 @@
 // open question is answered by picking one of its options or in words; "Explain"
 // asks the agent to say more and leaves the question open.
 //
-// What is typed is kept three ways, so nothing is lost: in memory across redraws
-// (a feed change redraws the page while the user types), as a draft on the server
-// (saved as they go), and - once sent - as a submission file that task-flow takes
-// in at its next step (answers.js consume). The page never talks to the run: it
-// cannot, and that is the point.
+// What is typed is kept two ways, so nothing is lost: in memory across redraws
+// (the folder can be re-read while the user types) and as a draft in this
+// browser (localStorage, data.js) - once sent, as a submission file task-flow
+// takes in at its next step (answers.js consume). The page never talks to the
+// run: it cannot, and that is the point.
 //
 // All text from the run enters the page as text nodes (dom.js h), never as HTML.
-import { h } from "./dom.js";
-import { icon } from "./icons.js";
-import { badge, button, dialog, toast, toggleGroup } from "./ui.js";
-import { ago } from "./home.js";
+window.TFV = window.TFV || {};
+(function () {
+const { h, icon, badge, button, dialog, toast, toggleGroup, ago } = window.TFV;
 
 const STATUS_ICONS = { ok: "check", ko: "x", modify: "pencil", explain: "circle-help" };
 
 /** Answers being typed, per run, kept across redraws of the page. */
 const working = new Map();
-/** Question ids already sent from this page and not yet taken in by task-flow. */
+/** Question ids already sent from this page in this visit. */
 const sentIds = new Map();
 
-/** Is this answer something task-flow will take? The same rules as answers.js
- *  checkSubmission, so the button never offers a send the pipeline would refuse. */
-export function isComplete(card, answer) {
+/** Is this answer something task-flow will take? The same rules as
+ *  feed-logic.js checkOutgoingAnswers, so the button never offers a send that
+ *  would be refused. */
+function isComplete(card, answer) {
   if (!answer || !answer.status) return false;
   const comment = String(answer.comment ?? "").trim();
   if (answer.status === "explain") return comment !== "";
   if (answer.status === "modify") return comment !== "" || !!answer.choice;
   if (answer.status === "ok" && card.kind === "question" && card.options.length) return !!answer.choice;
   return true;
-}
-
-function newClientToken() {
-  const bytes = new Uint8Array(12);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function statusBadge(run, t) {
@@ -179,15 +173,19 @@ function answeredCard(card, t) {
   );
 }
 
-export async function renderRun(app, { project, slug, t, go, getJson }) {
+async function renderRun(app, { project, slug, t, go, data }) {
   const key = `${project}/${slug}`;
-  const data = await getJson(`/api/run?project=${project}&slug=${encodeURIComponent(slug)}`);
-  const { run, cards } = data;
+  const loaded = await data.loadRun(project, slug);
+  if (!loaded) {
+    app.replaceChildren(h("p", { class: "empty", role: "alert" }, t("run.notFound")));
+    return;
+  }
+  const { run, cards } = loaded;
 
-  // Answers being typed survive a redraw; the server's draft fills in on the
-  // first visit. A question that closed meanwhile (answered in the conversation)
-  // loses its working answer, and so does one task-flow took in.
-  if (!working.has(key)) working.set(key, { ...(data.draft ?? {}) });
+  // Answers being typed survive a redraw; the saved draft fills in on the first
+  // visit. A question that closed meanwhile (answered in the conversation) loses
+  // its working answer, and so does one task-flow took in.
+  if (!working.has(key)) working.set(key, data.loadDraft(project, slug));
   const answers = working.get(key);
   const open = cards.filter((card) => card.open);
   const openIds = new Set(open.map((card) => card.id));
@@ -196,19 +194,7 @@ export async function renderRun(app, { project, slug, t, go, getJson }) {
   if (sent) for (const id of [...sent]) if (!openIds.has(id)) sent.delete(id);
 
   let sending = false;
-  let saveTimer = null;
-  const save = () => {
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      getJson(`/api/draft?project=${project}&slug=${encodeURIComponent(slug)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ answers }),
-      }).catch(() => {
-        /* the draft is a convenience; the answers are still on screen */
-      });
-    }, 400);
-  };
+  const save = () => data.saveDraft(project, slug, answers);
 
   const ready = () => open.filter((card) => !sentIds.get(key)?.has(card.id) && isComplete(card, answers[card.id]));
   const sendButton = button({ label: t("send.button"), icon: "send", onclick: () => confirmSend() });
@@ -223,7 +209,6 @@ export async function renderRun(app, { project, slug, t, go, getJson }) {
   function confirmSend() {
     const chosen = ready();
     if (!chosen.length) return;
-    const clientToken = newClientToken(); // one per send: a double click sends once
     dialog({
       title: t("send.confirmTitle", { count: chosen.length }),
       description: t("send.confirmBody"),
@@ -247,11 +232,7 @@ export async function renderRun(app, { project, slug, t, go, getJson }) {
                 if (comment) item.comment = comment;
                 return item;
               });
-              await getJson(`/api/submit?project=${project}&slug=${encodeURIComponent(slug)}`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ answers: payload, clientToken }),
-              });
+              await data.submitAnswers(loaded, payload);
               if (!sentIds.has(key)) sentIds.set(key, new Set());
               for (const card of chosen) {
                 sentIds.get(key).add(card.id);
@@ -282,11 +263,11 @@ export async function renderRun(app, { project, slug, t, go, getJson }) {
         {},
         button({ label: t("run.back"), icon: "chevron-left", variant: "link", size: "sm", onclick: () => go("#/") }),
         h("h1", { class: "run-heading" }, run.slug),
-        h("p", {}, data.project.projectName, " · ", statusBadge(run, t), run.updated ? ` · ${t("run.updated", { ago: ago(run.updated, t) })}` : "")
+        h("p", {}, loaded.project.projectName, " · ", statusBadge(run, t), run.updated ? ` · ${t("run.updated", { ago: ago(run.updated, t) })}` : "")
       )
     );
     const body = [];
-    if (run.questionsSource !== "json") body.push(h("p", { class: "empty" }, t("run.legacyBody")));
+    if (run.questions.source !== "json") body.push(h("p", { class: "empty" }, t("run.legacyBody")));
     else if (!open.length) body.push(h("p", { class: "empty" }, t("run.nothingOpen")));
     else body.push(h("div", { class: "cards" }, open.map((card) => renderCard(card, ctx))));
     if (answered.length) body.push(h("section", { class: "answered-list" }, h("h2", {}, t("run.answered", { count: answered.length })), h("ul", {}, answered.map((card) => answeredCard(card, t)))));
@@ -296,3 +277,6 @@ export async function renderRun(app, { project, slug, t, go, getJson }) {
   }
   draw();
 }
+
+Object.assign(window.TFV, { isComplete, renderRun });
+})();

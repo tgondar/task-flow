@@ -286,22 +286,22 @@ function trustDocsDir(projectDir, docsDir) {
   return file;
 }
 
-// --- the per-machine folder shared with the panel --------------------------
+// --- the per-machine folder shared with the viewer --------------------------
 //
-// The panel shows the runs of every project on this machine and collects the
-// answers to their questions. The rule it must never break is that the
-// documentation is written by task-flow alone: the panel has no path into any
-// docsDir, and does not even read one. So the two talk through a folder of their
-// own, outside every project and outside every docs folder:
+// plugin/viewer/index.html shows the runs of every project on this machine and
+// collects the answers to their questions - opened directly in a browser, no
+// server (see that folder's own comments for why). The rule it must never break
+// is that the documentation is written by task-flow alone: the viewer has no
+// path into any docsDir, and does not even read one. So the two talk through a
+// folder of their own, outside every project and outside every docs folder:
 //
-//   <home>/feed/<projectKey>.json            written by task-flow, read by the panel
-//   <home>/answers/<projectKey>/<slug>/...   written by the panel, read by task-flow
-//   <home>/panel/...                         the panel's own drafts and registry
+//   <home>/feed/<projectKey>.json            written by task-flow, read by the viewer
+//   <home>/answers/<projectKey>/<slug>/...   written by the viewer, read by task-flow
 //
 // One writer per file, so neither side ever has to merge what the other wrote.
 // The folder is per machine and deliberately NOT synced: LOCALAPPDATA on Windows
 // (not the roaming APPDATA, not OneDrive), the XDG state folder elsewhere. Every
-// machine runs its own panel over its own runs.
+// machine's viewer opens only its own runs.
 
 /** The folder itself, resolved on every call from the environment, never cached.
  *  Throws instead of guessing: an undefined LOCALAPPDATA must not quietly become
@@ -328,7 +328,7 @@ function homeDir({ env = process.env, platform = process.platform } = {}) {
  *  here, because this is the last place before a file is touched: no segment may
  *  be empty, `.`/`..` or carry a separator, and nothing from the parent of the
  *  folder down may be a link - a junction at <home>/answers would otherwise send
- *  the panel's writes, or task-flow's reads, anywhere at all. */
+ *  the viewer's writes, or task-flow's reads, anywhere at all. */
 function homePath(segments, options) {
   const home = homeDir(options);
   for (const segment of segments) {

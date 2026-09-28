@@ -564,9 +564,9 @@ check('C44 SECURITY a task list name with control characters is refused', () => 
   }
 });
 
-// --- the per-machine folder shared with the panel ------------------------------
+// --- the per-machine folder shared with the viewer ------------------------------
 // homeDir()/homePath() decide where the feed and the answers live. Every read and
-// write between task-flow and the panel goes through them, so the security cases
+// write between task-flow and the viewer goes through them, so the security cases
 // are the ones where that folder could end up somewhere nobody chose.
 
 const { homeDir, homePath, projectKey } = require(MODULE);

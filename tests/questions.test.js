@@ -3,7 +3,7 @@
 // generates from a run's questions.json.
 //
 // Half of these are security tests. questions.json is repository data, answers
-// from the panel are appended to it, and the page generated from it is read by the
+// from the viewer are appended to it, and the page generated from it is read by the
 // user as the truth and counted by the renderer. The cases that matter most are
 // the ones where text in the file tries to become structure in the page - a new
 // `- [ ]` the renderer would count, a heading, a link, HTML - or tries to reach
@@ -18,7 +18,7 @@ const path = require('path');
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-home-'));
 process.env.HOME = TEST_HOME;
 process.env.USERPROFILE = TEST_HOME;
-// The feed for the panel goes to LOCALAPPDATA (XDG_STATE_HOME elsewhere): never the real one.
+// The feed for the viewer goes to LOCALAPPDATA (XDG_STATE_HOME elsewhere): never the real one.
 process.env.LOCALAPPDATA = TEST_HOME;
 process.env.XDG_STATE_HOME = TEST_HOME;
 
@@ -175,7 +175,7 @@ check('Q1 a complete file is valid', validateQuestions(sample()).ok, validateQue
   const data = sample();
   data.items[1].answer = { status: 'modify', choice: 'usd', comment: 'Only for US clients.', via: 'panel', submissionId: SUBMISSION, at: AT };
   const md = renderQuestionsMarkdown(data, { lang: 'pt-PT', created: '2026-09-08' });
-  check('Q11 an answered item is ticked, with its answer under it (pt-PT)', /- \[x\] \*\*URGENTE\*\*/.test(md) && /  - Resposta \(painel, 2026-09-27 20:15\): Alterar — escolha: USD — Only for US clients\./.test(md), md);
+  check('Q11 an answered item is ticked, with its answer under it (pt-PT)', /- \[x\] \*\*URGENTE\*\*/.test(md) && /  - Resposta \(visualizador, 2026-09-27 20:15\): Alterar — escolha: USD — Only for US clients\./.test(md), md);
   check('Q12 the checkbox count matches the open count', (md.match(/^\s*-\s\[\s\]/gm) || []).length === openCount(data), md);
 }
 

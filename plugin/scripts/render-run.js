@@ -812,18 +812,20 @@ function renderQuestions({ file, stateDir, docsDir, slug, prefix, isDone, lang }
   }
 }
 
-// --- the feed for the panel --------------------------------------------------
+// --- the feed for the viewer --------------------------------------------------
 //
-// The panel shows the runs of every project on this machine, and it must never
-// read or write a docs folder - that is the promise that the documentation is
-// written by task-flow alone. So instead of the panel going to the projects,
-// every render leaves a summary of the project where the panel looks: one file
-// per project in <home>/feed/ (config.js homeDir). The panel reads nothing else.
+// plugin/viewer/index.html shows the runs of every project on this machine, and
+// it must never read or write a docs folder - that is the promise that the
+// documentation is written by task-flow alone. So instead of the viewer going
+// to the projects, every render leaves a summary of the project where the
+// viewer looks: one file per project in <home>/feed/ (config.js homeDir). The
+// viewer reads nothing else - it opens that folder itself (File System Access
+// API, no server), so this is still the only place a feed has to be written.
 //
-// What goes in is what the panel shows, in closed shapes: the same discipline as
-// the run page, because a state.json is repository data and the panel is a web
-// page. The absolute docs folder does NOT go in - the panel has no use for it,
-// and not knowing it is part of why the panel cannot write there.
+// What goes in is what the viewer shows, in closed shapes: the same discipline
+// as the run page, because a state.json is repository data and the viewer is a
+// web page. The absolute docs folder does NOT go in - the viewer has no use for
+// it, and not knowing it is part of why the viewer cannot write there.
 
 const FEED_PHASES = [...PHASES, 'done'];
 const TASK_ID = /^T[0-9]+[a-z]?$/;
@@ -831,7 +833,7 @@ const ISO = /^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:\d{2})?$/;
 const clip = (value, max) => (typeof value === 'string' ? plainText(value, max) : null);
 const iso = (value) => (typeof value === 'string' && ISO.test(value.trim()) ? value.trim() : null);
 
-/** One run, as the panel sees it. */
+/** One run, as the viewer sees it. */
 function feedRun({ entry, state, stateRoot, docsDir, statePath }) {
   const planPath = resolveInsideDocs(docsDir, state.artifacts && state.artifacts.plan);
   const tasks = readPlanTasks(planPath).map((task) => ({ id: task.id, title: task.title, done: task.ticked }));
@@ -841,7 +843,7 @@ function feedRun({ entry, state, stateRoot, docsDir, statePath }) {
       .slice(0, 100)
       .map((item) => ({ id: item.id, [textKey]: clip(item[textKey], max) }));
 
-  // The questions go in whole when the run keeps them as data - the panel turns
+  // The questions go in whole when the run keeps them as data - the viewer turns
   // them into cards - and only as a count when they are a page written by hand.
   let questions;
   const read = questionsData.readQuestionsFile(path.join(stateRoot, entry, 'questions.json'), stateRoot, entry);
@@ -854,7 +856,7 @@ function feedRun({ entry, state, stateRoot, docsDir, statePath }) {
     questions = { source: 'legacy', open: legacy ? countOpenQuestions(legacy.file) : 0 };
   }
 
-  // The run page, relative to the docs folder, for the panel to show as a path.
+  // The run page, relative to the docs folder, for the viewer to show as a path.
   const prefix = runCreatedPrefix(state, statePath);
   const pageName = `${prefix}_${entry}.md`;
   const runPage = [path.join(RUNS_DIR, pageName), path.join(RUNS_DIR, RUNS_ARCHIVE, pageName)]
@@ -884,14 +886,14 @@ function feedRun({ entry, state, stateRoot, docsDir, statePath }) {
 
 /**
  * Writes <home>/feed/<projectKey>.json for this project, atomically (a temp file
- * renamed over the old one, so the panel never reads half a file).
+ * renamed over the old one, so the viewer never reads half a file).
  *
  * Returns the file written, or throws. The caller treats a throw as a note, not a
- * failure: the feed is for the panel, and a machine without a usable home folder
+ * failure: the feed is for the viewer, and a machine without a usable home folder
  * must still get its documentation rendered.
  *
  * Refused outright when the home folder sits inside the project or inside the
- * docs folder - a feed there would put the panel's reading, and its answers,
+ * docs folder - a feed there would put the viewer's reading, and its answers,
  * where the promise says it has no business.
  */
 function writeFeed({ projectDir, config, docsDir }) {
@@ -1053,7 +1055,7 @@ function renderAll({ projectDir, docsDir, slug } = {}) {
     }
   }
 
-  // The panel's summary of this project. Never at the documentation's expense:
+  // The viewer's summary of this project. Never at the documentation's expense:
   // whatever goes wrong here is reported and the render still counts as done.
   try {
     result.feed = writeFeed({ projectDir: root, config, docsDir: targetDocs });
@@ -1107,5 +1109,5 @@ if (require.main === module) {
   for (const item of outcome.questionErrors) process.stderr.write(`questions ${item.run}: ${item.why}\n`);
   if (outcome.questionErrors.length) process.exitCode = 1;
   // A note, not a failure: the documentation was rendered either way.
-  if (outcome.feedError) process.stderr.write(`panel feed not written: ${outcome.feedError}\n`);
+  if (outcome.feedError) process.stderr.write(`viewer feed not written: ${outcome.feedError}\n`);
 }

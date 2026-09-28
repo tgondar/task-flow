@@ -1,11 +1,12 @@
 // shadcn/ui components as functions: each returns DOM with the classes from css/components.css.
 // Same names and same variants as the React library, so anyone used to it feels at home.
-import { h } from "./dom.js";
-import { icon } from "./icons.js";
+window.TFV = window.TFV || {};
+(function () {
+const { h, icon } = window.TFV;
 
 const cx = (...parts) => parts.filter(Boolean).join(" ");
 
-export function button({ label, icon: name, iconRight, variant = "default", size, title, onclick, type = "button", disabled, className, attrs = {} } = {}) {
+function button({ label, icon: name, iconRight, variant = "default", size, title, onclick, type = "button", disabled, className, attrs = {} } = {}) {
   const cls = cx("btn", variant !== "default" && `btn-${variant}`, size && `btn-${size}`, !label && name && "btn-icon", className);
   return h("button", { type, class: cls, title, "aria-label": label ? undefined : title, disabled, onclick, ...attrs },
     name ? icon(name) : null,
@@ -13,11 +14,11 @@ export function button({ label, icon: name, iconRight, variant = "default", size
     iconRight ? icon(iconRight) : null);
 }
 
-export function badge(text, { variant = "secondary", icon: name, title, className } = {}) {
+function badge(text, { variant = "secondary", icon: name, title, className } = {}) {
   return h("span", { class: cx("badge", `badge-${variant}`, className), title }, name ? icon(name) : null, text);
 }
 
-export function alert({ variant = "default", icon: name = "info", title, description, actions, className } = {}) {
+function alert({ variant = "default", icon: name = "info", title, description, actions, className } = {}) {
   const role = variant === "destructive" ? "alert" : "status";
   return h("div", { class: cx("alert", variant !== "default" && `alert-${variant}`, className), role },
     icon(name),
@@ -26,36 +27,16 @@ export function alert({ variant = "default", icon: name = "info", title, descrip
     actions?.length ? h("div", { class: "alert-actions" }, actions) : null);
 }
 
-export function card({ id, className, header, content, footer, attrs = {} } = {}) {
+function card({ id, className, header, content, footer, attrs = {} } = {}) {
   return h("section", { id, class: cx("card", className), ...attrs },
     header ? h("header", { class: "card-header" }, header) : null,
     content ? h("div", { class: "card-content" }, content) : null,
     footer ? h("footer", { class: "card-footer" }, footer) : null);
 }
 
-// details / summary: opens on click, closed by default; `content` can be a function, rendered
-// on first opening only.
-export function accordion({ label, icon: name, content, open = false, className, right } = {}) {
-  const body = h("div", { class: "accordion-content" });
-  let rendered = false;
-  const fill = () => {
-    if (rendered) return;
-    rendered = true;
-    body.append(typeof content === "function" ? content() : content);
-  };
-  const el = h("details", { class: cx("accordion", className), open },
-    h("summary", {}, h("span", { class: "accordion-label" }, name ? icon(name) : null, label, right ?? null), icon("chevron-down", { className: "chevron" })),
-    body);
-  // A node that is already built goes into the DOM right away (anchors must find it); only a
-  // function waits for the first opening.
-  if (open || typeof content !== "function") fill();
-  el.addEventListener("toggle", () => el.open && fill());
-  return el;
-}
-
 // Accessible tabs (left / right arrows). Panels are rendered once; `update` refreshes them if the
 // caller needs it.
-export function tabs({ items, value, onChange, ariaLabel, className } = {}) {
+function tabs({ items, value, onChange, ariaLabel, className } = {}) {
   const list = h("div", { class: "tabs-list", role: "tablist", "aria-label": ariaLabel });
   const panels = h("div", {});
   const triggers = new Map();
@@ -109,7 +90,7 @@ export function tabs({ items, value, onChange, ariaLabel, className } = {}) {
 }
 
 // Group of exclusive toggles; pressing again clears the value (null).
-export function toggleGroup({ items, get, onSelect, ariaLabel, compact = false, labels = true } = {}) {
+function toggleGroup({ items, get, onSelect, ariaLabel, compact = false, labels = true } = {}) {
   const buttons = new Map();
   const el = h("div", { class: cx("toggle-group", compact && "compact"), role: "group", "aria-label": ariaLabel });
   for (const item of items) {
@@ -146,7 +127,7 @@ export function toggleGroup({ items, get, onSelect, ariaLabel, compact = false, 
   };
 }
 
-export function selectBox({ options, value, onChange, ariaLabel, placeholder }) {
+function selectBox({ options, value, onChange, ariaLabel, placeholder }) {
   const select = h("select", { class: "select", "aria-label": ariaLabel, onchange: () => onChange(select.value) },
     placeholder ? h("option", { value: "" }, placeholder) : null,
     options.map((o) => h("option", { value: o.value }, o.label)));
@@ -154,7 +135,7 @@ export function selectBox({ options, value, onChange, ariaLabel, placeholder }) 
   return { el: h("span", { class: "select-wrap" }, select, icon("chevrons-up-down")), select };
 }
 
-export function progress(segments) {
+function progress(segments) {
   const total = segments.reduce((sum, s) => sum + s.value, 0) || 1;
   const el = h("div", { class: "progress", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100" });
   const update = (list) => {
@@ -167,17 +148,17 @@ export function progress(segments) {
   return { el, update };
 }
 
-export function kbd(text) {
+function kbd(text) {
   return h("kbd", { class: "kbd" }, text);
 }
 
-export function separator(vertical = false) {
+function separator(vertical = false) {
   return h("div", { class: cx("separator", vertical && "vertical"), role: "separator" });
 }
 
 // --- Dialog and sheet: native <dialog>, which handles focus and the Escape key ----------------------
 
-export function dialog({ title, description, content, actions, closeLabel = "Close", onClose } = {}) {
+function dialog({ title, description, content, actions, closeLabel = "Close", onClose } = {}) {
   const el = h("dialog", { class: "dialog", "aria-labelledby": "dialog-title" });
   const close = () => el.close();
   const inner = h("div", { class: "dialog-inner" },
@@ -197,7 +178,7 @@ export function dialog({ title, description, content, actions, closeLabel = "Clo
   return { el, close };
 }
 
-export function sheet({ title, description, content, side = "left", closeLabel = "Close" } = {}) {
+function sheet({ title, description, content, side = "left", closeLabel = "Close" } = {}) {
   const body = h("div", { class: "sheet-body" });
   const el = h("dialog", { class: cx("sheet", side === "right" && "right"), "aria-label": title },
     h("div", { class: "sheet-inner" },
@@ -222,7 +203,7 @@ export function sheet({ title, description, content, side = "left", closeLabel =
 
 // --- Toast -------------------------------------------------------------------------------------------
 
-export function toast(message, { title, variant = "default", duration = 3500 } = {}) {
+function toast(message, { title, variant = "default", duration = 3500 } = {}) {
   let host = document.querySelector(".toaster");
   if (!host) {
     host = h("div", { class: "toaster", role: "status", "aria-live": "polite" });
@@ -243,7 +224,7 @@ export function toast(message, { title, variant = "default", duration = 3500 } =
 let floatingEl = null;
 let hideTimer = null;
 
-export const floating = {
+const floating = {
   show(content, x, y, { variant = "tooltip" } = {}) {
     clearTimeout(hideTimer);
     if (!floatingEl) {
@@ -272,7 +253,7 @@ export const floating = {
 };
 
 // Tooltip on hover and keyboard focus, placed above the element.
-export function attachFloating(target, content, { variant = "tooltip" } = {}) {
+function attachFloating(target, content, { variant = "tooltip" } = {}) {
   const show = () => {
     const rect = target.getBoundingClientRect();
     floating.show(typeof content === "function" ? content() : content, rect.left + rect.width / 2, rect.top, { variant });
@@ -286,3 +267,9 @@ export function attachFloating(target, content, { variant = "tooltip" } = {}) {
   });
   return target;
 }
+
+Object.assign(window.TFV, {
+  button, badge, alert, card, tabs, toggleGroup, selectBox, progress, kbd, separator,
+  dialog, sheet, toast, floating, attachFloating,
+});
+})();

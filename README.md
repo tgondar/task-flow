@@ -27,10 +27,11 @@ run going, and a generated page that shows where every run is.
 - **A live page per run** (`runs/<date>_<slug>.md` in the docs folder), generated
   from the run's state, never written by hand.
 - **Documents in your language**: `EN`, `PT-PT`, or any language tag.
-- **A local panel** (`http://127.0.0.1:5190/`) with the runs of every project on
-  the machine, the ones waiting for you first, and their questions as cards you
-  answer there. It never touches the documentation: task-flow takes the answers in
-  itself, between tasks or when a stopped run wakes up.
+- **A local viewer** (`plugin/viewer/index.html`, opened directly in a browser -
+  no install, nothing running in the background) with the runs of every project
+  on the machine, the ones waiting for you first, and their questions as cards
+  you answer there. It never touches the documentation: task-flow takes the
+  answers in itself, between tasks or when a stopped run wakes up.
 
 ## Requirements
 
@@ -55,11 +56,11 @@ puts a small forwarder at `~/.claude/commands/task-flow.md` so the pipeline is
 invoked as `/task-flow` (plugin skills can otherwise only be called with their
 prefix, `/task-flow:task-flow`).
 
-It also registers the panel to start when you log on to Windows (a scheduled task
-for your user, no admin rights) and starts it. `-NoPanel` skips that;
-`-RemovePanel` removes the task and stops the panel. Without it, start the panel by
-hand with `node <plugin>/panel/panel.mjs --open`. task-flow works the same with no
-panel at all.
+There is no background service to install for the viewer: open
+`~/.claude/plugins/marketplaces/task-flow/plugin/viewer/index.html` directly in
+Chrome or Edge (it needs the File System Access API - see that folder's own
+comments for why there is no server). `install.ps1` prints the exact path, and
+`-OpenViewer` opens it once for you.
 
 `install.ps1` is PowerShell. On macOS or Linux, the same three steps are
 `claude plugin marketplace add tgondar/task-flow`,
@@ -135,9 +136,8 @@ On the machine, outside every repository and docs folder (`%LOCALAPPDATA%\task-f
 on Windows, `~/.local/state/task-flow` elsewhere):
 
 ```
-feed/<project key>.json                  a summary of each project, for the panel
-answers/<project key>/<run>/*.json       answers sent from the panel, until taken in
-panel/                                   the panel's drafts and its server record
+feed/<project key>.json                  a summary of each project, for the viewer
+answers/<project key>/<run>/*.json       answers sent from the viewer, until taken in
 ```
 
 ## How updates arrive
@@ -166,12 +166,12 @@ Know what you are installing:
   repository needs your per-machine trust; only folder variables (`HOME`,
   `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `OneDrive*`) expand in it; and nothing
   from a run's `state.json` is echoed back to the model by the hooks.
-- **The panel has no way into the documentation.** It reads only the per-project
-  summaries task-flow leaves for it, writes only answer files in its own folder,
-  listens on `127.0.0.1` only, answers only callers holding its key (kept in
-  your local folder; `panel.mjs --open` hands it to your browser once), refuses
-  foreign `Host` headers and cross-site writes, and cannot approve a run. An answer reaches the model as data, after
-  `answers.js` has checked it against the run's open questions.
+- **The viewer has no way into the documentation.** It is a static page with no
+  server at all: it reads only the per-project summaries task-flow leaves for
+  it, writes only answer files in its own folder - both through a folder the
+  browser's own File System Access API grants it, and nothing else - and cannot
+  approve a run. An answer reaches the model as data, after `answers.js` has
+  checked it against the run's open questions.
 - **The approval gate is a guardrail, not a sandbox.** It stops code being written
   by drift before a plan is approved. It does not stop an agent determined to get
   around it (Bash is not gated), and it is not meant to.
@@ -188,11 +188,11 @@ plugin/
                                   second-opinion-low..max, the question loop (SKILL.md §3)
   hooks/hooks.json, gate.js, stop.js
   scripts/config.js               reads and validates .claude/task-flow.json
-  scripts/render-run.js           the run page, the questions page and the panel feed
+  scripts/render-run.js           the run page, the questions page and the viewer's feed
   scripts/questions.js            questions.json: validation and the generated page
-  scripts/answers.js              takes the panel's answers into a run
-  panel/                          the local panel (server, page); code from FluidPlan,
-                                  see panel/NOTICE.md
+  scripts/answers.js              takes the viewer's answers into a run
+  viewer/                          the local viewer (a static page, no server); code
+                                  from FluidPlan, see viewer/NOTICE.md
 shim/task-flow.md                 the /task-flow forwarder install.ps1 deploys
 scripts/enable-autoupdate.js      install.ps1's settings.json step
 tests/                            unit tests (node) and end-to-end probes (claude -p)
@@ -208,11 +208,8 @@ node tests/render-run.test.js
 node tests/enable-autoupdate.test.js
 node tests/questions.test.js
 node tests/answers.test.js
-node tests/panel-feed.test.js
-node tests/panel-server.test.js
-node tests/panel-launch.test.js
-node tests/panel-flow.test.js
-node tests/panel.smoke.js  # headless Edge/Chrome; skipped without one
+node tests/viewer-feed-logic.test.js
+node tests/viewer.smoke.js  # headless Edge/Chrome; skipped without one
 bash tests/gate.e2e.sh     # real claude -p sessions; needs the CLI on PATH
 bash tests/stop.e2e.sh
 claude plugin validate .
@@ -226,9 +223,8 @@ claude plugin validate .
 
 - [agent-skills](https://github.com/addyosmani/agent-skills) by Addy Osmani — the
   skills and personas task-flow delegates the method to.
-- [FluidPlan](https://github.com/morganhub/fluidplan) by morganhub — the panel
-  started from its local server, components, styles and fonts (MIT; see
-  `plugin/panel/NOTICE.md`).
+- [FluidPlan](https://github.com/morganhub/fluidplan) by morganhub — the viewer
+  started from its components, styles and fonts (MIT; see `plugin/viewer/NOTICE.md`).
 
 ## License
 

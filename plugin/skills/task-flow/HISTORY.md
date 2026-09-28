@@ -148,7 +148,7 @@ read from the repository is an input, never a fact.
 - **The gate fails closed on its own bugs too.** Exit 1 is a non-blocking hook error,
   so an uncaught exception would have let the write through.
 
-## Questions as data, and the panel
+## Questions as data, and the viewer
 
 A run's questions used to be a markdown page the agent wrote by hand. The only
 thing a machine could read in it was a checkbox: no id per question, no options, no
@@ -167,23 +167,23 @@ among several, that was waiting on them.
   `--quiet`, so the agent sees it. A hand-written page holds answers nothing else
   holds; runs that started with one keep it. Answers are escaped rather than
   stripped: they are the user's own words.
-- **The panel never touches the documentation - not even to read it.** It is a local
+- **The viewer never touches the documentation - not even to read it.** It is a local
   page over every project's runs. Rather than give it a path into projects and docs
   folders, task-flow leaves it a summary per project in a folder outside all of them
-  (the feed), and the panel reads nothing else. It writes only answer files in its
+  (the feed), and the viewer reads nothing else. It writes only answer files in its
   own folder; task-flow takes them in (`answers.js consume`) at points of its
   choosing. One writer per file, so nothing is ever merged.
 - **An answer is data, never an instruction.** Whoever can write a file in the
   answers folder can put text in front of the model. So a submission is checked
   against a closed shape and the run as it is - the right project and run, open
   questions only, a choice among the options, bounded text without control
-  characters, no field beyond an answer - by one function, which the panel also
+  characters, no field beyond an answer - by one function, which the viewer also
   runs before it writes. What reaches the model sits inside a block marked as data.
-  Nothing on the panel's path can approve a run.
+  Nothing on the viewer's path can approve a run.
 - **Answers are taken between tasks, never inside one.** An answer changes what a
   task should do; folding it into a task half built mixes two intentions in one
   commit. On resume, at every cursor move and at every phase boundary is enough.
-- **A stopped run waits for the panel in the background, after it is `blocked`.** A
+- **A stopped run waits for the viewer in the background, after it is `blocked`.** A
   background command that finishes wakes the session; the Stop hook only pushes a
   `running` run, so writing `blocked` first is what lets the turn end cleanly. The
   wait only wakes for a submission `consume` would take: one it would refuse would
@@ -199,8 +199,43 @@ among several, that was waiting on them.
   still worth finding - dropped after the user asked to see only the open
   runs; if this is revisited, the run's own page and its docs `runs/finished/`
   folder are still there.) A finished run that still has something waiting on
-  it (feed.mjs `waitsOnUser`) stays in the open list - being done is not the
-  same as being closed out.
+  it (feed-logic.js `waitsOnUser`) stays in the open list - being done is not
+  the same as being closed out.
+- **The panel became a static page with no server at all.** It ran a small local
+  HTTP server (loopback only, a per-user token, Origin and Host checks, a
+  scheduled task to start it at logon) so a browser page could ask it for the
+  feed and post answers back. That server was a genuinely small attack surface,
+  but it was still a Node process the user had to trust was running, restart
+  after an update, and notice if it started eating resources - exactly what
+  happened: the user asked to remove it and have the same thing "with no
+  install, nothing running in the background". The answer is `plugin/viewer/`:
+  `index.html` opened directly (`file://`, no server), reading `<home>/feed/`
+  and writing `<home>/answers/` through a folder the browser's own File System
+  Access API grants it once (`showDirectoryPicker`, remembered in IndexedDB).
+  Two things had to be proven, not assumed, before building it:
+  - **`showDirectoryPicker` needs a secure context, and `file://` counts as
+    one** in Chromium (confirmed with a real headless Edge/Chrome instance,
+    `tests/viewer.smoke.js`, not just documentation) - so the picker works with
+    no server to serve the page over `https://` or `localhost`.
+  - **`fetch()` of a local file, and any `type="module"` script, are both
+    refused outright over `file://`** ("Cross origin requests are only
+    supported for protocol schemes: http(s)..."), even for a sibling file in
+    the same folder. So nothing in `plugin/viewer/js/` uses `import`/`export`
+    or `fetch`: every file is a classic `<script>` attaching its exports to one
+    global, `window.TFV` (see `js/dom.js`'s own comment), each wrapped in its
+    own IIFE so two files naming the same local do not collide in the page's
+    shared global scope, and the i18n dictionary is a plain JS file
+    (`js/i18n-en.js`) instead of a JSON file fetched at boot.
+  The feed and answers contract did not change - same folders, same file
+  shapes, same `answers.js consume` - so this is a UI-layer swap, not a new
+  design: `plugin/viewer/js/feed-logic.js` is `feed.mjs`'s validation logic
+  (parseFeed, cardsFor, and the run's `questionsSource` summary server.mjs used
+  to compute) ported to have no Node dependency, kept in lockstep with
+  `scripts/questions.js`'s own validator by hand rather than shared - there is
+  no package a Node CLI script and a page opened by double-clicking a file can
+  both import. Drafts (an answer being typed, not yet sent) moved from a file
+  the server kept to `localStorage`: simpler, and it needed no cleanup step the
+  server no longer exists to run.
 - **`CLAUDE_PROJECT_DIR` is not trusted blindly against `payload.cwd` any more.**
   Both hooks tried `CLAUDE_PROJECT_DIR` first because it is meant to be a stable
   anchor for the session's project root. But a background session that isolates

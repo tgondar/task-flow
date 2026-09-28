@@ -1,6 +1,8 @@
 // Lucide icons (https://lucide.dev), a subset vendored from lucide-static@1.48.0.
 // ISC license — see public/THIRD_PARTY.md. To regenerate: see the comment at the end of the file.
-export const ICONS = {
+window.TFV = window.TFV || {};
+(function () {
+const ICONS = {
   "check": '<path d="M20 6 9 17l-5-5"/>',
   "x": '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   "pencil": '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>',
@@ -150,7 +152,7 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const warned = new Set();
 
 // A Lucide <svg> ready to insert: stroke 2, text color, size set in CSS (.icon).
-export function icon(name, { className = "", label } = {}) {
+function icon(name, { className = "", label } = {}) {
   const el = document.createElementNS(SVG_NS, "svg");
   el.setAttribute("viewBox", "0 0 24 24");
   el.setAttribute("fill", "none");
@@ -178,7 +180,7 @@ export function icon(name, { className = "", label } = {}) {
 }
 
 // The same icon as an HTML string, for the rare places that build HTML.
-export function iconMarkup(name, { className = "" } = {}) {
+function iconMarkup(name, { className = "" } = {}) {
   const markup = ICONS[name];
   if (markup === undefined) {
     if (!warned.has(name)) {
@@ -190,7 +192,7 @@ export function iconMarkup(name, { className = "" } = {}) {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon icon-${name}${className ? ` ${className}` : ""}" aria-hidden="true">${markup}</svg>`;
 }
 
-export function hasIcon(name) {
+function hasIcon(name) {
   return Object.hasOwn(ICONS, name);
 }
 
@@ -199,3 +201,6 @@ export function hasIcon(name) {
 // SVG in the list below and keep only the inner content of the <svg> (the
 // <path>/<circle>/<rect>/<line>/<polyline>… as they are, without the svg's global attributes).
 // List: check, x, pencil, circle-help, circle-check, circle-x, circle-alert, circle-dashed, circle-dot, circle, circle-small, octagon-alert, triangle-alert, info, lightbulb, book-open, plus, minus, sparkles, chevron-left, chevron-right, chevron-down, chevron-up, chevrons-up-down, grip-vertical, arrow-up, arrow-down, arrow-right, menu, panel-left, loader-circle, cloud-check, cloud-off, history, git-compare, undo-2, send, file-text, file-check, download, files, file, file-plus, file-minus, file-diff, folder, folder-open, sun, moon, monitor, languages, list-filter, list-checks, external-link, copy, eye, eye-off, refresh-cw, lock, square-pen, gauge, clock, calendar, flag, target, layers, workflow, git-branch, shield-alert, message-circle-question, message-square, map, rocket, wrench, database, server, code, terminal, package, zap, users, user, settings, search, scale, chart-bar, table, list-ordered, columns-2, image, puzzle, circle-play, hourglass, badge-check, ban, mail, bell, calendar-clock, key-round, globe, smartphone, laptop, credit-card, chart-line, chart-pie, cloud, cpu, hard-drive, trash-2, upload, link, shield-check, bug, flask-conical, palette, layout-dashboard, keyboard, gamepad-2, sword, shield, heart, star, coins, gift, trophy, timer, repeat, inbox, lock-open, fingerprint, git-pull-request, git-merge, network, webhook, blocks, box, file-code, braces, accessibility, wifi-off, bot
+
+Object.assign(window.TFV, { icon, iconMarkup, hasIcon });
+})();

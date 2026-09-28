@@ -1,11 +1,11 @@
 // Sets the light or dark theme before the first paint, so a dark screen does not
-// flash white. A file of its own and not an inline script: the page's
-// Content-Security-Policy allows scripts from this server only, and no inline
-// script at all (server.mjs). Loaded without `defer`, from <head>.
+// flash white. Loaded without `defer`, from <head>, as a plain script (not
+// type="module" - those fail to load at all over file://, which is how this
+// page is opened).
 (function () {
   var choice = "system";
   try {
-    choice = localStorage.getItem("task-flow-panel:theme") || "system";
+    choice = localStorage.getItem("task-flow-viewer:theme") || "system";
   } catch (e) {
     /* storage blocked: follow the system */
   }

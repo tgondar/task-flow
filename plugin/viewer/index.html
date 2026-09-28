@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>task-flow viewer</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <script src="./js/theme.js"></script>
+  <link rel="stylesheet" href="./css/fonts.css">
+  <link rel="stylesheet" href="./css/tokens.css">
+  <link rel="stylesheet" href="./css/base.css">
+  <link rel="stylesheet" href="./css/components.css">
+  <link rel="stylesheet" href="./css/viewer.css">
+</head>
+<body>
+  <div id="app" class="panel">
+    <p class="panel-loading">Loading…</p>
+  </div>
+  <!--
+    Plain scripts, not type="module": Chrome and Edge refuse to load ES modules
+    at all when this page is opened directly (file://) instead of served - see
+    the comment at the top of js/dom.js. Every file below hangs its exports off
+    one global, window.TFV, so load order here IS the dependency order.
+  -->
+  <script src="./js/dom.js"></script>
+  <script src="./js/icons.js"></script>
+  <script src="./js/ui.js"></script>
+  <script src="./js/i18n.js"></script>
+  <script src="./js/i18n-en.js"></script>
+  <script src="./js/feed-logic.js"></script>
+  <script src="./js/store.js"></script>
+  <script src="./js/data.js"></script>
+  <script src="./js/home.js"></script>
+  <script src="./js/run.js"></script>
+  <script src="./js/main.js"></script>
+</body>
+</html>
