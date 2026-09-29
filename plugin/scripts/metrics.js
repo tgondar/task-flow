@@ -259,10 +259,10 @@ function parseHealth(state) {
   const none = { startedAt: null, phaseLog: null, health: { taskRetries: null, testsGreenFirstRun: null, review: null, hardenFindings: null } };
   try {
     if (!isObject(state)) return none;
-    const health = isObject(state.health) ? state.health : null;
+    const health = hasOwn(state, 'health') && isObject(state.health) ? state.health : null;
     const own = (key) => (health && hasOwn(health, key) ? health[key] : undefined);
     return {
-      startedAt: isInstant(state.startedAt) ? state.startedAt : null,
+      startedAt: hasOwn(state, 'startedAt') && isInstant(state.startedAt) ? state.startedAt : null,
       phaseLog: hasOwn(state, 'phaseLog') ? parsePhaseLog(state.phaseLog) : null,
       health: {
         taskRetries: parseTaskRetries(own('taskRetries')),
