@@ -1445,7 +1445,10 @@ if (require.main === module) {
   const slug = value('--slug');
   let projectDir = null;
   try {
-    const candidate = path.resolve(argv.includes('--project-dir') ? String(value('--project-dir')) : (process.env.CLAUDE_PROJECT_DIR || process.cwd()));
+    // an explicit but empty --project-dir must not silently mean the cwd (path.resolve('') is the cwd)
+    const explicit = argv.includes('--project-dir') ? String(value('--project-dir')) : null;
+    if (explicit === '') throw new Error('empty');
+    const candidate = path.resolve(explicit !== null ? explicit : (process.env.CLAUDE_PROJECT_DIR || process.cwd()));
     if (fs.statSync(candidate).isDirectory()) projectDir = candidate;
   } catch {
     // stays null: reported as a usage error below
