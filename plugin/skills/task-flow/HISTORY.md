@@ -264,3 +264,51 @@ no unfinished run it says there is nothing in progress and names the ways out
 unfinished, unapproved run the original message is kept. Only the text changed -
 what is allowed and what is blocked is identical - and the text is fixed, so it
 still never echoes anything read from a `state.json`.
+
+## Run health is measured by code, once, and is only information
+
+A run that goes wrong in a way nobody sees is the usual failure of a system made
+of model calls: nothing crashes, the numbers just get worse (retries creeping up,
+tests red on the first run, reviews finding more). Without a measurement the only
+way to notice is to read the transcripts. So each closed run now leaves one row of
+numbers, and its page gets a "Run health" section comparing it with the project's
+own recent runs.
+
+- **Code, not a step of the prose.** The measurement is `scripts/metrics.js`, called
+  from `renderAll` when a run closes. A "now measure the run" step in SKILL.md would
+  have drifted like every step that depends on the orchestrator remembering it
+  (see the render rule in §8, which exists for the same reason). The orchestrator
+  takes no new action: it writes six fields it already knows (`startedAt`,
+  `phaseLog`, `health.*`) at the moment the fact happens, and the code does the rest.
+  Nothing is reconstructed at the end.
+- **Tokens come from the transcripts, deduplicated by `requestId`.** Summing every
+  usage line over-counted (measured: one API request is written to more than one
+  line). The transcript format is not a contract, so when it changes the row says
+  `tokens: null` with a reason instead of a wrong number.
+- **Only information, never a gate.** With a handful of runs and tasks of very
+  different size, a threshold produced false positives; a gate that cries wolf
+  gets switched off, and a measurement that can block a run is a new way for a run
+  to fail. So it blocks nothing, a failure of it never fails the run or the render,
+  it is bounded to a few seconds (the Stop hook has 15) and `TASK_FLOW_METRICS=off`
+  disables it. For the same reason **no hook enforces it**: the hooks exist to stop
+  drift that costs something (unapproved code, a turn ending mid-run), and a missing
+  or wrong health field costs one number on one page. The fail-closed/fail-open
+  asymmetry of the two hooks is untouched.
+- **The project's own median, not fixed limits.** A deviation is shown against the
+  last runs of the same project and model, not against a number picked in advance.
+- **What is a guess.** The baseline size (8 runs), its minimum (5) and the 50 %
+  and margins used to call something a deviation were picked, not measured. They
+  are named constants at the top of `metrics.js`, not configuration, and should be
+  checked against at least five real measured runs before anyone trusts a
+  "deviation" label; changing them is a decision to ask about.
+- **Everything read is untrusted.** `state.json`, `metrics.jsonl` and the
+  transcripts are written by others: every field is read in a closed shape and a
+  wrong one is dropped, never echoed and never thrown. The honest limit: someone
+  who can write `metrics.jsonl` can make one run's measurement disappear or say
+  something else. That is by design; it is a local file of numbers, not evidence.
+- **`.gitignore` is the user's.** The history lives per project in
+  `<stateDir>/metrics.jsonl` and is not ignored by default (the repository has no
+  `.gitignore`, and `state.json` is a committed file by design). It holds numbers and
+  closed names only, and is written after the PR is open, so it never enters the PR
+  of the run it measures. `metrics.js` never edits a `.gitignore` or runs `git add`;
+  SKILL.md tells the user they may ignore the file.

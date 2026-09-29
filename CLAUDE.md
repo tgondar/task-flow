@@ -19,6 +19,25 @@ node tests/enable-autoupdate.test.js
 node tests/questions.test.js
 node tests/answers.test.js
 node tests/viewer-feed-logic.test.js
+node tests/metrics.baseline.security.test.js
+node tests/metrics.close.security.test.js
+node tests/metrics.close.test.js
+node tests/metrics.collect.security.test.js
+node tests/metrics.collect.test.js
+node tests/metrics.docs.test.js
+node tests/metrics.e2e.test.js
+node tests/metrics.git.security.test.js
+node tests/metrics.git.test.js
+node tests/metrics.hardening.test.js
+node tests/metrics.hooks.security.test.js
+node tests/metrics.hooks.test.js
+node tests/metrics.io.security.test.js
+node tests/metrics.render.security.test.js
+node tests/metrics.render.test.js
+node tests/metrics.security.test.js
+node tests/metrics.test.js
+node tests/metrics.tokens.security.test.js
+node tests/metrics.tokens.test.js
 node tests/viewer.smoke.js     # headless Edge/Chrome over CDP; skipped without one
 claude plugin validate .
 ```
@@ -46,6 +65,7 @@ Code pieces, all sharing one config reader:
 - `plugin/hooks/gate.js` — PreToolUse on `Write|Edit|NotebookEdit`. Blocks writes unless some unfinished run (`phase` ≠ `done`, `status` ∉ `done`/`failed`) under `<stateDir>/<task>/state.json` has a non-empty `approvedBy`. Exempt without approval: `state.json` and `.md` inside `stateDir`, and other `.md` — except "instruction" markdown (anything under a `.claude/` folder other than `~/.claude/projects/*/memory/` and `~/.claude/plans/`, or a `CLAUDE.md` outside the project) and any path through a link inside the project. The `state.json` exemption excludes any write that would *set* `approvedBy` on a not-yet-approved state.json (anti self-approval): the gate replays the Write/Edit/`edits[]` on the current file, `JSON.parse`s the result, and blocks if it would become approved (or if the edit can't be replayed). Only a non-empty string `approvedBy` counts. **Fails closed** (exit 2) on unparseable payload/config/state in an opted-in repo, and on its own uncaught exceptions (exit 1 would be non-blocking). It is a drift guardrail, not a security boundary (Bash bypasses it).
 - `plugin/hooks/stop.js` — Stop hook that keeps a run with status `running` from ending its turn. **Fails open** on every error (a fail-closed Stop hook locks the session) and gives up after 3 pushes with no state change (guard files in `~/.claude/task-flow-guards/`). Its exit-2 messages reach the model, so they never echo `state.json` text: a run is named by its folder, `phase`/`buildCursor` only when they match closed shapes. It also re-renders all run pages as a backstop and pushes (max 2 times) if `tasksFile` mtime is older than a run's `phaseChangedAt`. The fail-closed/fail-open asymmetry between the two hooks is deliberate — preserve it.
 - `plugin/scripts/render-run.js` — generates `runs/<yyMMdd>_<slug>.md` pages in `docsDir` purely from `state.json` + the plan's task headings (never hand-written). Page strings exist for `en` and `pt-PT`; other languages fall back to English. The `state.json` field contract it depends on (`phase` = last stage *completed*, `buildCursor`, `artifacts` relative to `docsDir`, ISO `updated`/`phaseChangedAt`, `pendingTasks`) is documented in SKILL.md §8.
+- `plugin/scripts/metrics.js` — the run-health measurement. When `renderAll` closes a finished run it appends one closed-shape row (counts, ratios, a model name, never free text) to `<stateDir>/metrics.jsonl` and the page gets a "Run health" section comparing the run with the project's own recent runs (last 8 of the same project and model, at least 5 needed; these constants are unmeasured guesses named at the top of the file). It reads `state.json` (`startedAt`, `phaseLog`, `health`; SKILL.md §8), the plan and questions file, git and the session transcripts under `~/.claude/projects` (tokens, deduplicated by `requestId`), all as untrusted input: a wrong shape is dropped, never echoed. **Fails open** on everything: information, never a gate, a failure never fails the run or the render, and no hook enforces it (deliberately). `TASK_FLOW_METRICS=off` disables it, checked first. `render-run.js` requires it lazily (it imports `PHASES` from there). The history is per project and not ignored by git by default; it never edits a `.gitignore` or runs `git add`, and the user can add `<stateDir>/metrics.jsonl` to their own. `node plugin/scripts/metrics.js close --slug <slug>` re-measures a run.
 - `plugin/scripts/questions.js` — a run's questions as data, `<stateDir>/<run>/questions.json` (the gate lets exactly that path through before approval). Validation reports fields, never values; `render-run.js` generates the questions page from it (never overwriting a hand-written one) and moves it to `questions/resolved/` when the run is done with nothing open. Runs without a `questions.json` keep their hand-written page.
 - The **viewer feed**: every `renderAll` also writes `<home>/feed/<projectKey>.json` (`config.js` `homeDir`/`homePath`/`projectKey`; `<home>` = `%LOCALAPPDATA%\task-flow`), atomically, in closed shapes, without the absolute docsDir. A feed failure is a note, never a render failure.
 - `plugin/scripts/answers.js consume` — takes the viewer's submissions (`<home>/answers/<projectKey>/<run>/<id>.json`) into `questions.json`: closed shape, open questions only, no extra fields (no `approvedBy`), idempotent through `consumedSubmissions`; never deletes the viewer's files; prints answers inside a data block.

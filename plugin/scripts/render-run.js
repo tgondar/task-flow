@@ -92,6 +92,52 @@ const STRINGS = {
     pendingDecisions: (n) => `Decisions taken alone, waiting for review: ${n} (the ceiling is 3).`,
     otherArtifacts: '## Other artifacts',
     outcome: '## Outcome',
+    health: {
+      heading: '## Run health',
+      note: (n) => `Informational, never blocks. Baseline: median of the last ${n} finished runs of this project on the same model.`,
+      model: 'Model',
+      noBase: (have, min) => `No verdict: ${have} of ${min} runs in the baseline.`,
+      noModelBase: 'No verdict: no baseline for this model.',
+      noVerdict: 'No verdict.',
+      // Neutral on purpose: `failed` is not always red tests (T8 note b in the run log).
+      failedRun: 'This run ended as failed (draft PR); values shown, no verdict.',
+      header: ['Metric', 'This run', 'Median', 'Verdict'],
+      verdicts: { ok: 'ok', deviation: 'deviation', 'n/d': 'n/a' },
+      tokensMissing: (reason) => `Tokens not measured: ${reason}.`,
+      tokensScope: "Tokens are the subagents' only; the orchestrator is not counted.",
+      tokensNull: {
+        'no-transcripts': 'no transcripts',
+        'unreadable-format': 'transcript format not recognised',
+        overlap: 'another run at the same time in the project',
+        'no-window': 'run without a start time',
+        timeout: 'reading took too long',
+        disabled: 'disabled',
+      },
+      yes: 'yes',
+      no: 'no',
+      decimal: '.',
+      metrics: {
+        freshTokensPerTask: 'Fresh tokens per task',
+        toolCallsPerTask: 'Tool calls per task',
+        toolErrorsPerTask: 'Tool errors per task',
+        contextPeak: 'Context peak',
+        cacheHitRate: 'Cache hit rate',
+        retriesPerTask: 'Retries per task',
+        findingsPerTask: 'Critical + Required findings per task',
+        questionsPerTask: 'Questions per task',
+        explainedPerRun: 'Explanation requests per run',
+        maxRound: 'Highest second-opinion round',
+        testCodeRatio: 'Test to code ratio',
+      },
+      valueOnly: {
+        greenFirstRun: 'Tests green on the first run',
+        hardenFindings: 'Hardening findings',
+        added: 'Lines added',
+        removed: 'Lines removed',
+        files: 'Files touched',
+        sizePoints: 'Size (points)',
+      },
+    },
   },
   'pt-PT': {
     generatedNote: (by) => [
@@ -138,6 +184,51 @@ const STRINGS = {
     pendingDecisions: (n) => `Decisões tomadas sozinho, à espera de revisão: ${n} (o tecto é 3).`,
     otherArtifacts: '## Outros artefactos',
     outcome: '## Desfecho',
+    health: {
+      heading: '## Saúde da run',
+      note: (n) => `Informativo, nunca bloqueia. Base: mediana das últimas ${n} runs concluídas deste projeto com o mesmo modelo.`,
+      model: 'Modelo',
+      noBase: (have, min) => `Sem veredicto: ${have} de ${min} runs na base.`,
+      noModelBase: 'Sem veredicto: não há base para este modelo.',
+      noVerdict: 'Sem veredicto.',
+      failedRun: 'Esta run terminou como falhada (PR em rascunho); valores sem veredicto.',
+      header: ['Métrica', 'Esta run', 'Mediana', 'Veredicto'],
+      verdicts: { ok: 'ok', deviation: 'desvio', 'n/d': 'n/d' },
+      tokensMissing: (reason) => `Tokens não medidos: ${reason}.`,
+      tokensScope: 'Os tokens são só dos subagentes; o orquestrador não conta.',
+      tokensNull: {
+        'no-transcripts': 'não há transcripts',
+        'unreadable-format': 'formato dos transcripts não reconhecido',
+        overlap: 'outra run em simultâneo no projeto',
+        'no-window': 'run sem hora de início',
+        timeout: 'leitura demasiado longa',
+        disabled: 'desativado',
+      },
+      yes: 'sim',
+      no: 'não',
+      decimal: ',',
+      metrics: {
+        freshTokensPerTask: 'Tokens frescos por task',
+        toolCallsPerTask: 'Passos por task',
+        toolErrorsPerTask: 'Erros de ferramenta por task',
+        contextPeak: 'Pico de contexto',
+        cacheHitRate: 'Taxa de cache hit',
+        retriesPerTask: 'Retries por task',
+        findingsPerTask: 'Achados Critical+Required por task',
+        questionsPerTask: 'Perguntas por task',
+        explainedPerRun: 'Pedidos de explicação por run',
+        maxRound: 'Rondas máximas de segunda opinião',
+        testCodeRatio: 'Razão teste/código',
+      },
+      valueOnly: {
+        greenFirstRun: 'Testes verdes à primeira',
+        hardenFindings: 'Achados do harden',
+        added: 'Linhas adicionadas',
+        removed: 'Linhas removidas',
+        files: 'Ficheiros tocados',
+        sizePoints: 'Tamanho (pontos)',
+      },
+    },
   },
 };
 
@@ -494,7 +585,93 @@ function statusLabel(state, openQuestions = 0, t = STRINGS.en) {
   return t.status.paused;
 }
 
-function buildDocument({ state, slug, tasks, questions, openQuestions, depth, artifacts = {}, created, lang = 'en' }) {
+/** The "Run health" section (spec R8), as lines; [] when there is nothing to show.
+ *
+ * The page is generated truth and is also read by the model, and metrics.jsonl is a
+ * file anyone can edit, so this prints ONLY: numbers formatted here (each checked to be
+ * a finite number first), sentences from the fixed tables above, and the model name in
+ * a code span. Every other string in `health` is looked up in a fixed table (own keys
+ * only) and dropped when it is not there, never echoed. The whole function sits in a
+ * try: whatever a malformed `health` does, the rest of the page is untouched. */
+function healthSection(health, t) {
+  try {
+    const h = t.health;
+    if (!health || typeof health !== 'object' || !health.row || typeof health.row !== 'object') return [];
+    const row = health.row;
+    const base = health.baseline && typeof health.baseline === 'object' ? health.baseline : {};
+    const own = (object, key) => typeof key === 'string' && Object.prototype.hasOwnProperty.call(object, key);
+    const whole = (value) => (Number.isInteger(value) && value >= 0 && value <= 1e12 ? value : null);
+    const finite = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+    const decimal = (value) => value.toFixed(2).replace('.', h.decimal);
+    const KIND = {
+      freshTokensPerTask: (v) => String(Math.round(v)),
+      contextPeak: (v) => String(Math.round(v)),
+      explainedPerRun: (v) => String(Math.round(v)),
+      maxRound: (v) => String(Math.round(v)),
+      cacheHitRate: (v) => `${Math.round(v * 100)}%`,
+    };
+    // a finite input can still overflow when scaled (1e308 * 100): shown as a dash, never "Infinity%"
+    const show = (value, id) => {
+      if (finite(value) === null) return '—';
+      const text = (KIND[id] || decimal)(value);
+      return /Infinity|NaN/.test(text) ? '—' : text;
+    };
+
+    const out = [h.heading, ''];
+    const n = whole(base.n);
+    out.push(h.note(n === null ? 8 : n));
+    const model = typeof row.primaryModel === 'string' ? codeSpan(row.primaryModel) : null;
+    if (model) out.push(`${h.model}: ${model}`);
+    out.push('');
+
+    if (base.hasVerdict !== true) {
+      const have = whole(base.have);
+      const min = whole(base.min);
+      out.push(
+        base.reason === 'too-few' && have !== null && min !== null ? h.noBase(have, min)
+          : base.reason === 'no-model-base' ? h.noModelBase
+            : base.reason === 'failed' ? h.failedRun
+              : h.noVerdict,
+        '',
+      );
+    }
+
+    if (row.tokens === null) {
+      if (own(h.tokensNull, row.tokensNull)) out.push(h.tokensMissing(h.tokensNull[row.tokensNull]), '');
+    } else {
+      out.push(h.tokensScope, '');
+    }
+
+    const rows = [];
+    for (const metric of Array.isArray(base.metrics) ? base.metrics : []) {
+      if (!metric || !own(h.metrics, metric.id)) continue;
+      const verdict = own(h.verdicts, metric.verdict) ? h.verdicts[metric.verdict] : '—';
+      rows.push([h.metrics[metric.id], show(metric.value, metric.id), show(metric.median, metric.id), verdict]);
+    }
+    // measured but never judged (spec R7): value only
+    const count = (value) => (whole(value) === null ? '—' : String(value));
+    const code = row.code && typeof row.code === 'object' ? row.code : {};
+    const green = row.tests && typeof row.tests === 'object' ? row.tests.greenFirstRun : null;
+    const only = [
+      [h.valueOnly.greenFirstRun, green === true ? h.yes : green === false ? h.no : '—'],
+      [h.valueOnly.hardenFindings, count(row.hardenFindings)],
+      [h.valueOnly.added, count(code.added)],
+      [h.valueOnly.removed, count(code.removed)],
+      [h.valueOnly.files, count(code.files)],
+      [h.valueOnly.sizePoints, count(row.sizePoints)],
+    ];
+    for (const [label, value] of only) rows.push([label, value, '—', '—']);
+
+    out.push(`| ${h.header.join(' | ')} |`, '| --- | ---: | ---: | --- |');
+    for (const cells of rows) out.push(`| ${cells.join(' | ')} |`);
+    out.push('');
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function buildDocument({ state, slug, tasks, questions, openQuestions, depth, artifacts = {}, created, lang = 'en', health = null }) {
   const t = stringsFor(lang);
   const declaredIndex = PHASES.indexOf(state.phase);
   const isDone = state.phase === 'done';
@@ -693,6 +870,10 @@ function buildDocument({ state, slug, tasks, questions, openQuestions, depth, ar
     out.push(others.join(' · '));
     out.push('');
   }
+
+  // Only for a finished run that metrics.js already measured: no row, no section, so
+  // runs from before the measurement keep the page they always had, byte for byte.
+  if (isDone) out.push(...healthSection(health, t));
 
   const outcome = codeSpan(state.outcome);
   if (outcome) {
@@ -974,6 +1155,39 @@ function renderAll({ projectDir, docsDir, slug } = {}) {
   const liveDir = path.join(targetDocs, RUNS_DIR);
   const archiveDir = path.join(liveDir, RUNS_ARCHIVE);
 
+  // The run-health switch is read once, first, like the other escape hatches: when it is
+  // "off" nothing of metrics.js is loaded, run or shown.
+  const metricsOff = String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off';
+  let history = null; // one read per render, dropped whenever a close appends to it
+  const metricsStarted = Date.now();
+  // metrics.js imports this file (PHASES, readPlanTasks...), so it is required HERE,
+  // lazily: a require at the top would hand it back half-built. Throws an error carrying
+  // only a closed code, so the caller can note a failure without quoting anything.
+  //
+  // Cost across runs, not just per run: this is called for EVERY finished run on EVERY
+  // render, and the Stop hook renders each turn. So (1) a run already in the history
+  // is answered from the one cached read, with no closeRun (which would re-read up to
+  // 1 MiB of history per run), and (2) no NEW close is started once half of one close's
+  // budget is spent in this render: a close that keeps failing (unwritable history)
+  // would otherwise cost seconds per run per turn and push the hook past its timeout.
+  // The runs left over are retried by the next render.
+  const closeAndRead = (entry, state) => {
+    const metrics = require('./metrics.js');
+    const find = () => {
+      if (history === null) history = metrics.readHistory(root, stateRoot);
+      const rows = Array.isArray(history.rows) ? history.rows : [];
+      return { rows, row: rows.find((candidate) => candidate.run === entry && candidate.created === state.created) };
+    };
+    let found = find();
+    if (!found.row && Date.now() - metricsStarted < metrics.CONSTANTS.BUDGET_MS / 2) {
+      const closed = metrics.closeRun({ projectDir: root, slug: entry });
+      if (!closed.ok) throw Object.assign(new Error('metrics close failed'), { metricsCode: /^[a-z-]{1,30}$/.test(String(closed.code)) ? closed.code : 'internal' });
+      history = null; // 'already-closed' by a racing render means the copy read above is stale too
+      found = find();
+    }
+    return found.row ? { row: found.row, baseline: metrics.baseline(found.rows, found.row) } : null;
+  };
+
   for (const entry of fs.readdirSync(stateRoot)) {
     if (slug && entry !== slug) continue;
     const statePath = path.join(stateRoot, entry, 'state.json');
@@ -1027,6 +1241,19 @@ function renderAll({ projectDir, docsDir, slug } = {}) {
         if (resolved && exists(resolved)) artifacts[key] = path.relative(targetDocs, resolved);
       }
 
+      // Close the run and read its row BEFORE the page is built, so the very render that
+      // finishes a run already shows its health (spec R4/R8). Never at the page's expense:
+      // whatever fails here leaves `health` null, i.e. the page of a run without a row.
+      let health = null;
+      if (state.phase === 'done' && !metricsOff) {
+        try {
+          health = closeAndRead(entry, state);
+        } catch (error) {
+          // a closed code or a fixed text, never the message of an error: it may quote a file
+          result.metricsError = error && error.metricsCode ? error.metricsCode : 'internal';
+        }
+      }
+
       const body = buildDocument({
         state,
         slug: entry,
@@ -1037,6 +1264,7 @@ function renderAll({ projectDir, docsDir, slug } = {}) {
         artifacts,
         created: `20${prefix.slice(0, 2)}-${prefix.slice(2, 4)}-${prefix.slice(4, 6)}`,
         lang,
+        health,
       });
 
       const file = placeDocument({
@@ -1081,6 +1309,12 @@ module.exports = {
   writeFeed,
   assertInside,
   runCreatedPrefix,
+  // Shared with metrics.js, which must count tasks and validate run names exactly
+  // as this page does (one definition, never a second parser).
+  SAFE_SEGMENT,
+  readJson,
+  readSkippedTasks,
+  readPendingTasks,
 };
 
 // --- CLI -------------------------------------------------------------------
@@ -1110,4 +1344,5 @@ if (require.main === module) {
   if (outcome.questionErrors.length) process.exitCode = 1;
   // A note, not a failure: the documentation was rendered either way.
   if (outcome.feedError) process.stderr.write(`viewer feed not written: ${outcome.feedError}\n`);
+  if (outcome.metricsError) process.stderr.write(`metrics not closed: ${outcome.metricsError}\n`);
 }
