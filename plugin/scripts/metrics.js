@@ -467,6 +467,95 @@ function appendRow(projectDir, stateDir, row) {
   }
 }
 
+// --- code metrics from git (spec R9, R1) -----------------------------------------------
+//
+// `readCode({ projectDir, branch, base })` measures the branch's diff against its base
+// with `git diff --numstat`. `branch` and `base` come from state.json / the project's
+// config, so they are UNTRUSTED text that ends up in a process argument list. Defences,
+// in order: (1) a strict closed shape (no leading '-', no '..', no control characters,
+// at most 200 chars) checked BEFORE git is ever spawned - a value that fails it means
+// git is not run at all; (2) execFileSync with an argument array and shell:false, so no
+// shell ever parses a ref; (3) `--end-of-options` is not used (older gits lack it) but
+// the shape already forbids a leading '-', and the revisions are followed by `--` so git
+// cannot read them as paths; (4) cwd is the project dir, stdout is bounded (maxBuffer),
+// the call has a timeout, stderr is never inherited or captured (git's messages can
+// contain paths); (5) config that could run programs (external diff, textconv,
+// fsmonitor, pager) is switched off on the command line.
+//
+// Only numbers leave this function. Paths are read to classify a file as test or code
+// and dropped. Every failure ends as `{ code: null, reason }` with a closed reason;
+// nothing here throws and nothing here can fail a run.
+
+const { execFileSync } = require('child_process');
+
+const SAFE_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+const GIT_TIMEOUT_MS = 3000;
+const GIT_MAX_BUFFER = 1024 * 1024;
+/** Sanity ceiling per count, as for the other readers: bigger is not a measurement. */
+const MAX_CODE_COUNT = 1e9;
+
+function isSafeRef(value) {
+  return typeof value === 'string' && SAFE_REF.test(value) && !value.includes('..') && !value.includes('//') && !value.endsWith('/') && !value.endsWith('.lock');
+}
+
+/** Fixed patterns from the spec: a `test`/`tests`/`__tests__` folder, or *.test.* / *.spec.* */
+function isTestPath(file) {
+  const parts = file.split('/');
+  const name = parts[parts.length - 1];
+  return parts.slice(0, -1).some((p) => p === 'test' || p === 'tests' || p === '__tests__') || /\.(test|spec)\.[^./]+$/.test(name);
+}
+
+const noCode = (reason) => ({ code: null, reason });
+
+function readCode(options) {
+  try {
+    const { projectDir, branch, base } = options && typeof options === 'object' ? options : {};
+    if (typeof projectDir !== 'string' || projectDir === '' || projectDir.includes('\0')) return noCode('bad-input');
+    if (!isSafeRef(branch) || !isSafeRef(base)) return noCode('bad-ref');
+    let out;
+    try {
+      out = execFileSync(
+        'git',
+        ['--no-pager', '-c', 'core.quotepath=false', '-c', 'core.fsmonitor=false', '-c', 'diff.external=', '-c', 'core.pager=cat',
+          'diff', '--numstat', '-z', '-M', '--no-ext-diff', '--no-textconv', `${base}...${branch}`, '--'],
+        {
+          cwd: projectDir, shell: false, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER,
+          stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, encoding: 'utf8',
+          env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_EXTERNAL_DIFF: '', GIT_PAGER: 'cat' },
+        },
+      );
+    } catch (error) {
+      const c = error && error.code;
+      return noCode(c === 'ETIMEDOUT' ? 'timeout' : c === 'ENOBUFS' ? 'too-large' : c === 'ENOENT' ? 'no-git' : 'git-failed');
+    }
+    // -z records: "<added>\t<removed>\t<path>\0"; a rename is "<a>\t<r>\t\0<old>\0<new>\0".
+    const tokens = out.split('\0');
+    if (tokens[tokens.length - 1] === '') tokens.pop();
+    const total = { added: 0, removed: 0, files: 0, testAdded: 0, codeAdded: 0 };
+    for (let i = 0; i < tokens.length; i += 1) {
+      const m = /^(\d+|-)\t(\d+|-)\t(.*)$/s.exec(tokens[i]);
+      if (!m) return noCode('unreadable-output');
+      let file = m[3];
+      if (file === '') { // rename: the next two tokens are the old and new path
+        if (i + 2 > tokens.length - 1) return noCode('unreadable-output');
+        file = tokens[i + 2];
+        i += 2;
+      }
+      // binary files ("-") count as a touched file with 0 lines
+      const added = m[1] === '-' ? 0 : Number(m[1]);
+      const removed = m[2] === '-' ? 0 : Number(m[2]);
+      total.files += 1;
+      total.added += added;
+      total.removed += removed;
+      if (isTestPath(file)) total.testAdded += added; else total.codeAdded += added;
+    }
+    if (!Object.values(total).every((n) => Number.isSafeInteger(n) && n <= MAX_CODE_COUNT)) return noCode('unreadable-output');
+    return { code: total, reason: null };
+  } catch {
+    return noCode('internal');
+  }
+}
+
 // --- transcript reader (spec R6) -------------------------------------------------
 //
 // Tokens are read from the subagents' transcripts under
@@ -971,4 +1060,5 @@ module.exports = {
   DEVIATION,
   baseline,
   readTokens,
+  readCode,
 };
