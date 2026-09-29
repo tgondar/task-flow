@@ -295,6 +295,9 @@ const historyPath = (stateDir) => path.join(stateDir, HISTORY_FILE);
  * component below the project root, the state folder included.
  */
 function isSafeHistoryPath(projectDir, stateDir, file) {
+  // absolute only: '' or a relative stateDir would resolve against the process cwd
+  // and write metrics.jsonl wherever the hook happened to start
+  if (typeof projectDir !== 'string' || typeof stateDir !== 'string' || !path.isAbsolute(projectDir) || !path.isAbsolute(stateDir)) return false;
   return isInside(stateDir, file) && isInside(projectDir, file) && !crossesLink(projectDir, file);
 }
 
