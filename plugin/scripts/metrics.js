@@ -8,11 +8,12 @@
 // orchestrator remembered. It is INFORMATION: nothing here may block, delay
 // (> 5 s) or fail a run or a render.
 //
-// THIS FILE, so far (T1, T2): the constants, the closed-shape validator of a
+// THIS FILE, so far (T1-T3): the constants, the closed-shape validator of a
 // metrics.jsonl line (spec R2) and the parser of the three optional state.json
 // additions (`startedAt`, `phaseLog`, `health`; spec R5). Later tasks add the
 // history reader/safe writer of metrics.jsonl (T2; spec R3, R10), baseline, transcript reader, git reader, collect and
-// closeRun to this same file.
+// closeRun to this same file. T3 adds `baseline`: a PURE comparison of a run against
+// the median of the project's own recent runs (spec R7).
 //
 // Trust model. state.json, metrics.jsonl, questions.json, plans and transcripts
 // are all files somebody else may have written (a cloned repo, a shared folder).
@@ -67,6 +68,41 @@ const CONSTANTS = Object.freeze({
   GIT_TIMEOUT_MS: 3000,
   GIT_MAX_BUFFER: 1024 * 1024,
 });
+
+// --- deviation table (spec R7) --------------------------------------------------
+// INITIAL, UNMEASURED GUESSES. Nobody has measured a real run yet: the N and the
+// minimum above, every `rel` and every `floor` below are the spec's starting
+// numbers, to be validated against >= 5 measured runs. They are named constants and
+// not configuration on purpose, and changing one is an "ask first" change (spec
+// section 9), never a drive-by edit.
+//
+// A run deviates on a metric only in the WORSE direction, and only when it is worse
+// than the baseline median `m` by more than max(rel * m, floor):
+//   worse = 'higher':  value > m + max(rel * m, floor)
+//   worse = 'lower':   value < max(0, m - max(rel * m, floor))
+// `floor` (absolute) stops a median of 0 or a tiny one from flagging noise;
+// `rel` is the relative part. The spec's base rule is rel = 0.5, but for metrics
+// bounded to 0..1 that is a huge drop (a cache hit rate of 0.94 would only deviate
+// below 0.47), so the two bounded rates carry their own, tighter fraction.
+// Order is the order of the page table (R8). `per` = 'task' means "divided by
+// tasks.done" so a big run and a small one compare at the same cost per task.
+const DEVIATION = Object.freeze([
+  { id: 'freshTokensPerTask', per: 'task', worse: 'higher', rel: 0.5, floor: 5000 },
+  { id: 'toolCallsPerTask', per: 'task', worse: 'higher', rel: 0.5, floor: 3 },
+  { id: 'toolErrorsPerTask', per: 'task', worse: 'higher', rel: 0.5, floor: 1 },
+  { id: 'contextPeak', per: null, worse: 'higher', rel: 0.5, floor: 20000 },
+  { id: 'cacheHitRate', per: null, worse: 'lower', rel: 0.10, floor: 0.05 },
+  { id: 'retriesPerTask', per: 'task', worse: 'higher', rel: 0.5, floor: 0.25 },
+  { id: 'findingsPerTask', per: 'task', worse: 'higher', rel: 0.5, floor: 0.25 },
+  { id: 'questionsPerTask', per: 'task', worse: 'higher', rel: 0.5, floor: 0.25 },
+  { id: 'explainedPerRun', per: null, worse: 'higher', rel: 0.5, floor: 1 },
+  { id: 'maxRound', per: null, worse: 'higher', rel: 0.5, floor: 1 },
+  { id: 'testCodeRatio', per: null, worse: 'lower', rel: 0.25, floor: 0.10 },
+].map((metric) => Object.freeze(metric)));
+
+/** Boundary values are computed in floating point (0.94 - 0.094 is not exactly
+ *  0.846): a value ON the limit must be ok, so compare with a hair of tolerance. */
+const EPSILON = 1e-9;
 
 /** Every counter in a row is an integer in [0, 1e12]. Beyond that it is not a
  *  measurement, it is a hand-edited file (M-R10.3). */
@@ -431,6 +467,118 @@ function appendRow(projectDir, stateDir, row) {
   }
 }
 
+// --- baseline (spec R7) ---------------------------------------------------------
+
+/** The number of `row`'s metric, or null. A row is read through isCount/isRate
+ *  again here, so even a row that skipped validation cannot produce NaN, Infinity or
+ *  a value from an inherited key. Per-task metrics need tasks.done > 0. */
+function metricValue(row, id) {
+  const block = (name) => (isObject(row) && hasOwn(row, name) && isObject(row[name]) ? row[name] : null);
+  const count = (object, key) => (object && hasOwn(object, key) && isCount(object[key]) ? object[key] : null);
+  const tasks = block('tasks');
+  const done = count(tasks, 'done');
+  const perTask = (total) => (total === null || !done ? null : total / done);
+  const sum = (...parts) => (parts.some((part) => part === null) ? null : parts.reduce((a, b) => a + b, 0));
+  const tokens = block('tokens');
+  const agent = block('agent');
+  const review = block('review');
+  const questions = block('questions');
+  const code = block('code');
+  switch (id) {
+    case 'freshTokensPerTask': return perTask(sum(count(tokens, 'input'), count(tokens, 'cacheCreate'), count(tokens, 'output')));
+    case 'toolCallsPerTask': return perTask(count(agent, 'toolCalls'));
+    case 'toolErrorsPerTask': return perTask(count(agent, 'toolErrors'));
+    case 'contextPeak': return count(agent, 'contextPeak');
+    case 'cacheHitRate': return tokens && hasOwn(tokens, 'cacheHitRate') && isRate(tokens.cacheHitRate) ? tokens.cacheHitRate : null;
+    case 'retriesPerTask': return perTask(count(tasks, 'retries'));
+    case 'findingsPerTask': return perTask(sum(count(review, 'critical'), count(review, 'required')));
+    case 'questionsPerTask': return perTask(count(questions, 'total'));
+    case 'explainedPerRun': return count(questions, 'explained');
+    case 'maxRound': return count(questions, 'maxRound');
+    case 'testCodeRatio': {
+      const codeAdded = count(code, 'codeAdded');
+      const testAdded = count(code, 'testAdded');
+      return codeAdded && testAdded !== null ? testAdded / codeAdded : null;
+    }
+    default: return null;
+  }
+}
+
+/** Median of a non-empty list of finite numbers: the middle one, or for an even
+ *  count the mean of the two middle ones. Sorts a copy. */
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/** ok / deviation for one value against a baseline median, by the rule above. */
+function judge(spec, value, m) {
+  const slack = Math.max(spec.rel * m, spec.floor);
+  if (spec.worse === 'higher') return value > m + slack + EPSILON ? 'deviation' : 'ok';
+  return value < Math.max(0, m - slack) - EPSILON ? 'deviation' : 'ok';
+}
+
+const sameRun = (a, b) => a.run === b.run && a.created === b.created;
+const byClosedAt = (a, b) => (Date.parse(a.closedAt) - Date.parse(b.closedAt)) || (a.run < b.run ? -1 : a.run > b.run ? 1 : 0);
+
+/**
+ * Compares `current` (a row) with the median of the last `n` finished runs of the
+ * same model in `history` (rows). PURE: no I/O, no clock, inputs not mutated, never
+ * throws, and nothing in the result comes from the inputs but numbers.
+ *
+ * Returns { hasVerdict, reason, have, min, n, metrics: [{ id, value, median, verdict }] }
+ *   reason: null | 'too-few' (have < min) | 'no-model-base' (no baseline row of this
+ *   model, also when the current run has no model) | 'failed' (current run failed:
+ *   values, never a verdict, and failed rows are never in the baseline either) |
+ *   'bad-current'.
+ *   verdict: 'ok' | 'deviation' | 'n/d' (no value, or fewer than `min` non-null baseline
+ *   values for this metric) | null (the run has no verdict at all).
+ *
+ * The baseline is filtered FIRST (validated, outcome done, same primaryModel, not the
+ * current run) and only THEN cut to the last `n` by closedAt (ties by run). Taking the
+ * newest n and filtering afterwards would let a burst of failed or other-model runs
+ * empty the baseline of the runs that are actually comparable.
+ */
+function baseline(history, current, { n = CONSTANTS.BASELINE_N, min = CONSTANTS.BASELINE_MIN } = {}) {
+  const result = { hasVerdict: false, reason: 'bad-current', have: 0, min, n, metrics: [] };
+  try {
+    if (!isObject(current)) return result;
+    const values = DEVIATION.map((spec) => ({ id: spec.id, value: metricValue(current, spec.id) }));
+    const out = (extra) => ({
+      ...result,
+      ...extra,
+      metrics: values.map((v, i) => ({ id: v.id, value: v.value, median: null, verdict: null, ...(extra.metrics ? extra.metrics[i] : {}) })),
+    });
+
+    const modelOk = typeof current.primaryModel === 'string' && SHAPE.model.test(current.primaryModel);
+    // bounded: the history reader already caps rows, this caps a caller that did not
+    const rows = Array.isArray(history) ? history.slice(-CONSTANTS.HISTORY_MAX_ROWS) : [];
+    const base = [];
+    for (const row of rows) {
+      if (modelOk && validateRow(row).ok && row.outcome === 'done' && row.primaryModel === current.primaryModel && !sameRun(row, current)) base.push(row);
+    }
+    base.sort(byClosedAt);
+    const used = base.slice(-Math.max(0, n));
+    const have = used.length;
+
+    if (current.outcome === 'failed') return out({ reason: 'failed', have });
+    if (have === 0) return out({ reason: 'no-model-base', have });
+    if (have < min) return out({ reason: 'too-few', have });
+
+    const metrics = DEVIATION.map((spec, i) => {
+      const own = used.map((row) => metricValue(row, spec.id)).filter((v) => v !== null);
+      const value = values[i].value;
+      if (own.length < min || value === null) return { verdict: 'n/d' };
+      const m = median(own);
+      return { median: m, verdict: judge(spec, value, m) };
+    });
+    return out({ hasVerdict: true, reason: null, have, metrics });
+  } catch {
+    return { ...result, reason: 'bad-current' };
+  }
+}
+
 module.exports = {
   CONSTANTS,
   PHASES,
@@ -439,4 +587,6 @@ module.exports = {
   parseHealth,
   readHistory,
   appendRow,
+  DEVIATION,
+  baseline,
 };

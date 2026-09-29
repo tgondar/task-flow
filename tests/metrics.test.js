@@ -490,6 +490,153 @@ const rejected = (row) => {
   check('R10.5 the read result carries no text from the file', !JSON.stringify(h).includes('IGNORE'));
 }
 
+// --- T3: baseline (spec R7) --------------------------------------------------
+{
+  const { baseline } = metrics;
+  let seq = 0;
+  // a finished row; `over` replaces top-level fields; per-task cost is fixed by default
+  const mk = (over = {}) => {
+    seq += 1;
+    const day = String(10 + Math.floor(seq / 20)).padStart(2, '0');
+    const sec = String(seq % 60).padStart(2, '0');
+    return { ...clone(FULL_ROW), run: `run-${seq}`, closedAt: `2026-09-${day}T10:00:${sec}Z`, ...over };
+  };
+  const find = (result, id) => result.metrics.find((m) => m.id === id) || {};
+  const verdictOf = (result, id) => find(result, id).verdict;
+  const medianOf = (result, id) => find(result, id).median;
+  const withAgent = (over) => ({ agent: { requests: 210, toolCalls: 388, toolErrors: 7, contextPeak: 141000, ...over } });
+  const src = fs.readFileSync(SCRIPT, 'utf8');
+
+  check('R7 DEVIATION is frozen and the source says the numbers are an UNMEASURED guess', Object.isFrozen(metrics.DEVIATION) && /UNMEASURED/.test(src));
+  const dev = (id) => metrics.DEVIATION.find((m) => m.id === id) || {};
+  check('R7 constants: 0.5 unbounded, cache hit 0.10/0.05, test/code 0.25/0.10', dev('toolCallsPerTask').rel === 0.5 && dev('cacheHitRate').rel === 0.10 && dev('cacheHitRate').floor === 0.05 && dev('testCodeRatio').rel === 0.25 && dev('testCodeRatio').floor === 0.10);
+
+  const cur = mk({ run: 'current' });
+  const four = [mk(), mk(), mk(), mk()];
+  let r = baseline(four, cur);
+  check('M-R7.1 4 in the baseline: no verdict, reason too-few, have 4', r.hasVerdict === false && r.reason === 'too-few' && r.have === 4 && r.min === 5, JSON.stringify(r).slice(0, 200));
+  r = baseline([...four, mk()], cur);
+  check('M-R7.1 5 in the baseline: verdict', r.hasVerdict === true && r.reason === null && r.have === 5);
+
+  // the 5 newest rows are failed / another model and must NOT take places from the 8
+  const calls = (n) => ({ agent: { requests: 1, toolCalls: n, toolErrors: 0, contextPeak: 1 } });
+  const older = Array.from({ length: 8 }, (_, i) => mk(calls(9 * (i + 1))));
+  const newer = [
+    ...Array.from({ length: 3 }, () => mk({ outcome: 'failed', ...calls(9999) })),
+    ...Array.from({ length: 2 }, () => mk({ primaryModel: 'other-model', ...calls(9999) })),
+  ];
+  r = baseline([...older, ...newer], cur);
+  check('M-R7.1 filter first, then the last 8: newer failed/other-model rows steal nothing', r.have === 8 && medianOf(r, 'toolCallsPerTask') === 4.5, `have ${r.have} median ${medianOf(r, 'toolCallsPerTask')}`);
+  const nine = Array.from({ length: 9 }, (_, i) => mk(calls(9 * (i + 1))));
+  r = baseline(nine, cur);
+  check('M-R7.1 9 of history: only the 8 most recent (oldest dropped)', r.have === 8 && medianOf(r, 'toolCallsPerTask') === 5.5, String(medianOf(r, 'toolCallsPerTask')));
+  const shuffled = [nine[4], nine[8], nine[0], nine[2], nine[6], nine[1], nine[7], nine[3], nine[5]];
+  check('M-R7.1 input order does not matter (sorted by closedAt)', JSON.stringify(baseline(shuffled, cur)) === JSON.stringify(r));
+  const tie = [mk({ closedAt: '2026-09-11T10:00:00Z', run: 'b', ...calls(9) }), mk({ closedAt: '2026-09-11T10:00:00Z', run: 'a', ...calls(18) })];
+  check('M-R7 ties on closedAt are ordered by run (deterministic)', JSON.stringify(baseline(tie, cur)) === JSON.stringify(baseline([tie[1], tie[0]], cur)));
+
+  // medians
+  const perTask = (list) => list.map((c) => mk(withAgent({ toolCalls: c * 9 })));
+  r = baseline(perTask([10, 20, 30, 40, 50]), cur);
+  check('M-R7.2 odd count: the middle value', medianOf(r, 'toolCallsPerTask') === 30);
+  r = baseline(perTask([10, 20, 30, 40, 50, 60]), cur);
+  check('M-R7.2 even count: mean of the two middle values', medianOf(r, 'toolCallsPerTask') === 35);
+  r = baseline([...perTask([10, 20, 30, 40, 50]), mk({ agent: null })], cur);
+  check('M-R7.2 null values are skipped (6 rows, 5 non-null)', medianOf(r, 'toolCallsPerTask') === 30 && verdictOf(r, 'toolCallsPerTask') === 'ok');
+  r = baseline([...perTask([10, 20, 30, 40]), mk({ agent: null }), mk({ agent: null })], cur);
+  check('M-R7.2 4 non-null values: n/d for that metric, global verdict still exists', verdictOf(r, 'toolCallsPerTask') === 'n/d' && medianOf(r, 'toolCallsPerTask') === null && r.hasVerdict === true);
+
+  // deviation, worse = larger: contextPeak m=100000, floor 20000, rel .5 -> limit 150000
+  const ctx = (v) => Array.from({ length: 5 }, () => mk(withAgent({ contextPeak: v })));
+  const at = (peak) => baseline(ctx(100000), mk({ run: 'c', ...withAgent({ contextPeak: peak }) }));
+  check('M-R7.3 exactly m + max(rel*m, f) is ok', verdictOf(at(150000), 'contextPeak') === 'ok');
+  check('M-R7.3 the next value is a deviation', verdictOf(at(150001), 'contextPeak') === 'deviation');
+  check('M-R7.3 improving is never a deviation', verdictOf(at(1), 'contextPeak') === 'ok');
+  // tiny median: the floor beats the relative part (20000 * 0.5 = 10000 < 20000)
+  const small = baseline(ctx(10000), mk({ run: 'c', ...withAgent({ contextPeak: 30000 }) }));
+  check('M-R7.3 small median: the floor decides (10000 + 20000 is ok, +1 deviates)', verdictOf(small, 'contextPeak') === 'ok' && verdictOf(baseline(ctx(10000), mk({ run: 'c', ...withAgent({ contextPeak: 30001 }) })), 'contextPeak') === 'deviation');
+  // median 0: the floor decides (errors per task: floor 1)
+  const zeroErr = Array.from({ length: 5 }, () => mk(withAgent({ toolErrors: 0 })));
+  check('M-R7.3 median 0: within the floor is ok (9 errors / 9 tasks = 1)', verdictOf(baseline(zeroErr, mk({ run: 'c', ...withAgent({ toolErrors: 9 }) })), 'toolErrorsPerTask') === 'ok');
+  check('M-R7.3 median 0: beyond the floor is a deviation', verdictOf(baseline(zeroErr, mk({ run: 'c', ...withAgent({ toolErrors: 10 }) })), 'toolErrorsPerTask') === 'deviation');
+  // cache hit (worse = smaller): m .94, limit .846
+  const cache = (rate) => baseline(Array.from({ length: 5 }, () => mk()), mk({ run: 'c', tokens: { ...clone(FULL_ROW.tokens), cacheHitRate: rate } }));
+  check('M-R7.3 cache hit 0.94 -> 0.85 is ok', verdictOf(cache(0.85), 'cacheHitRate') === 'ok');
+  check('M-R7.3 cache hit 0.94 -> 0.80 is a deviation', verdictOf(cache(0.80), 'cacheHitRate') === 'deviation');
+  check('M-R7.3 cache hit exactly on the limit (0.846) is ok, just below it deviates', verdictOf(cache(0.846), 'cacheHitRate') === 'ok' && verdictOf(cache(0.845), 'cacheHitRate') === 'deviation');
+  check('M-R7.3 cache hit above the median never deviates', verdictOf(cache(1), 'cacheHitRate') === 'ok');
+  // test/code ratio: median 430/382 = 1.1257 -> limit 1.1257 - max(.2814, .1) = .8443
+  const ratio = (t, c) => baseline(Array.from({ length: 5 }, () => mk()), mk({ run: 'c', code: { added: 1, removed: 0, files: 1, testAdded: t, codeAdded: c } }));
+  check('M-R7.3 test/code ratio: 0.90 is ok, 0.50 deviates', verdictOf(ratio(90, 100), 'testCodeRatio') === 'ok' && verdictOf(ratio(50, 100), 'testCodeRatio') === 'deviation');
+  // worse = smaller never goes below 0: median 0.05 (floor .10 > median), value 0 is ok
+  const lowBase = Array.from({ length: 5 }, () => mk({ code: { added: 1, removed: 0, files: 1, testAdded: 5, codeAdded: 100 } }));
+  check('M-R7.3 worse-smaller limit clamps at 0: value 0 with median .05 is ok', verdictOf(baseline(lowBase, mk({ run: 'c', code: { added: 1, removed: 0, files: 1, testAdded: 0, codeAdded: 100 } })), 'testCodeRatio') === 'ok');
+
+  // normalisation: 3x the tasks at the same cost per task
+  const big = mk({
+    run: 'c',
+    tasks: { total: 27, done: 27, skipped: 0, pending: 0, retries: 3, firstTime: 24 },
+    questions: { total: 12, open: 0, explained: 1, maxRound: 2 },
+    review: { critical: 0, required: 6, optional: 9, nit: 3 },
+    agent: { requests: 630, toolCalls: 388 * 3, toolErrors: 21, contextPeak: 141000 },
+    tokens: { ...clone(FULL_ROW.tokens), input: 3600, cacheCreate: 930000, output: 273000 },
+  });
+  r = baseline(Array.from({ length: 5 }, () => mk()), big);
+  check('M-R7.4 3x tasks at the same cost per task: no deviation anywhere', r.metrics.every((m) => m.verdict !== 'deviation'), JSON.stringify(r.metrics.filter((m) => m.verdict === 'deviation')));
+  check('M-R7.4 per-task values are divided by tasks.done', Math.abs(find(r, 'toolCallsPerTask').value - 388 / 9) < 1e-9);
+  r = baseline(Array.from({ length: 5 }, () => mk()), mk({ run: 'c', tasks: { total: 3, done: 0, skipped: 0, pending: 3, retries: 0, firstTime: 0 } }));
+  check('M-R7 tasks.done 0: per-task values are null and n/d, never NaN/Infinity', r.metrics.filter((m) => /PerTask$/.test(m.id)).every((m) => m.value === null && m.verdict === 'n/d') && !/NaN|Infinity/.test(JSON.stringify(r)));
+
+  // model
+  r = baseline(Array.from({ length: 6 }, () => mk({ primaryModel: 'other-model' })), cur);
+  check('M-R7.5 only another model in history: no verdict, reason no-model-base', r.hasVerdict === false && r.reason === 'no-model-base' && r.have === 0);
+  r = baseline(Array.from({ length: 6 }, () => mk()), mk({ run: 'c', primaryModel: null }));
+  check('M-R7.5 current run without a model: no-model-base', r.hasVerdict === false && r.reason === 'no-model-base');
+
+  // failed
+  const bad = mk({ run: 'c', outcome: 'failed', agent: { requests: 1, toolCalls: 99999, toolErrors: 0, contextPeak: 999999 } });
+  r = baseline(Array.from({ length: 6 }, () => mk()), bad);
+  check('M-R7.6 a failed current run: values, no verdict, reason failed', r.hasVerdict === false && r.reason === 'failed' && find(r, 'contextPeak').value === 999999 && r.metrics.every((m) => m.verdict === null));
+  r = baseline([...Array.from({ length: 4 }, () => mk()), ...Array.from({ length: 4 }, () => mk({ outcome: 'failed' }))], cur);
+  check('M-R7.6 failed rows are not in the baseline', r.have === 4 && r.hasVerdict === false);
+  r = baseline([...Array.from({ length: 5 }, () => mk()), { ...mk(), run: 'current', created: cur.created }], cur);
+  check('M-R7 the current run is excluded from its own baseline', r.have === 5);
+
+  // purity
+  const realFs = {};
+  for (const key of Object.keys(fs)) {
+    if (typeof fs[key] === 'function') {
+      realFs[key] = fs[key];
+      fs[key] = () => { throw new Error('io in baseline'); };
+    }
+  }
+  let a;
+  let b;
+  try {
+    a = JSON.stringify(baseline(nine, cur));
+    b = JSON.stringify(baseline(nine, cur));
+  } finally {
+    for (const key of Object.keys(realFs)) fs[key] = realFs[key];
+  }
+  check('M-R7.7 pure: no fs call, same input same output', typeof a === 'string' && a === b && a.includes('toolCallsPerTask'));
+
+  // hostility
+  const hostile = [null, undefined, 5, 'x', [], [null, 5, 'x', { run: 'x' }], { length: 5 }];
+  check('S-R7 hostile history/current never throws', hostile.every((h) => quiet(() => baseline(h, cur)) && quiet(() => baseline(nine, h)) && quiet(() => baseline(h, h))));
+  r = baseline(nine, null);
+  check('S-R7 a non-object current gives no verdict, not a throw', r.hasVerdict === false && Array.isArray(r.metrics));
+  const dirty = [
+    ...Array.from({ length: 5 }, () => mk()),
+    { ...mk(), agent: { requests: 1, toolCalls: 'x', toolErrors: -1, contextPeak: NaN, extra: 1 }, tokens: { input: Infinity }, tasks: { done: '9' }, evil: '<script>' },
+    { ...mk(), tasks: { total: 1, done: 1e308, skipped: 0, pending: 0, retries: null, firstTime: null } },
+  ];
+  r = baseline(dirty, cur);
+  check('S-R7 rows with unexpected fields do not spoil the median and add no text', Math.abs(medianOf(r, 'toolCallsPerTask') - 388 / 9) < 1e-9 && !JSON.stringify(r).includes('script') && !/NaN|Infinity/.test(JSON.stringify(r)), String(medianOf(r, 'toolCallsPerTask')));
+  const before = JSON.stringify(nine);
+  baseline(nine, cur);
+  check('S-R7 the inputs are not mutated', JSON.stringify(nine) === before);
+}
+
 // --- report -----------------------------------------------------------------
 try {
   fs.rmSync(TEST_HOME, { recursive: true, force: true });
