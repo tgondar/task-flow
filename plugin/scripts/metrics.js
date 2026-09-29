@@ -35,7 +35,7 @@
 const fs = require('fs');
 const path = require('path');
 const { crossesLink, isInside } = require('./config.js');
-const { PHASES, SAFE_SEGMENT } = require('./render-run.js');
+const { PHASES, SAFE_SEGMENT, readPlanTasks, readSkippedTasks, readPendingTasks } = require('./render-run.js');
 
 // --- constants ---------------------------------------------------------------
 // Named, at the top, not configurable: the spec (R7, section 9) fixes these
@@ -563,6 +563,253 @@ function readCode(options) {
   }
 }
 
+// --- collect: one row for one finished run (spec R1, R2, R4.4, R9) ------------------------
+//
+// `collect({ projectDir, config, slug, now, readers })` builds the closed-shape row of a
+// run from its state.json, questions.json and plan and from the readers around it. It
+// only READS: T7's closeRun decides whether and where to append.
+//
+// Everything it reads is untrusted (a cloned repo, a shared folder). So: (1) each file is
+// lstat-ed, refused if it is a link or not a plain file or over MAX_SMALL_FILE bytes,
+// BEFORE a byte is read; (2) nothing from a file is copied into the row except numbers,
+// booleans and members of closed sets - titles, reasons, questions, branch names and tool
+// names are only ever counted or used as lookup keys, never stored; model names come
+// through readTokens already checked against the closed shape; (3) a source that is
+// missing, malformed or throws makes ITS block null (with the closed reason where the
+// row has one) and nothing else - never "all or nothing", never a guess; (4) every block
+// is re-checked on its own against the row validator before it goes in, so a reader
+// that misbehaves (or is injected by a test) can only lose its own block; (5) the result
+// is `{ ok: true, row }` or `{ ok: false, code }` with a closed code and NOTHING else:
+// no message, no path. It never throws. The row validator is also what T3 noted must run
+// before a row can reach `baseline` (which does not validate `current`): it runs here.
+//
+// closedAt is the state's `phaseChangedAt` (the moment the run reached `done`), so a
+// repair run days later, or the backstop of the next Stop hook, records the same
+// instant; only without one does the injected clock (`now`) stand in. That instant also
+// ends the transcript window.
+
+const { readQuestionsFile } = require('./questions.js');
+
+const MAX_SMALL_FILE = 1024 * 1024;
+const MAX_OTHER_RUNS = 200;
+const NULLABLE_BLOCKS = ['tasks', 'tests', 'review', 'questions', 'code', 'tokens', 'agent'];
+const OFFSET_INSTANT = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,3})?(?:Z|[+-][0-9]{2}:[0-9]{2})$/;
+
+const failure = (code) => ({ ok: false, code });
+
+/** A parsed plain JSON object, or null. Links and non-files are refused by lstat, the
+ *  size is checked before reading, the parser's message is dropped (it quotes input). */
+function readSmallObject(projectDir, file) {
+  try {
+    if (!isInside(projectDir, file) || crossesLink(projectDir, file)) return null;
+    const stats = fs.lstatSync(file);
+    if (!stats.isFile() || stats.size > MAX_SMALL_FILE) return null;
+    const value = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
+    return isObject(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** An ISO instant with `Z` or an offset, as UTC seconds with `Z`; null otherwise. Strict
+ *  shape first: Date.parse alone would turn "1" into a date in 2001. */
+function toUtcInstant(value) {
+  if (typeof value !== 'string' || value.length > 40 || !OFFSET_INSTANT.test(value)) return null;
+  const time = Date.parse(value);
+  if (Number.isNaN(time)) return null;
+  const text = new Date(time).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  return isInstant(text) ? text : null;
+}
+
+/** The plan, only if it is a plain file inside docsDir, without a link on the way. */
+function resolvePlan(config, state) {
+  const docsDir = config.docsDir;
+  const given = isObject(state.artifacts) && hasOwn(state.artifacts, 'plan') ? state.artifacts.plan : null;
+  if (typeof given !== 'string' || given === '' || given.length > 1024 || given.includes('\0') || typeof docsDir !== 'string' || !path.isAbsolute(docsDir)) return null;
+  const file = path.resolve(docsDir, given);
+  if (!isInside(docsDir, file) || crossesLink(docsDir, file)) return null;
+  try {
+    const stats = fs.lstatSync(file);
+    return stats.isFile() && stats.size <= MAX_SMALL_FILE * 2 ? file : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Windows of the project's other runs (startedAt..end), read only for `overlap`. A run
+ *  still going has no end yet: it lasts until `nowIso`. Unreadable ones are skipped. */
+function otherWindows(projectDir, stateDir, slug, nowIso) {
+  const windows = [];
+  try {
+    const names = fs.readdirSync(stateDir).slice(0, MAX_OTHER_RUNS);
+    for (const name of names) {
+      if (name === slug || !SAFE_SEGMENT.test(name)) continue;
+      const other = readSmallObject(projectDir, path.join(stateDir, name, 'state.json'));
+      if (!other || !isInstant(other.startedAt)) continue;
+      const end = other.phase === 'done' ? toUtcInstant(other.phaseChangedAt) : nowIso;
+      if (end) windows.push({ startedAt: other.startedAt, closedAt: end });
+    }
+  } catch {
+    // a folder we cannot list means no known overlap, not a failed measurement
+  }
+  return windows;
+}
+
+/** Task counts by the page's own rules (readSkippedTasks / readPendingTasks): a
+ *  finished run counts every task done except the skipped and the parked ones. Retries
+ *  come from health.taskRetries, which the orchestrator writes when a retry happens:
+ *  with a health object and no map nothing was retried; a map that failed validation
+ *  means we do not know (null); no health object at all means null too. */
+function taskBlock(state, planFile, health, present, readers) {
+  if (!planFile) return null;
+  const tasks = readers.readPlanTasks(planFile);
+  if (!Array.isArray(tasks) || tasks.length === 0) return null;
+  const skipped = readSkippedTasks(state, tasks);
+  const pending = readPendingTasks(state, tasks);
+  const doneTasks = tasks.filter((task) => !skipped.has(task.id) && !pending.has(task.id));
+  let retries = null;
+  let firstTime = null;
+  if (present.health && (health.taskRetries || !present.taskRetries)) {
+    const map = health.taskRetries || Object.create(null);
+    retries = Object.keys(map).reduce((sum, key) => sum + map[key], 0);
+    firstTime = doneTasks.filter((task) => !hasOwn(map, task.id)).length;
+  }
+  return { total: tasks.length, done: doneTasks.length, skipped: skipped.size, pending: pending.size, retries, firstTime };
+}
+
+/** Counts from a validated questions.json (readQuestionsFile already refused anything
+ *  off-shape): every item counts, open = no answer, explained = explanation requests. */
+function questionsBlock(file, stateDir, slug, readQuestions) {
+  const read = readQuestions(file, stateDir, slug);
+  if (!isObject(read) || !read.exists || (Array.isArray(read.errors) && read.errors.length) || !isObject(read.data) || !Array.isArray(read.data.items)) return null;
+  const items = read.data.items;
+  let explained = 0;
+  let maxRound = 0;
+  let open = 0;
+  for (const item of items) {
+    if (!item.answer) open += 1;
+    if (Array.isArray(item.explanations)) explained += item.explanations.length;
+    for (const round of Array.isArray(item.rounds) ? item.rounds : []) if (Number.isInteger(round.round)) maxRound = Math.max(maxRound, round.round);
+  }
+  return { total: items.length, open, explained, maxRound };
+}
+
+/** Runs one source; whatever it throws becomes null (never the exception). */
+function attempt(fn) {
+  try {
+    return fn();
+  } catch {
+    return null;
+  }
+}
+
+function collect(options) {
+  const started = Date.now();
+  try {
+    const opts = isObject(options) ? options : {};
+    const { projectDir, config, slug } = opts;
+    if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || typeof slug !== 'string' || slug.length > 100 || !SAFE_SEGMENT.test(slug)) return failure('bad-state');
+    const stateDir = isObject(config) ? config.stateDir : null;
+    if (typeof stateDir !== 'string' || !path.isAbsolute(stateDir)) return failure('bad-state');
+    const statePath = path.join(stateDir, slug, 'state.json');
+    if (!isInside(stateDir, statePath) || !isInside(projectDir, statePath) || crossesLink(projectDir, statePath)) return failure('unsafe-path');
+
+    const state = readSmallObject(projectDir, statePath);
+    if (!state) return failure('bad-state');
+
+    const clock = typeof opts.now === 'function' ? opts.now : Date.now;
+    const nowMs = attempt(() => clock());
+    const nowIso = Number.isFinite(nowMs) ? toUtcInstant(new Date(nowMs).toISOString()) : null;
+    const given = isObject(opts.readers) ? opts.readers : {};
+    const pick = (name, fallback) => (typeof given[name] === 'function' ? given[name] : fallback);
+    const readers = {
+      parseHealth: pick('parseHealth', parseHealth),
+      readPlanTasks: pick('readPlanTasks', readPlanTasks),
+      readQuestions: pick('readQuestions', readQuestionsFile),
+      readCode: pick('readCode', readCode),
+      readTokens: pick('readTokens', readTokens),
+    };
+
+    // eligibility (R4.4): only a run that reached `done`, and that has a start instant
+    const own = parseHealth(state);
+    if (state.phase !== 'done' || !own.startedAt) return failure('not-eligible');
+
+    const mode = hasOwn(state, 'mode') ? state.mode : 'attended';
+    if (!MODES.includes(mode) || !isDate(state.created)) return failure('bad-state');
+    const closedAt = toUtcInstant(state.phaseChangedAt) || nowIso;
+    if (!closedAt) return failure('bad-state');
+    const failed = typeof state.status === 'string' && state.status.toLowerCase() === 'failed';
+
+    const parsed = attempt(() => readers.parseHealth(state));
+    const facts = isObject(parsed) && isObject(parsed.health) ? parsed : { phaseLog: null, health: { taskRetries: null, testsGreenFirstRun: null, review: null, hardenFindings: null } };
+    const health = facts.health;
+    const healthObject = isObject(parsed) && hasOwn(state, 'health') && isObject(state.health);
+    const present = { health: healthObject, taskRetries: healthObject && hasOwn(state.health, 'taskRetries') };
+
+    const planFile = attempt(() => resolvePlan(config, state));
+    const tasks = attempt(() => taskBlock(state, planFile, health, present, readers));
+    const tests = healthObject ? { greenFirstRun: typeof health.testsGreenFirstRun === 'boolean' ? health.testsGreenFirstRun : null } : null;
+    const review = isObject(health.review) ? { critical: health.review.critical, required: health.review.required, optional: health.review.optional, nit: health.review.nit } : null;
+    const questions = attempt(() => questionsBlock(path.join(stateDir, slug, 'questions.json'), stateDir, slug, readers.readQuestions));
+
+    const base = isObject(config.raw) && isObject(config.raw.branches) ? config.raw.branches.from : null;
+    const codeResult = attempt(() => readers.readCode({ projectDir, branch: state.branch, base }));
+    const code = isObject(codeResult) && isObject(codeResult.code) ? codeResult.code : null;
+
+    // tokens last: they are the slow source and get whatever is left of the budget
+    const budgetMs = Math.max(0, CONSTANTS.BUDGET_MS - (Date.now() - started));
+    const tokenResult = attempt(() => readers.readTokens({
+      projectDir,
+      window: { startedAt: own.startedAt, closedAt },
+      cwd: projectDir,
+      otherWindows: otherWindows(projectDir, stateDir, slug, nowIso || closedAt),
+      phaseLog: facts.phaseLog,
+      budgetMs,
+    }));
+    const usable = isObject(tokenResult) && isObject(tokenResult.tokens);
+    const models = usable && Array.isArray(tokenResult.models) ? tokenResult.models.filter((m) => typeof m === 'string' && SHAPE.model.test(m)).slice(0, 8) : [];
+
+    const row = {
+      v: 1,
+      run: slug,
+      created: state.created,
+      closedAt,
+      outcome: failed ? 'failed' : 'done',
+      mode,
+      primaryModel: models.length ? models[0] : null,
+      models,
+      sizePoints: isObject(state.size) && hasOwn(state.size, 'points') && isCount(state.size.points) ? state.size.points : null,
+      tasks,
+      tests,
+      review,
+      hardenFindings: isCount(health.hardenFindings) ? health.hardenFindings : null,
+      questions,
+      code,
+      tokens: usable ? tokenResult.tokens : null,
+      tokensNull: usable ? null : (isObject(tokenResult) && TOKENS_NULL.includes(tokenResult.reason) ? tokenResult.reason : 'unreadable-format'),
+      agent: usable && isObject(tokenResult.agent) ? tokenResult.agent : null,
+    };
+
+    // Each block on its own: a reader that returned something off-shape loses its own
+    // block, not the row. The probe is the row with every block null except the one tested.
+    const probe = { ...row, tasks: null, tests: null, review: null, questions: null, code: null, agent: null, tokens: null, tokensNull: 'unreadable-format' };
+    for (const key of NULLABLE_BLOCKS) {
+      if (row[key] === null) continue;
+      const candidate = key === 'tokens' ? { ...probe, tokens: row.tokens, tokensNull: null } : { ...probe, [key]: row[key] };
+      if (!validateRow(candidate).ok) row[key] = null;
+    }
+    if (row.tokens === null) {
+      if (row.tokensNull === null) row.tokensNull = 'unreadable-format';
+      row.primaryModel = null;
+      row.models = [];
+    }
+    const checked = validateRow(row);
+    return checked.ok ? { ok: true, row: checked.row } : failure('invalid-row');
+  } catch {
+    return failure('internal');
+  }
+}
+
 // --- transcript reader (spec R6) -------------------------------------------------
 //
 // Tokens are read from the subagents' transcripts under
@@ -1068,4 +1315,5 @@ module.exports = {
   baseline,
   readTokens,
   readCode,
+  collect,
 };
