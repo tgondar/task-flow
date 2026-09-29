@@ -505,6 +505,13 @@ function isTestPath(file) {
   return parts.slice(0, -1).some((p) => p === 'test' || p === 'tests' || p === '__tests__') || /\.(test|spec)\.[^./]+$/.test(name);
 }
 
+/** Inherited GIT_* variables (GIT_DIR, GIT_WORK_TREE, GIT_CONFIG_*, GIT_OBJECT_DIRECTORY, ...) could point git at another repo or inject config: none reach the child. */
+function cleanEnv() {
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) if (!/^GIT_/i.test(k)) env[k] = v;
+  return env;
+}
+
 const noCode = (reason) => ({ code: null, reason });
 
 function readCode(options) {
@@ -521,7 +528,7 @@ function readCode(options) {
         {
           cwd: projectDir, shell: false, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER,
           stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, encoding: 'utf8',
-          env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_EXTERNAL_DIFF: '', GIT_PAGER: 'cat' },
+          env: { ...cleanEnv(), GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_EXTERNAL_DIFF: '', GIT_PAGER: 'cat' },
         },
       );
     } catch (error) {
