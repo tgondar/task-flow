@@ -34,7 +34,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { crossesLink, isInside } = require('./config.js');
+const { crossesLink, isInside, loadConfig } = require('./config.js');
 const { PHASES, SAFE_SEGMENT, readPlanTasks, readSkippedTasks, readPendingTasks } = require('./render-run.js');
 
 // --- constants ---------------------------------------------------------------
@@ -1320,4 +1320,143 @@ module.exports = {
   readTokens,
   readCode,
   collect,
+  closeRun,
 };
+
+// --- closeRun and the CLI (spec R3, R4, R9; plan T7) -----------------------------------------------
+//
+// Deliberately AFTER module.exports: the security suites of the pure/reader sections scan
+// slices of this file that end at the baseline marker and at module.exports, and the
+// rules they check there (no fs, no require in the baseline; no I/O beyond the readers)
+// are about THOSE sections. closeRun is the one orchestrating step and lives on its own.
+//
+// closeRun({ projectDir, slug, env, steps, readers }) is what the renderer's close and
+// the `close` CLI call. It answers `{ ok, code, verdict? }`. It NEVER throws and never
+// carries text from a file or from an exception: a failing step becomes one of a closed
+// set of codes (unsafe-path, write-failed, bad-state, timeout, internal; not-eligible,
+// disabled, already-closed and closed are the non-failures), because the measurement is
+// information and must not fail or slow a run (spec R9).
+//
+// Order, cheapest first, because renderAll and the Stop hook call this on EVERY render
+// of a finished run and collect can cost seconds of transcript reading:
+//   1. TASK_FLOW_METRICS=off - before anything is read (D7, like TASK_FLOW_GATE in gate.js);
+//   2. arguments and config, then only state.json: eligible (phase done + startedAt)?
+//   3. is run+created already in metrics.jsonl? then stop: no collect, no write;
+//   4. collect -> baseline over the history -> re-check the history -> appendRow.
+// Only a row that came out of collect (which validates it) is ever handed to baseline
+// (T3's note: baseline does not validate `current`). The token reader's time budget
+// lives in collect (BUDGET_MS): out of budget the row is written with tokensNull
+// "timeout", so 'timeout' is never a closeRun failure of its own.
+//
+// Concurrency, honestly. Steps 3 and 4 are a check followed by an append, not one atomic
+// step: no lock is taken (a lock file needs stale-lock handling, which is more machinery
+// than a best-effort measurement deserves). Two processes closing the same run in the
+// same instant can therefore BOTH append. The window is made small (the history is read
+// again right before the append, so it is microseconds, not the seconds collect takes)
+// and the backstop is on the read side: readHistory keeps the FIRST line per
+// run+created, so a duplicate line costs a few bytes and nothing else. That is the
+// ceiling; upgrading it means an O_EXCL lock file around steps 3-4.
+//
+// `steps` and `readers` are seams for tests (inject a failure per step); production
+// callers pass neither.
+
+const CLOSE_FAILURES = ['unsafe-path', 'write-failed', 'bad-state', 'timeout', 'internal'];
+const closeResult = (ok, code, verdict) => (verdict === undefined ? { ok, code } : { ok, code, verdict });
+/** A failure code from a step, reduced to the closed set: anything else is 'internal'. */
+const closedFailure = (code) => closeResult(false, typeof code === 'string' && CLOSE_FAILURES.includes(code) ? code : 'internal');
+
+function hasKey(history, key) {
+  return Array.isArray(history.rows) && history.rows.some((row) => `${row.run}\n${row.created}` === key);
+}
+
+function closeRun(options) {
+  try {
+    const opts = isObject(options) ? options : {};
+    // 1. the escape hatch, first of all: no file is read when it is set
+    const env = isObject(opts.env) ? opts.env : process.env;
+    if (String(env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return closeResult(true, 'disabled');
+
+    const { projectDir, slug } = opts;
+    if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || typeof slug !== 'string' || slug.length > 100 || !SAFE_SEGMENT.test(slug)) return closeResult(false, 'bad-state');
+    const given = isObject(opts.steps) ? opts.steps : {};
+    const step = (name, fallback) => (typeof given[name] === 'function' ? given[name] : fallback);
+
+    // docsDir variables (OneDrive...) expand from the real environment, not from the switch's
+    const loaded = loadConfig(projectDir);
+    if (!loaded.ok || !loaded.config || typeof loaded.config.stateDir !== 'string') return closeResult(false, 'bad-state');
+    const config = loaded.config;
+    const stateDir = config.stateDir;
+
+    // 2. eligible? (only state.json is read)
+    const statePath = path.join(stateDir, slug, 'state.json');
+    if (!isInside(stateDir, statePath) || !isInside(projectDir, statePath) || crossesLink(projectDir, statePath)) return closeResult(false, 'unsafe-path');
+    const state = readSmallObject(projectDir, statePath);
+    if (!state) return closeResult(false, 'bad-state');
+    if (state.phase !== 'done' || !parseHealth(state).startedAt) return closeResult(true, 'not-eligible');
+    if (!isDate(state.created)) return closeResult(false, 'bad-state');
+    const key = `${slug}\n${state.created}`;
+
+    // 3. already measured? A history that cannot be read is not fatal (the row can still be
+    // written and the reader deduplicates), but a refused path is: nothing may be written there.
+    const readHist = step('readHistory', readHistory);
+    const history = plain(() => readHist(projectDir, stateDir)) || { rows: [], ignored: 0, code: null };
+    if (history.code === 'unsafe-path') return closeResult(false, 'unsafe-path');
+    if (hasKey(history, key)) return closeResult(true, 'already-closed');
+
+    // 4. collect -> baseline -> append
+    const collected = attempt(() => step('collect', collect)({ projectDir, config, slug, readers: opts.readers }));
+    if (!isObject(collected)) return closeResult(false, 'internal');
+    if (!collected.ok) return collected.code === 'not-eligible' ? closeResult(true, 'not-eligible') : closedFailure(collected.code);
+    const row = collected.row;
+
+    const judged = attempt(() => step('baseline', baseline)(Array.isArray(history.rows) ? history.rows : [], row));
+    const verdict = isObject(judged)
+      ? { hasVerdict: judged.hasVerdict === true, reason: typeof judged.reason === 'string' ? judged.reason : null, have: isCount(judged.have) ? judged.have : 0 }
+      : null;
+
+    // the window between step 3 and here can be seconds (transcripts): look again
+    const again = plain(() => readHist(projectDir, stateDir));
+    if (isObject(again) && again.code === 'unsafe-path') return closeResult(false, 'unsafe-path');
+    if (isObject(again) && hasKey(again, key)) return closeResult(true, 'already-closed');
+
+    let appended;
+    try {
+      appended = step('appendRow', appendRow)(projectDir, stateDir, row);
+    } catch {
+      return closeResult(false, 'write-failed');
+    }
+    if (!isObject(appended) || appended.ok !== true) return closedFailure(isObject(appended) ? appended.code : null);
+    return closeResult(true, 'closed', verdict);
+  } catch {
+    return closeResult(false, 'internal');
+  }
+}
+
+if (require.main === module) {
+  const USAGE = 'usage: metrics.js close --slug <slug> [--project-dir <dir>] [--quiet]\n';
+  const argv = process.argv.slice(2);
+  const value = (flag) => {
+    const index = argv.indexOf(flag);
+    return index >= 0 ? argv[index + 1] : undefined;
+  };
+  // Usage errors are the only non-zero exit, and print only the fixed usage text: the
+  // offending argument is never echoed. Everything else exits 0 (spec R9): a run must
+  // not change its exit code because its measurement failed.
+  const slug = value('--slug');
+  let projectDir = null;
+  try {
+    const candidate = path.resolve(argv.includes('--project-dir') ? String(value('--project-dir')) : (process.env.CLAUDE_PROJECT_DIR || process.cwd()));
+    if (fs.statSync(candidate).isDirectory()) projectDir = candidate;
+  } catch {
+    // stays null: reported as a usage error below
+  }
+  if (argv[0] !== 'close' || typeof slug !== 'string' || slug.length > 100 || !SAFE_SEGMENT.test(slug) || projectDir === null) {
+    process.stderr.write(USAGE);
+    process.exitCode = 2;
+  } else {
+    const result = closeRun({ projectDir, slug });
+    const line = `metrics: ${result.code} ${slug}\n`;
+    if (!result.ok) process.stderr.write(line);
+    else if (!argv.includes('--quiet')) process.stdout.write(line);
+  }
+}
