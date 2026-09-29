@@ -399,8 +399,8 @@ entry and carry on. **Typing `auto` is not that instruction** (§0b): it waives 
 stops, not the input. An auto run with no idea artifact stops here like any other.
 
 Create `<stateDir>/<slug>/state.json` with `phase: "idea"`, `approvedBy: ""`,
-`pendingDecisions: 0`, `mode` (§0b), `created` (today, `yyyy-MM-dd`), and
-`artifacts.idea` set to the file you found, relative to the docs folder.
+`pendingDecisions: 0`, `mode` (§0b), `created` (today, `yyyy-MM-dd`), `startedAt`
+(now, ISO, UTC; the run-health measurement, §8b), and `artifacts.idea` set to the file you found, relative to the docs folder.
 
 The run's questions are `<stateDir>/<slug>/questions.json` (§3), and the renderer
 makes the page `questions/yyMMdd_<slug>_questions.md` in the docs folder from it.
@@ -795,6 +795,9 @@ trait so they can be run alone, as `commands.testSecurity` in
 The later `tests` phase (§4b) **checks these exist**. It does not write them and it
 does not excuse their absence.
 
+When a task has to be built again (its tests or the auditor sent it back), add one
+to `health.taskRetries["T<n>"]` in `state.json` right then (§8), not at the end.
+
 ### 4b. The `tests` phase — positive and negative, on everything
 
 The build subagents already write tests as they go; this phase is the audit that
@@ -803,7 +806,8 @@ slice is committed, and give it the branch diff as its subject. It must:
 
 1. **Run the suite** — every project in `testProjects`, by name, plus the frontend
    commands where the change touched the frontend. A red run is §7.2, not a
-   finding.
+   finding. Record whether this first run was green in `health.testsGreenFirstRun`
+   (`true`/`false`, §8), once, when it happens — a later re-run does not overwrite it.
 2. **Check every changed behaviour has both directions**: at least one test that
    proves it works with valid input, and at least one that proves it refuses,
    fails or degrades correctly with invalid input. Its own scenario table — happy
@@ -846,6 +850,9 @@ separately so the diff stays readable:
 
 If any of the three turns a test red, that is §7.2: stop, do not commit.
 
+When the phase closes, if the hardening step reported a number of findings, write it
+as `health.hardenFindings` (§8). It is optional: no number reported, no field.
+
 ### 4d. The `review` phase — split by area, evidence or it is not blocking
 
 **The review happens before the PR, not on it.** Once the harden phase is
@@ -883,6 +890,8 @@ its go/no-go field is `Verdict: APPROVE | REQUEST CHANGES`. The run's verdict is
   reviewer's word, not yours.
 - Re-run the affected tests after the fixes. If the review's own fixes turn
   anything red, that is a red test run and §7 applies.
+- When the merged report exists, write its counts as `health.review` (§8): the
+  reviewers' own four labels, plus `notReproduced` for findings that did not hold.
 
 ## 5. The approval gate — the one planned stop
 
@@ -1093,6 +1102,16 @@ confident wrong page rather than an error.
   (§8b). The Stop hook compares it with the task list's modification time.
 - **`pendingTasks`** — `[{ "id", "question" }]` — the tasks an auto run parked on
   an unanswered question (§3). An id that names no task of the plan is ignored.
+- **`startedAt`**, **`phaseLog`** and **`health`** feed the run-health measurement
+  (§8b), not the page: `render-run.js` ignores all three. `startedAt` is an ISO UTC
+  instant written once (§2a). `phaseLog` is `[{ "phase", "at" }]`, one entry per
+  phase change, `phase` one of the table's (§4), at most 16 entries. `health` holds
+  only facts the run already knows, each written when it happens: `taskRetries`
+  (`{ "T3": 1 }`, a count of at least 1 per retried task), `testsGreenFirstRun`
+  (`true`/`false`), `hardenFindings` (a count, optional) and `review`
+  (`{ critical, required, optional, nit }`, plus `notReproduced` when there was one,
+  all counts). Any field of another shape is dropped by the measurement, never
+  repaired, so a wrong shape costs one number, not the run.
 
 The same render builds the questions page from `<stateDir>/<slug>/questions.json`,
 and it checks that file first. Its shape (version 1):
@@ -1128,7 +1147,8 @@ including the approval gate, a block and the close:
   take in the viewer's answers (`consume`, §3);
 - update `state.json`: new `phase`, `phaseChangedAt` and `updated` (ISO),
   `pendingDecisions`, and `artifacts`, `branch`, `pr`, `buildCursor`,
-  `pendingTasks` where they apply — keeping `status: "running"`;
+  `pendingTasks` where they apply — keeping `status: "running"` — and append
+  `{ "phase", "at" }` to `phaseLog` with the same ISO instant as `phaseChangedAt`;
 - **render** (§8) — and again every time `buildCursor` moves inside the build, not
   only at the boundary, because that is the stretch where the user most wants to
   know where the run is;
@@ -1151,6 +1171,15 @@ Closing the run, after the review's Critical and Required findings are fixed:
 5. render: the questions page moves itself into `questions/resolved/` when nothing
    in it is open (§3). A run with a hand-written questions page moves it by hand,
    on the same condition.
+
+The render that closes the run also measures it: `scripts/metrics.js` appends one
+row to `<stateDir>/metrics.jsonl` and the run page gets a "Run health" section.
+That is code, not a step: you do nothing to measure beyond the fields §2a, §4a-§4d
+and the list above already have you write. It is **information, never a gate** — it
+blocks nothing, and if it fails the run still closes and the render still succeeds.
+`TASK_FLOW_METRICS=off` switches it off. The history is not ignored by git: a
+project that does not want it versioned can add `<stateDir>/metrics.jsonl` to its
+own `.gitignore` (the script never edits one).
 
 **The closing summary and the PR body both start with what the user has to do.**
 Three headings, in this order, in `language`, in both modes:
