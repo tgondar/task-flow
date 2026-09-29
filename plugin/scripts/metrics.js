@@ -540,7 +540,18 @@ const byClosedAt = (a, b) => (Date.parse(a.closedAt) - Date.parse(b.closedAt)) |
  * newest n and filtering afterwards would let a burst of failed or other-model runs
  * empty the baseline of the runs that are actually comparable.
  */
-function baseline(history, current, { n = CONSTANTS.BASELINE_N, min = CONSTANTS.BASELINE_MIN } = {}) {
+function baseline(history, current, options) {
+  // The options are read defensively and only whole numbers survive: n and min are
+  // echoed in the result, so a string/object/NaN/getter must never get through (and a
+  // `null` options object must not throw at a destructuring outside the try below).
+  const wholeOr = (key, fallback, low) => {
+    try {
+      const value = isObject(options) ? options[key] : undefined;
+      return Number.isInteger(value) && value >= low && value <= CONSTANTS.HISTORY_MAX_ROWS ? value : fallback;
+    } catch { return fallback; }
+  };
+  const n = wholeOr('n', CONSTANTS.BASELINE_N, 0);
+  const min = wholeOr('min', CONSTANTS.BASELINE_MIN, 1);
   const result = { hasVerdict: false, reason: 'bad-current', have: 0, min, n, metrics: [] };
   try {
     if (!isObject(current)) return result;
