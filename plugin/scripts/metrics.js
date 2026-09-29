@@ -703,6 +703,10 @@ function attempt(fn) {
   }
 }
 
+/** A reader's answer as plain data: a copy through JSON, so a Proxy, a throwing getter
+ *  or a shared reference in it costs only that source's block (null), never the row. */
+const plain = (fn) => attempt(() => JSON.parse(JSON.stringify(fn())));
+
 function collect(options) {
   const started = Date.now();
   try {
@@ -740,7 +744,7 @@ function collect(options) {
     if (!closedAt) return failure('bad-state');
     const failed = typeof state.status === 'string' && state.status.toLowerCase() === 'failed';
 
-    const parsed = attempt(() => readers.parseHealth(state));
+    const parsed = plain(() => readers.parseHealth(state));
     const facts = isObject(parsed) && isObject(parsed.health) ? parsed : { phaseLog: null, health: { taskRetries: null, testsGreenFirstRun: null, review: null, hardenFindings: null } };
     const health = facts.health;
     const healthObject = isObject(parsed) && hasOwn(state, 'health') && isObject(state.health);
@@ -753,12 +757,12 @@ function collect(options) {
     const questions = attempt(() => questionsBlock(path.join(stateDir, slug, 'questions.json'), stateDir, slug, readers.readQuestions));
 
     const base = isObject(config.raw) && isObject(config.raw.branches) ? config.raw.branches.from : null;
-    const codeResult = attempt(() => readers.readCode({ projectDir, branch: state.branch, base }));
+    const codeResult = plain(() => readers.readCode({ projectDir, branch: state.branch, base }));
     const code = isObject(codeResult) && isObject(codeResult.code) ? codeResult.code : null;
 
     // tokens last: they are the slow source and get whatever is left of the budget
     const budgetMs = Math.max(0, CONSTANTS.BUDGET_MS - (Date.now() - started));
-    const tokenResult = attempt(() => readers.readTokens({
+    const tokenResult = plain(() => readers.readTokens({
       projectDir,
       window: { startedAt: own.startedAt, closedAt },
       cwd: projectDir,
