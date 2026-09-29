@@ -8,7 +8,7 @@
 // orchestrator remembered. It is INFORMATION: nothing here may block, delay
 // (> 5 s) or fail a run or a render.
 //
-// THIS FILE, so far (T1-T3): the constants, the closed-shape validator of a
+// THIS FILE, so far (T1-T4; T4 adds `readTokens`, the tolerant transcript reader, spec R6): the constants, the closed-shape validator of a
 // metrics.jsonl line (spec R2) and the parser of the three optional state.json
 // additions (`startedAt`, `phaseLog`, `health`; spec R5). Later tasks add the
 // history reader/safe writer of metrics.jsonl (T2; spec R3, R10), baseline, transcript reader, git reader, collect and
@@ -467,6 +467,376 @@ function appendRow(projectDir, stateDir, row) {
   }
 }
 
+// --- transcript reader (spec R6) -------------------------------------------------
+//
+// Tokens are read from the subagents' transcripts under
+// ~/.claude/projects/<slug>/<session>/subagents/agent-<id>.jsonl. That format is
+// NOT a public contract and the files are written by someone else, so this reader
+// is a fail-open boundary: whatever it meets, it returns `tokens: null` and a
+// closed reason code, or a partial read that skips the odd part. It never throws,
+// never fails a run, and nothing of the transcripts' TEXT comes out - only numbers,
+// counts and model names that match a closed shape (a transcript line is data, and
+// a JSON.parse message would quote it).
+//
+// Cost is bounded whatever is on disk: at most MAX_TRANSCRIPT_FILES files, sizes
+// decided by lstat/fstat BEFORE anything is read, files read in 64 KiB blocks with
+// a per-line ceiling (an oversize line is dropped as it streams, never held), and a
+// time budget checked between entries and blocks.
+
+const os = require('os');
+
+const TRANSCRIPT_NAME = /^agent-[A-Za-z0-9]+\.jsonl$/;
+/** requestId / tool_use id: an id from the API. Anything else is not counted. */
+const API_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const READ_BLOCK = 64 * 1024;
+/** Ceilings on what one call may remember; a transcript cannot exhaust memory. */
+const MAX_REQUESTS = 200000;
+const MAX_TOOL_IDS = 200000;
+const MAX_DIR_ENTRIES = 20000;
+
+/** A path made comparable: separators unified, no trailing one, case folded on
+ *  Windows only (its file system does not tell `C:\X` from `c:\x`). */
+function foldCwd(value) {
+  if (typeof value !== 'string' || value.length > 1024) return null;
+  const unified = value.replace(/[\\/]+/g, '/').replace(/\/$/, '');
+  return process.platform === 'win32' ? unified.toLowerCase() : unified;
+}
+
+/** `usage` as four counts, or null when the shape is not the one we know. The two
+ *  fields every request has must be counts; a cache field that is absent is 0, but
+ *  one that is present must be a count too (a string or an object is not a number
+ *  we can trust). */
+function readUsage(usage) {
+  if (!isObject(usage)) return null;
+  const pick = (key, required) => {
+    if (!hasOwn(usage, key) || usage[key] === undefined) return required ? null : 0;
+    return isCount(usage[key]) ? usage[key] : null;
+  };
+  const input = pick('input_tokens', true);
+  const output = pick('output_tokens', true);
+  const cacheCreate = pick('cache_creation_input_tokens', false);
+  const cacheRead = pick('cache_read_input_tokens', false);
+  if ([input, output, cacheCreate, cacheRead].includes(null)) return null;
+  return { input, output, cacheCreate, cacheRead };
+}
+
+/** The phase a request belongs to: the one AFTER the last phase completed before it
+ *  (phaseLog records completions, spec R6.6); `other` without a log or past the last
+ *  phase. `log` is already validated and sorted by time. */
+function phaseAt(log, ms) {
+  if (!log) return 'other';
+  let last = -1;
+  for (const entry of log) {
+    if (entry.ms <= ms) last = PHASES.indexOf(entry.phase);
+    else break;
+  }
+  return PHASES[last + 1] || 'other';
+}
+
+/** Streams `file` in blocks, calling onLine(text) per line and onOversize() for a
+ *  line over the ceiling (dropped while streaming: never held whole). Returns
+ *  'ok', 'timeout' or 'skip' (could not be opened / not a plain file / too big). */
+function scanFile(file, deadline, onLine, onOversize) {
+  let fd = null;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW);
+    const stats = fs.fstatSync(fd);
+    if (!stats.isFile() || stats.size > CONSTANTS.MAX_TRANSCRIPT_FILE_BYTES) return 'skip';
+    const block = Buffer.alloc(READ_BLOCK);
+    let parts = [];
+    let length = 0;
+    let over = false;
+    const flush = () => {
+      if (over) onOversize();
+      else if (length > 0) onLine(Buffer.concat(parts, length).toString('utf8'));
+      parts = [];
+      length = 0;
+      over = false;
+    };
+    let position = 0;
+    while (position < stats.size) {
+      if (Date.now() > deadline) return 'timeout';
+      const n = fs.readSync(fd, block, 0, Math.min(READ_BLOCK, stats.size - position), position);
+      if (n === 0) break;
+      position += n;
+      let start = 0;
+      for (;;) {
+        const newline = block.indexOf(0x0a, start);
+        const end = newline === -1 || newline >= n ? n : newline;
+        if (!over) {
+          if (length + (end - start) > CONSTANTS.MAX_TRANSCRIPT_LINE_BYTES) {
+            over = true;
+            parts = [];
+            length = 0;
+          } else if (end > start) {
+            parts.push(Buffer.from(block.subarray(start, end)));
+            length += end - start;
+          }
+        }
+        if (end === n) break;
+        flush();
+        start = end + 1;
+      }
+    }
+    flush();
+    return 'ok';
+  } catch {
+    return 'skip';
+  } finally {
+    closeQuietly(fd);
+  }
+}
+
+function closeDirQuietly(dir) {
+  try {
+    if (dir) dir.closeSync();
+  } catch {
+    // nothing to do
+  }
+}
+
+/** Lists the candidate transcript files, or `{ reason }`. Every entry is lstat'ed
+ *  (a link is never followed) and its path checked against the projects root. */
+function listTranscripts(projectsRoot, base, startMs, limits, expired) {
+  const files = [];
+  let total = 0;
+  let oversize = 0;
+  let sessions = null;
+  try {
+    sessions = fs.opendirSync(base);
+    for (let seen = 0, entry; (entry = sessions.readSync()) !== null; seen += 1) {
+      if (seen >= MAX_DIR_ENTRIES || expired()) return { reason: 'timeout' };
+      if (!SAFE_SEGMENT.test(entry.name)) continue;
+      const sub = path.join(base, entry.name, 'subagents');
+      let stats;
+      try {
+        if (!fs.lstatSync(path.join(base, entry.name)).isDirectory()) continue;
+        stats = fs.lstatSync(sub);
+      } catch {
+        continue;
+      }
+      if (!stats.isDirectory() || crossesLink(projectsRoot, sub)) continue;
+      let dir = null;
+      try {
+        dir = fs.opendirSync(sub);
+        for (let inner = 0, item; (item = dir.readSync()) !== null; inner += 1) {
+          if (inner >= MAX_DIR_ENTRIES || expired()) return { reason: 'timeout' };
+          if (!TRANSCRIPT_NAME.test(item.name)) continue;
+          const file = path.join(sub, item.name);
+          let fstats;
+          try {
+            fstats = fs.lstatSync(file);
+          } catch {
+            continue;
+          }
+          if (!fstats.isFile() || !isInside(projectsRoot, file) || crossesLink(projectsRoot, file)) continue;
+          // last written before the run began: it cannot hold a line of this run
+          if (fstats.mtimeMs < startMs) continue;
+          if (files.length + 1 > limits.maxFiles) return { reason: 'timeout' };
+          if (fstats.size > CONSTANTS.MAX_TRANSCRIPT_FILE_BYTES) {
+            oversize += 1;
+            files.push({ file: null });
+            continue;
+          }
+          total += fstats.size;
+          if (total > limits.maxTotalBytes) return { reason: 'timeout' };
+          files.push({ file });
+        }
+      } catch {
+        // an unreadable folder is skipped, like any other odd entry
+      } finally {
+        closeDirQuietly(dir);
+      }
+    }
+    return { files, oversize };
+  } catch {
+    return { files, oversize };
+  } finally {
+    closeDirQuietly(sessions);
+  }
+}
+
+const noTokens = (reason, skipped) => ({ tokens: null, agent: null, models: [], primaryModel: null, reason, skipped: skipped || { lines: 0, files: 0 } });
+
+/**
+ * `readTokens({ projectDir, window, cwd, otherWindows, phaseLog, budgetMs, limits })`
+ * -> `{ tokens, agent, models, primaryModel, reason, skipped }`. Never throws.
+ *
+ * `window` is `{ startedAt, closedAt }` (instants in UTC with a Z); `cwd` defaults to
+ * `projectDir`; `otherWindows` are the windows of the other runs of the project
+ * (their overlap makes attribution impossible: nothing in a transcript names a run);
+ * `phaseLog` is the run's `phaseLog` (validated again here). `budgetMs`/`limits` can
+ * only TIGHTEN the defaults (tests, and a caller that has already spent part of the
+ * budget).
+ *
+ * `tokens: null` comes with one of `no-window`, `overlap`, `no-transcripts` (nothing
+ * usable belongs to this run), `unreadable-format` (files exist but no line has the
+ * shape we know) or `timeout` (a limit was hit). `skipped` counts what was dropped:
+ * lines (bad JSON, oversize, bad usage) and files (oversize, unopenable).
+ */
+function readTokens(options) {
+  try {
+    const opts = isObject(options) ? options : {};
+    const window = isObject(opts.window) ? opts.window : {};
+    if (!isInstant(window.startedAt) || !isInstant(window.closedAt)) return noTokens('no-window');
+    const startMs = Date.parse(window.startedAt);
+    const endMs = Date.parse(window.closedAt);
+    if (!(startMs <= endMs)) return noTokens('no-window');
+
+    const others = Array.isArray(opts.otherWindows) ? opts.otherWindows : [];
+    for (const other of others.slice(0, 1000)) {
+      if (!isObject(other) || !isInstant(other.startedAt) || !isInstant(other.closedAt)) continue;
+      if (Date.parse(other.startedAt) <= endMs && Date.parse(other.closedAt) >= startMs) return noTokens('overlap');
+    }
+
+    if (typeof opts.projectDir !== 'string' || opts.projectDir === '' || opts.projectDir.length > 1024) return noTokens('no-transcripts');
+    // the slug has only [A-Za-z0-9-]: whatever the projectDir holds, this is ONE folder name
+    const slug = opts.projectDir.replace(/[^A-Za-z0-9]/g, '-');
+    const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
+    const base = path.join(projectsRoot, slug);
+    if (!isInside(projectsRoot, base) || crossesLink(projectsRoot, base)) return noTokens('no-transcripts');
+    try {
+      if (!fs.lstatSync(base).isDirectory()) return noTokens('no-transcripts');
+    } catch {
+      return noTokens('no-transcripts');
+    }
+
+    const budget = typeof opts.budgetMs === 'number' && Number.isFinite(opts.budgetMs) ? Math.min(opts.budgetMs, CONSTANTS.BUDGET_MS) : CONSTANTS.BUDGET_MS;
+    const deadline = Date.now() + budget;
+    const expired = () => Date.now() > deadline;
+    const given = isObject(opts.limits) ? opts.limits : {};
+    const limits = {
+      maxFiles: isCount(given.maxFiles) ? Math.min(given.maxFiles, CONSTANTS.MAX_TRANSCRIPT_FILES) : CONSTANTS.MAX_TRANSCRIPT_FILES,
+      maxTotalBytes: isCount(given.maxTotalBytes) ? Math.min(given.maxTotalBytes, CONSTANTS.MAX_TRANSCRIPT_TOTAL_BYTES) : CONSTANTS.MAX_TRANSCRIPT_TOTAL_BYTES,
+    };
+
+    const listed = listTranscripts(projectsRoot, base, startMs, limits, expired);
+    if (listed.reason) return noTokens(listed.reason);
+
+    const phaseLog = parsePhaseLog(opts.phaseLog);
+    const log = phaseLog ? phaseLog.map((e) => ({ phase: e.phase, ms: Date.parse(e.at) })).sort((a, b) => a.ms - b.ms) : null;
+    const wantCwd = foldCwd(typeof opts.cwd === 'string' ? opts.cwd : opts.projectDir);
+    if (wantCwd === null) return noTokens('no-transcripts');
+
+    const skipped = { lines: 0, files: listed.oversize };
+    const requests = new Map();
+    const toolIds = new Set();
+    const errorIds = new Set();
+    let anonymousErrors = 0;
+    let recognised = 0;
+    let scanned = listed.oversize;
+    let overflow = false;
+
+    const onLine = (text) => {
+      let line;
+      try {
+        line = JSON.parse(text);
+      } catch {
+        skipped.lines += 1; // never the parser's message: it quotes the input
+        return;
+      }
+      if (!isObject(line)) {
+        skipped.lines += 1;
+        return;
+      }
+      const message = isObject(line.message) ? line.message : {};
+      const usage = line.type === 'assistant' ? readUsage(message.usage) : null;
+      if (line.type === 'assistant') {
+        if (!usage) {
+          skipped.lines += 1;
+          return;
+        }
+        recognised += 1;
+      }
+      // in scope: inside the run's window and under this project's cwd
+      if (!isInstant(line.timestamp)) return;
+      const ms = Date.parse(line.timestamp);
+      if (ms < startMs || ms > endMs || foldCwd(line.cwd) !== wantCwd) return;
+      const content = Array.isArray(message.content) ? message.content.slice(0, 500) : [];
+
+      if (line.type === 'user') {
+        for (const item of content) {
+          if (!isObject(item) || item.type !== 'tool_result' || item.is_error !== true) continue;
+          if (typeof item.tool_use_id === 'string' && API_ID.test(item.tool_use_id)) {
+            if (errorIds.size < MAX_TOOL_IDS) errorIds.add(item.tool_use_id);
+          } else {
+            anonymousErrors += 1;
+          }
+        }
+        return;
+      }
+      if (line.type !== 'assistant') return;
+      if (typeof line.requestId !== 'string' || !API_ID.test(line.requestId) || message.model === '<synthetic>') return;
+
+      let request = requests.get(line.requestId);
+      if (!request) {
+        if (requests.size >= MAX_REQUESTS) {
+          overflow = true;
+          return;
+        }
+        request = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, model: null, ms };
+        requests.set(line.requestId, request);
+      }
+      // the same request is written once per content block and only `output` grows:
+      // the largest value of each field is the request's final one
+      for (const key of ['input', 'output', 'cacheCreate', 'cacheRead']) request[key] = Math.max(request[key], usage[key]);
+      if (request.model === null && typeof message.model === 'string' && SHAPE.model.test(message.model)) request.model = message.model;
+      for (const item of content) {
+        if (isObject(item) && item.type === 'tool_use' && typeof item.id === 'string' && API_ID.test(item.id) && toolIds.size < MAX_TOOL_IDS) toolIds.add(item.id);
+      }
+    };
+    const onOversize = () => {
+      skipped.lines += 1;
+    };
+
+    for (const { file } of listed.files) {
+      if (file === null) continue;
+      if (expired()) return noTokens('timeout', skipped);
+      const outcome = scanFile(file, deadline, onLine, onOversize);
+      if (outcome === 'timeout') return noTokens('timeout', skipped);
+      if (outcome === 'skip') skipped.files += 1;
+      scanned += 1;
+    }
+    if (overflow) return noTokens('timeout', skipped);
+
+    if (requests.size === 0) return noTokens(recognised === 0 && scanned > 0 ? 'unreadable-format' : 'no-transcripts', skipped);
+
+    const totals = { input: 0, cacheCreate: 0, cacheRead: 0, output: 0 };
+    const phases = new Map();
+    const perModel = new Map();
+    let contextPeak = 0;
+    for (const request of requests.values()) {
+      for (const key of Object.keys(totals)) totals[key] += request[key];
+      contextPeak = Math.max(contextPeak, request.input + request.cacheCreate + request.cacheRead);
+      const phase = phaseAt(log, request.ms);
+      const slot = phases.get(phase) || { in: 0, out: 0 };
+      slot.in += request.input + request.cacheCreate;
+      slot.out += request.output;
+      phases.set(phase, slot);
+      if (request.model !== null) perModel.set(request.model, (perModel.get(request.model) || 0) + 1);
+    }
+    const denominator = totals.input + totals.cacheCreate + totals.cacheRead;
+    const byPhase = {};
+    for (const key of BY_PHASE_KEYS) if (phases.has(key)) byPhase[key] = phases.get(key);
+    const tokens = {
+      input: totals.input,
+      cacheCreate: totals.cacheCreate,
+      cacheRead: totals.cacheRead,
+      output: totals.output,
+      cacheHitRate: denominator === 0 ? null : Math.round((totals.cacheRead / denominator) * 10000) / 10000,
+      byPhase,
+    };
+    const agent = { requests: requests.size, toolCalls: toolIds.size, toolErrors: errorIds.size + anonymousErrors, contextPeak };
+    // sums of many bounded counts can still pass the ceiling: that is not a measurement
+    const sane = [tokens.input, tokens.cacheCreate, tokens.cacheRead, tokens.output, ...Object.values(agent), ...Object.values(byPhase).flatMap((s) => [s.in, s.out])].every(isCount);
+    if (!sane) return noTokens('unreadable-format', skipped);
+    const models = [...perModel.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, 8).map(([name]) => name);
+    return { tokens, agent, models, primaryModel: models.length ? models[0] : null, reason: null, skipped };
+  } catch {
+    return noTokens('unreadable-format');
+  }
+}
+
 // --- baseline (spec R7) ---------------------------------------------------------
 
 /** The number of `row`'s metric, or null. A row is read through isCount/isRate
@@ -600,4 +970,5 @@ module.exports = {
   appendRow,
   DEVIATION,
   baseline,
+  readTokens,
 };
