@@ -25,6 +25,7 @@ node tests/metrics.close.test.js
 node tests/metrics.collect.security.test.js
 node tests/metrics.collect.test.js
 node tests/metrics.docs.test.js
+node tests/metrics.e2e.test.js
 node tests/metrics.git.security.test.js
 node tests/metrics.git.test.js
 node tests/metrics.hooks.security.test.js
