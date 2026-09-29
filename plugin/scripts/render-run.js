@@ -1081,6 +1081,12 @@ module.exports = {
   writeFeed,
   assertInside,
   runCreatedPrefix,
+  // Shared with metrics.js, which must count tasks and validate run names exactly
+  // as this page does (one definition, never a second parser).
+  SAFE_SEGMENT,
+  readJson,
+  readSkippedTasks,
+  readPendingTasks,
 };
 
 // --- CLI -------------------------------------------------------------------
