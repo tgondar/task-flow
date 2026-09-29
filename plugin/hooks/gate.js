@@ -314,13 +314,27 @@ if (isMarkdown && !throughLink && (isStateFile || !isInstructionMarkdown())) all
 
 // --- everything else needs an approved run --------------------------------
 let approvedTask = null;
+let hasUnfinishedRun = false;
 try {
-  approvedTask = (readRunStates().find((entry) => approvesNow(entry.state)) || {}).task || null;
+  const runs = readRunStates();
+  approvedTask = (runs.find((entry) => approvesNow(entry.state)) || {}).task || null;
+  hasUnfinishedRun = runs.some((entry) => !isFinished(entry.state || {}));
 } catch (error) {
   // Fail closed: no readable state means no evidence of approval.
   block(
     `no readable run state under ${STATE_PREFIX}, so approval cannot be confirmed.`,
     'Run /task-flow <task> to create the run, or set TASK_FLOW_GATE=off deliberately.'
+  );
+}
+
+if (!approvedTask && !hasUnfinishedRun) {
+  // Nothing is waiting for approval, so "ask the user to approve the plan" would
+  // send the agent looking for a plan that does not exist (an ad-hoc edit after
+  // the last run finished). Say what is true and what the way out is. The text
+  // is fixed: it never echoes anything read from a state.json.
+  block(
+    `writing ${relative} is blocked: no run under ${STATE_PREFIX} is in progress, so there is no plan to approve.`,
+    'This is a repository that uses task-flow. Start a run with /task-flow <task>, or ask the user to set TASK_FLOW_GATE=off for an edit outside the pipeline. Do not create or edit a state.json to get past this.'
   );
 }
 

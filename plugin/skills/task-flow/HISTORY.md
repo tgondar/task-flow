@@ -252,3 +252,15 @@ among several, that was waiting on them.
   `stateDir`. Either can still win - this is not "prefer cwd", it is "prefer
   whichever one the evidence points at" - so the ordinary case (both point at
   the same project) is unchanged.
+
+## Gate: say "no run in progress" instead of "approve the plan"
+
+An edit made after the last run had finished (ad-hoc work in a repository that
+has `.claude/task-flow.json`) was blocked with "Ask the user to approve the
+plan". There was no plan: every run was `done`. The agent was sent looking for
+an approval that could not exist. `gate.js` now tells the two cases apart: with
+no unfinished run it says there is nothing in progress and names the ways out
+(`/task-flow <task>`, or the user setting `TASK_FLOW_GATE=off`); with an
+unfinished, unapproved run the original message is kept. Only the text changed -
+what is allowed and what is blocked is identical - and the text is fixed, so it
+still never echoes anything read from a `state.json`.
