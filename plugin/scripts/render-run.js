@@ -610,7 +610,12 @@ function healthSection(health, t) {
       maxRound: (v) => String(Math.round(v)),
       cacheHitRate: (v) => `${Math.round(v * 100)}%`,
     };
-    const show = (value, id) => (finite(value) === null ? '—' : (KIND[id] || decimal)(value));
+    // a finite input can still overflow when scaled (1e308 * 100): shown as a dash, never "Infinity%"
+    const show = (value, id) => {
+      if (finite(value) === null) return '—';
+      const text = (KIND[id] || decimal)(value);
+      return /Infinity|NaN/.test(text) ? '—' : text;
+    };
 
     const out = [h.heading, ''];
     const n = whole(base.n);
