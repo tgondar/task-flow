@@ -135,6 +135,9 @@ const ROW_KEYS = [
 const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
+/** A run's folder name: a safe path segment of at most 100 characters. */
+const isSlug = (value) => typeof value === 'string' && value.length <= 100 && SAFE_SEGMENT.test(value);
+
 /** An integer counter in [0, MAX_COUNT]. `typeof` first: "5" and 5n are not numbers here. */
 const isCount = (value) => typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= MAX_COUNT;
 
@@ -203,7 +206,7 @@ function validateRow(row) {
     if (!hasExactKeys(row, ROW_KEYS) || row.v !== 1) return { ok: false };
 
     const scalar =
-      typeof row.run === 'string' && row.run.length <= 100 && SAFE_SEGMENT.test(row.run) &&
+      isSlug(row.run) &&
       isDate(row.created) && isInstant(row.closedAt) &&
       OUTCOMES.includes(row.outcome) && MODES.includes(row.mode) &&
       (row.primaryModel === null || (typeof row.primaryModel === 'string' && SHAPE.model.test(row.primaryModel))) &&
@@ -489,8 +492,6 @@ function appendRow(projectDir, stateDir, row) {
 const { execFileSync } = require('child_process');
 
 const SAFE_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
-const GIT_TIMEOUT_MS = 3000;
-const GIT_MAX_BUFFER = 1024 * 1024;
 /** Sanity ceiling per count, as for the other readers: bigger is not a measurement. */
 const MAX_CODE_COUNT = 1e9;
 
@@ -526,7 +527,7 @@ function readCode(options) {
         ['--no-pager', '-c', 'core.quotepath=false', '-c', 'core.fsmonitor=false', '-c', 'diff.external=', '-c', 'core.pager=cat',
           'diff', '--numstat', '-z', '-M', '--no-ext-diff', '--no-textconv', `${base}...${branch}`, '--'],
         {
-          cwd: projectDir, shell: false, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER,
+          cwd: projectDir, shell: false, timeout: CONSTANTS.GIT_TIMEOUT_MS, maxBuffer: CONSTANTS.GIT_MAX_BUFFER,
           stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, encoding: 'utf8',
           env: { ...cleanEnv(), GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_EXTERNAL_DIFF: '', GIT_PAGER: 'cat' },
         },
@@ -712,7 +713,7 @@ function collect(options) {
   try {
     const opts = isObject(options) ? options : {};
     const { projectDir, config, slug } = opts;
-    if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || typeof slug !== 'string' || slug.length > 100 || !SAFE_SEGMENT.test(slug)) return failure('bad-state');
+    if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || !isSlug(slug)) return failure('bad-state');
     const stateDir = isObject(config) ? config.stateDir : null;
     if (typeof stateDir !== 'string' || !path.isAbsolute(stateDir)) return failure('bad-state');
     const statePath = path.join(stateDir, slug, 'state.json');
@@ -1377,7 +1378,7 @@ function closeRun(options) {
     if (String(env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return closeResult(true, 'disabled');
 
     const { projectDir, slug } = opts;
-    if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || typeof slug !== 'string' || slug.length > 100 || !SAFE_SEGMENT.test(slug)) return closeResult(false, 'bad-state');
+    if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || !isSlug(slug)) return closeResult(false, 'bad-state');
     const given = isObject(opts.steps) ? opts.steps : {};
     const step = (name, fallback) => (typeof given[name] === 'function' ? given[name] : fallback);
 
@@ -1453,7 +1454,7 @@ if (require.main === module) {
   } catch {
     // stays null: reported as a usage error below
   }
-  if (argv[0] !== 'close' || typeof slug !== 'string' || slug.length > 100 || !SAFE_SEGMENT.test(slug) || projectDir === null) {
+  if (argv[0] !== 'close' || !isSlug(slug) || projectDir === null) {
     process.stderr.write(USAGE);
     process.exitCode = 2;
   } else {
