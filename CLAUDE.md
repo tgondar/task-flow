@@ -28,6 +28,7 @@ node tests/metrics.docs.test.js
 node tests/metrics.e2e.test.js
 node tests/metrics.git.security.test.js
 node tests/metrics.git.test.js
+node tests/metrics.hardening.test.js
 node tests/metrics.hooks.security.test.js
 node tests/metrics.hooks.test.js
 node tests/metrics.io.security.test.js

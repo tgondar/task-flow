@@ -1159,18 +1159,33 @@ function renderAll({ projectDir, docsDir, slug } = {}) {
   // "off" nothing of metrics.js is loaded, run or shown.
   const metricsOff = String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off';
   let history = null; // one read per render, dropped whenever a close appends to it
+  const metricsStarted = Date.now();
   // metrics.js imports this file (PHASES, readPlanTasks...), so it is required HERE,
   // lazily: a require at the top would hand it back half-built. Throws an error carrying
   // only a closed code, so the caller can note a failure without quoting anything.
+  //
+  // Cost across runs, not just per run: this is called for EVERY finished run on EVERY
+  // render, and the Stop hook renders each turn. So (1) a run already in the history
+  // is answered from the one cached read, with no closeRun (which would re-read up to
+  // 1 MiB of history per run), and (2) no NEW close is started once half of one close's
+  // budget is spent in this render: a close that keeps failing (unwritable history)
+  // would otherwise cost seconds per run per turn and push the hook past its timeout.
+  // The runs left over are retried by the next render.
   const closeAndRead = (entry, state) => {
     const metrics = require('./metrics.js');
-    const closed = metrics.closeRun({ projectDir: root, slug: entry });
-    if (!closed.ok) throw Object.assign(new Error('metrics close failed'), { metricsCode: /^[a-z-]{1,30}$/.test(String(closed.code)) ? closed.code : 'internal' });
-    if (closed.code === 'closed') history = null;
-    if (history === null) history = metrics.readHistory(root, stateRoot);
-    const rows = Array.isArray(history.rows) ? history.rows : [];
-    const row = rows.find((candidate) => candidate.run === entry && candidate.created === state.created);
-    return row ? { row, baseline: metrics.baseline(rows, row) } : null;
+    const find = () => {
+      if (history === null) history = metrics.readHistory(root, stateRoot);
+      const rows = Array.isArray(history.rows) ? history.rows : [];
+      return { rows, row: rows.find((candidate) => candidate.run === entry && candidate.created === state.created) };
+    };
+    let found = find();
+    if (!found.row && Date.now() - metricsStarted < metrics.CONSTANTS.BUDGET_MS / 2) {
+      const closed = metrics.closeRun({ projectDir: root, slug: entry });
+      if (!closed.ok) throw Object.assign(new Error('metrics close failed'), { metricsCode: /^[a-z-]{1,30}$/.test(String(closed.code)) ? closed.code : 'internal' });
+      history = null; // 'already-closed' by a racing render means the copy read above is stale too
+      found = find();
+    }
+    return found.row ? { row: found.row, baseline: metrics.baseline(found.rows, found.row) } : null;
   };
 
   for (const entry of fs.readdirSync(stateRoot)) {

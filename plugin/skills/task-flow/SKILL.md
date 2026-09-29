@@ -1179,7 +1179,10 @@ and the list above already have you write. It is **information, never a gate** â
 blocks nothing, and if it fails the run still closes and the render still succeeds.
 `TASK_FLOW_METRICS=off` switches it off. The history is not ignored by git: a
 project that does not want it versioned can add `<stateDir>/metrics.jsonl` to its
-own `.gitignore` (the script never edits one).
+own `.gitignore` (the script never edits one). A row holds numbers, dates, the run's
+folder name and the model names seen in the transcripts, and no path, user name or
+text; but it does name the run and the model, so ignore it if the repository is public
+and those names should not be.
 
 **The closing summary and the PR body both start with what the user has to do.**
 Three headings, in this order, in `language`, in both modes:
