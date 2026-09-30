@@ -674,6 +674,23 @@ for (const value of [true, 1, { by: 'me' }, ['me']]) {
   check('T30f SECURITY a cwd subfolder with no config of its own does not bypass the outer project\'s approval', BLOCK,
     runGate(outerRoot, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: outerRoot.replace(/\\/g, '/') }));
 }
+{
+  // SECURITY: hasOwnConfig() treats a thrown error the same as "no config" -
+  // a cwd subfolder with a malformed (unparseable) task-flow.json must not
+  // crash the whole gate into failing closed. It must fall back to
+  // CLAUDE_PROJECT_DIR, whose real (here: approved) run then correctly
+  // governs. Using an APPROVED outer run makes this distinguishing: without
+  // the inner try/catch, the uncaught error would still exit non-zero (the
+  // gate's own outer fail-closed handler), which would wrongly block a write
+  // that should be allowed.
+  const outerRoot = makeProject({ approved: true });
+  const nestedRoot = path.join(outerRoot, 'nested-worktree');
+  makeProject({ root: nestedRoot, config: '{ not valid json', withStateDir: false });
+  const payload = JSON.parse(payloadFor(nestedRoot, win(nestedRoot, 'src', 'Foo.cs')));
+  payload.cwd = nestedRoot.replace(/\//g, '\\');
+  check('T30g SECURITY a cwd with an unparseable config of its own falls back to CLAUDE_PROJECT_DIR instead of failing closed', ALLOW,
+    runGate(outerRoot, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: outerRoot.replace(/\\/g, '/') }));
+}
 
 // --- report ---------------------------------------------------------------
 const total = passed + failures.length;
