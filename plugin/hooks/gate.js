@@ -100,15 +100,31 @@ const fileRaw =
 // candidates, because the worktree is itself a subfolder of the original
 // checkout. "Not under CLAUDE_PROJECT_DIR" is never true for it, so that
 // condition alone leaves the gate stuck on the stale outer checkout, where the
-// approved run never lived. The fix is to prefer whichever candidate is the
-// more specific (deeper) containing path, not merely the one that uniquely
-// contains the file: for the sibling case only one candidate contains the
-// file, so specificity gives the same answer as before; for the nested case
-// the worktree's normalised path is longer than the outer checkout's (it is a
-// path *inside* it), so the worktree - the one actually being written to -
-// wins. The ordinary case (no worktree, both candidates are the same root)
-// keeps both lengths equal, so neither is preferred and CLAUDE_PROJECT_DIR
-// stays authoritative, exactly as before.
+// approved run never lived.
+//
+// An earlier version of this fix preferred whichever candidate had the
+// longer normalised path, on the theory that a nested worktree's path is
+// always longer than the outer checkout's. That is true, but it is not
+// sufficient: path length says nothing about *authorization*. Any plain
+// subfolder of an opted-in project - one with no .claude/task-flow.json of
+// its own, created by anything (a scratch dir, another tool, an attacker
+// steering payload.cwd) - also has a longer path than the project root and
+// also contains whatever file is written inside it. Preferring it over
+// CLAUDE_PROJECT_DIR made THAT subfolder the "project", and since it has no
+// config, stateDirOf() on it returns null and the gate allow()s immediately
+// (the ordinary "this project never opted in" exemption) - skipping the
+// outer, actually-opted-in project's approval check entirely. A longer path
+// is not evidence of a real nested project; a config file is. So cwd is only
+// preferred when it resolves its OWN valid, non-null stateDir - i.e. it is
+// a project in its own right, not just a deeper string. A genuinely nested
+// EnterWorktree checkout keeps its own .claude/task-flow.json (worktrees
+// created by this harness copy it), so it still passes this test and still
+// wins on path length as the tie-break; a plain subfolder with no config
+// fails the test and falls back to CLAUDE_PROJECT_DIR, whose approval state
+// correctly governs since the file is still inside it. The ordinary case (no
+// worktree, both candidates are the same root) is unaffected: lengths are
+// equal, so the tie-break never fires and CLAUDE_PROJECT_DIR stays
+// authoritative, exactly as before.
 const envProjectDir = process.env.CLAUDE_PROJECT_DIR || '';
 const cwdProjectDir = payload.cwd || '';
 const isUnder = (dir, file) => {
@@ -117,9 +133,21 @@ const isUnder = (dir, file) => {
   const normFile = normalise(file);
   return normFile === normDir || normFile.startsWith(normDir + '/');
 };
+// A throw or a null both mean "not a project of its own" here - this is only
+// a preference check, not the authoritative stateDirOf() call below (which
+// still fails closed on a malformed config in whichever project is chosen).
+const hasOwnConfig = (dir) => {
+  if (!dir) return false;
+  try {
+    return stateDirOf(dir) !== null;
+  } catch (error) {
+    return false;
+  }
+};
 const projectDirRaw =
   path.isAbsolute(fileRaw) &&
   isUnder(cwdProjectDir, fileRaw) &&
+  hasOwnConfig(cwdProjectDir) &&
   (!isUnder(envProjectDir, fileRaw) || normalise(cwdProjectDir).length > normalise(envProjectDir).length)
     ? cwdProjectDir
     : envProjectDir || cwdProjectDir || '';

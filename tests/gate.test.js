@@ -659,6 +659,21 @@ for (const value of [true, 1, { by: 'me' }, ['me']]) {
   check('T30e SECURITY a trailing slash on cwd does not fake a more-specific root', BLOCK,
     runGate(root, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: root.replace(/\\/g, '/') }));
 }
+{
+  // SECURITY (the auditor's PoC): path length alone is not authorization. A
+  // plain subfolder of an opted-in project - no .claude/task-flow.json of its
+  // own, just a deeper string - must never be preferred over
+  // CLAUDE_PROJECT_DIR. Preferring it made stateDirOf() return null for it
+  // (no config there), which allow()s immediately via the "never opted in"
+  // exemption and skips the outer project's real, unapproved run entirely.
+  const outerRoot = makeProject({ approved: false }); // unapproved running run
+  const plainSubfolder = path.join(outerRoot, 'src', 'deep', 'subfolder');
+  fs.mkdirSync(plainSubfolder, { recursive: true }); // no .claude/task-flow.json here
+  const payload = JSON.parse(payloadFor(outerRoot, win(plainSubfolder, 'Foo.cs')));
+  payload.cwd = plainSubfolder.replace(/\//g, '\\');
+  check('T30f SECURITY a cwd subfolder with no config of its own does not bypass the outer project\'s approval', BLOCK,
+    runGate(outerRoot, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: outerRoot.replace(/\\/g, '/') }));
+}
 
 // --- report ---------------------------------------------------------------
 const total = passed + failures.length;
