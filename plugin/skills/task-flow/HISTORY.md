@@ -270,6 +270,28 @@ among several, that was waiting on them.
   contains the file in the first place, and the ordinary no-worktree case is
   unaffected too, because both candidates then normalise to the same path and
   their lengths tie.
+- **Path length alone was not evidence of authorization - it let an
+  unconfigured subfolder impersonate the project.** The longer-path rule
+  above picked `cwd` whenever its path was longer and contained the written
+  file, with no check on what `cwd` actually *was*. Any plain subfolder of an
+  opted-in project - no `.claude/task-flow.json` of its own, reachable by a
+  scratch directory, another tool, or `payload.cwd` steered by anything
+  untrusted - is also a longer string than the project root and also
+  contains whatever file is written inside it. Preferring it made that
+  subfolder "the project"; `stateDirOf()` on a directory with no config
+  returns `null`, and the gate's own "this project never opted in" exemption
+  (`if (stateDirRaw === null) allow()`) then let the write through with no
+  approval check at all - even while the real, outer project had an
+  unapproved run sitting unfinished. That is not a refinement of the
+  worktree fix, it is a hole the fix opened: an authorization check decided
+  by string length. `gate.js` now requires `cwd` to resolve its own valid,
+  non-null `stateDirOf()` before it is even a candidate to prefer; only once
+  both `cwd` and `CLAUDE_PROJECT_DIR` are real, configured projects does path
+  length break the tie. A genuinely nested `EnterWorktree` checkout keeps its
+  own copied `.claude/task-flow.json`, so it still passes and still wins the
+  tie-break as before; a bare subfolder with no config now falls back to
+  `CLAUDE_PROJECT_DIR`, whose approval state correctly governs since the file
+  is still inside it either way. The ordinary no-worktree case is untouched.
 
 ## Gate: say "no run in progress" instead of "approve the plan"
 
