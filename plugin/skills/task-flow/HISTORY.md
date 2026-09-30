@@ -252,6 +252,24 @@ among several, that was waiting on them.
   `stateDir`. Either can still win - this is not "prefer cwd", it is "prefer
   whichever one the evidence points at" - so the ordinary case (both point at
   the same project) is unchanged.
+- **`gate.js`'s worktree fix above only covered a sibling worktree.** This
+  harness's own `EnterWorktree` tool does not create a sibling directory next
+  to the project - it nests the worktree *inside* it
+  (`.claude/worktrees/<name>`). A file written there is a genuine subfolder of
+  the original checkout, so it sits under both `CLAUDE_PROJECT_DIR` and
+  `payload.cwd` at once. The old condition - prefer `cwd` when the file is
+  under it *and not* under `CLAUDE_PROJECT_DIR` - was written for the sibling
+  case, where only one candidate ever contains the file; for the nested case
+  that second half is never true, so the gate stayed stuck reading the outer
+  checkout's `state.json`, where the approved run never lived, and blocked
+  every write in the worktree forever. `gate.js` now prefers whichever
+  candidate's normalised path is *longer* when both contain the file: a path
+  inside another path is always the longer string, so the worktree - being a
+  subfolder of the outer checkout - wins without a second, worktree-specific
+  branch. The sibling case is unaffected, because there only one candidate
+  contains the file in the first place, and the ordinary no-worktree case is
+  unaffected too, because both candidates then normalise to the same path and
+  their lengths tie.
 
 ## Gate: say "no run in progress" instead of "approve the plan"
 

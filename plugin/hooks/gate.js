@@ -88,9 +88,27 @@ const fileRaw =
 // into a worktree keeps CLAUDE_PROJECT_DIR pointing at the original checkout,
 // while every real tool call - and payload.cwd - targets the worktree. That
 // stale value would make the gate look for approval in the wrong checkout and
-// block every write forever, even an approved one. So when the file being
-// written sits under payload.cwd but not under CLAUDE_PROJECT_DIR, payload.cwd
-// is where the work is actually happening, and it wins.
+// block every write forever, even an approved one.
+//
+// Two different worktree layouts fall out of that, and one rule has to cover
+// both. A sibling worktree (its own directory, made with `git worktree add`
+// outside the repo) contains the file under payload.cwd only - it is not
+// under CLAUDE_PROJECT_DIR at all, so "the file is under cwd but not under
+// CLAUDE_PROJECT_DIR" already picks it out. But this harness's own
+// EnterWorktree nests the worktree inside the project instead
+// (.claude/worktrees/<name>): a file written there sits under *both*
+// candidates, because the worktree is itself a subfolder of the original
+// checkout. "Not under CLAUDE_PROJECT_DIR" is never true for it, so that
+// condition alone leaves the gate stuck on the stale outer checkout, where the
+// approved run never lived. The fix is to prefer whichever candidate is the
+// more specific (deeper) containing path, not merely the one that uniquely
+// contains the file: for the sibling case only one candidate contains the
+// file, so specificity gives the same answer as before; for the nested case
+// the worktree's normalised path is longer than the outer checkout's (it is a
+// path *inside* it), so the worktree - the one actually being written to -
+// wins. The ordinary case (no worktree, both candidates are the same root)
+// keeps both lengths equal, so neither is preferred and CLAUDE_PROJECT_DIR
+// stays authoritative, exactly as before.
 const envProjectDir = process.env.CLAUDE_PROJECT_DIR || '';
 const cwdProjectDir = payload.cwd || '';
 const isUnder = (dir, file) => {
@@ -100,7 +118,9 @@ const isUnder = (dir, file) => {
   return normFile === normDir || normFile.startsWith(normDir + '/');
 };
 const projectDirRaw =
-  path.isAbsolute(fileRaw) && !isUnder(envProjectDir, fileRaw) && isUnder(cwdProjectDir, fileRaw)
+  path.isAbsolute(fileRaw) &&
+  isUnder(cwdProjectDir, fileRaw) &&
+  (!isUnder(envProjectDir, fileRaw) || normalise(cwdProjectDir).length > normalise(envProjectDir).length)
     ? cwdProjectDir
     : envProjectDir || cwdProjectDir || '';
 if (!projectDirRaw) allow();

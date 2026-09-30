@@ -38,8 +38,9 @@ function makeProject({
   withStateDir = true,
   stateDir = DEFAULT_STATE_DIR,
   config = stateDir === DEFAULT_STATE_DIR ? {} : { stateDir },
+  root = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-gate-')),
 } = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-gate-'));
+  fs.mkdirSync(root, { recursive: true });
   if (config !== null) {
     fs.mkdirSync(path.join(root, '.claude'), { recursive: true });
     fs.writeFileSync(
@@ -613,6 +614,23 @@ for (const value of [true, 1, { by: 'me' }, ['me']]) {
   payload.cwd = elsewhere.replace(/\//g, '\\');
   check('T30b CLAUDE_PROJECT_DIR still wins when the file is under it', BLOCK,
     runGate(root, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: root.replace(/\\/g, '/') }));
+}
+{
+  // The harness's own EnterWorktree nests the worktree inside the project
+  // (.claude/worktrees/<name>), unlike T30a's sibling worktree. A file written
+  // there sits under BOTH CLAUDE_PROJECT_DIR (the outer checkout) and
+  // payload.cwd (the worktree) - it is a genuine subfolder of the outer
+  // checkout - so "not under CLAUDE_PROJECT_DIR" is never true for it. Only
+  // preferring the more specific (longer normalised) containing path picks
+  // the worktree, where the approved run actually lives.
+  const outerRoot = makeProject({ approved: false }); // no run of interest here
+  const worktreeRoot = path.join(outerRoot, '.claude', 'worktrees', 'foo');
+  fs.mkdirSync(worktreeRoot, { recursive: true });
+  const worktree = makeProject({ approved: true, root: worktreeRoot });
+  const payload = JSON.parse(payloadFor(worktree, win(worktree, 'src', 'Foo.cs')));
+  payload.cwd = worktree.replace(/\//g, '\\');
+  check('T30c an approved run in a nested EnterWorktree worktree is allowed', ALLOW,
+    runGate(worktree, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: outerRoot.replace(/\\/g, '/') }));
 }
 
 // --- report ---------------------------------------------------------------
