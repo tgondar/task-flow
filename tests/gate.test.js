@@ -632,6 +632,33 @@ for (const value of [true, 1, { by: 'me' }, ['me']]) {
   check('T30c an approved run in a nested EnterWorktree worktree is allowed', ALLOW,
     runGate(worktree, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: outerRoot.replace(/\\/g, '/') }));
 }
+{
+  // SECURITY: the new "longer normalised path wins" rule must not turn into
+  // "an attacker-chosen deep cwd always wins". When cwd is longer than
+  // CLAUDE_PROJECT_DIR AND has its own valid task-flow.json with its own
+  // unapproved run, the gate must still block - it must not let the mere fact
+  // that cwd is nested and longer skip approval.
+  const outerRoot = makeProject({ approved: false });
+  const nestedRoot = path.join(outerRoot, 'nested-worktree');
+  fs.mkdirSync(nestedRoot, { recursive: true });
+  const nested = makeProject({ approved: false, root: nestedRoot });
+  const payload = JSON.parse(payloadFor(nested, win(nested, 'src', 'Foo.cs')));
+  payload.cwd = nested.replace(/\//g, '\\');
+  check('T30d SECURITY a longer cwd with its own unapproved run is still blocked', BLOCK,
+    runGate(nested, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: outerRoot.replace(/\\/g, '/') }));
+}
+{
+  // SECURITY: a cosmetic difference (trailing slash) must not make cwd's
+  // normalised string "longer" than CLAUDE_PROJECT_DIR's when they are in fact
+  // the same directory - that would flip which one is authoritative for no
+  // real reason and is exactly the kind of string-length trick the new
+  // comparison could fall for.
+  const root = makeProject({ approved: false });
+  const payload = JSON.parse(payloadFor(root, win(root, 'src', 'Foo.cs')));
+  payload.cwd = root.replace(/\//g, '\\') + '\\';
+  check('T30e SECURITY a trailing slash on cwd does not fake a more-specific root', BLOCK,
+    runGate(root, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: root.replace(/\\/g, '/') }));
+}
 
 // --- report ---------------------------------------------------------------
 const total = passed + failures.length;
