@@ -38,8 +38,9 @@ function makeProject({
   withStateDir = true,
   stateDir = DEFAULT_STATE_DIR,
   config = stateDir === DEFAULT_STATE_DIR ? {} : { stateDir },
+  root = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-gate-')),
 } = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-gate-'));
+  fs.mkdirSync(root, { recursive: true });
   if (config !== null) {
     fs.mkdirSync(path.join(root, '.claude'), { recursive: true });
     fs.writeFileSync(
@@ -613,6 +614,82 @@ for (const value of [true, 1, { by: 'me' }, ['me']]) {
   payload.cwd = elsewhere.replace(/\//g, '\\');
   check('T30b CLAUDE_PROJECT_DIR still wins when the file is under it', BLOCK,
     runGate(root, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: root.replace(/\\/g, '/') }));
+}
+{
+  // The harness's own EnterWorktree nests the worktree inside the project
+  // (.claude/worktrees/<name>), unlike T30a's sibling worktree. A file written
+  // there sits under BOTH CLAUDE_PROJECT_DIR (the outer checkout) and
+  // payload.cwd (the worktree) - it is a genuine subfolder of the outer
+  // checkout - so "not under CLAUDE_PROJECT_DIR" is never true for it. Only
+  // preferring the more specific (longer normalised) containing path picks
+  // the worktree, where the approved run actually lives.
+  const outerRoot = makeProject({ approved: false }); // no run of interest here
+  const worktreeRoot = path.join(outerRoot, '.claude', 'worktrees', 'foo');
+  fs.mkdirSync(worktreeRoot, { recursive: true });
+  const worktree = makeProject({ approved: true, root: worktreeRoot });
+  const payload = JSON.parse(payloadFor(worktree, win(worktree, 'src', 'Foo.cs')));
+  payload.cwd = worktree.replace(/\//g, '\\');
+  check('T30c an approved run in a nested EnterWorktree worktree is allowed', ALLOW,
+    runGate(worktree, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: outerRoot.replace(/\\/g, '/') }));
+}
+{
+  // SECURITY: the new "longer normalised path wins" rule must not turn into
+  // "an attacker-chosen deep cwd always wins". When cwd is longer than
+  // CLAUDE_PROJECT_DIR AND has its own valid task-flow.json with its own
+  // unapproved run, the gate must still block - it must not let the mere fact
+  // that cwd is nested and longer skip approval.
+  const outerRoot = makeProject({ approved: false });
+  const nestedRoot = path.join(outerRoot, 'nested-worktree');
+  fs.mkdirSync(nestedRoot, { recursive: true });
+  const nested = makeProject({ approved: false, root: nestedRoot });
+  const payload = JSON.parse(payloadFor(nested, win(nested, 'src', 'Foo.cs')));
+  payload.cwd = nested.replace(/\//g, '\\');
+  check('T30d SECURITY a longer cwd with its own unapproved run is still blocked', BLOCK,
+    runGate(nested, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: outerRoot.replace(/\\/g, '/') }));
+}
+{
+  // SECURITY: a cosmetic difference (trailing slash) must not make cwd's
+  // normalised string "longer" than CLAUDE_PROJECT_DIR's when they are in fact
+  // the same directory - that would flip which one is authoritative for no
+  // real reason and is exactly the kind of string-length trick the new
+  // comparison could fall for.
+  const root = makeProject({ approved: false });
+  const payload = JSON.parse(payloadFor(root, win(root, 'src', 'Foo.cs')));
+  payload.cwd = root.replace(/\//g, '\\') + '\\';
+  check('T30e SECURITY a trailing slash on cwd does not fake a more-specific root', BLOCK,
+    runGate(root, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: root.replace(/\\/g, '/') }));
+}
+{
+  // SECURITY (the auditor's PoC): path length alone is not authorization. A
+  // plain subfolder of an opted-in project - no .claude/task-flow.json of its
+  // own, just a deeper string - must never be preferred over
+  // CLAUDE_PROJECT_DIR. Preferring it made stateDirOf() return null for it
+  // (no config there), which allow()s immediately via the "never opted in"
+  // exemption and skips the outer project's real, unapproved run entirely.
+  const outerRoot = makeProject({ approved: false }); // unapproved running run
+  const plainSubfolder = path.join(outerRoot, 'src', 'deep', 'subfolder');
+  fs.mkdirSync(plainSubfolder, { recursive: true }); // no .claude/task-flow.json here
+  const payload = JSON.parse(payloadFor(outerRoot, win(plainSubfolder, 'Foo.cs')));
+  payload.cwd = plainSubfolder.replace(/\//g, '\\');
+  check('T30f SECURITY a cwd subfolder with no config of its own does not bypass the outer project\'s approval', BLOCK,
+    runGate(outerRoot, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: outerRoot.replace(/\\/g, '/') }));
+}
+{
+  // SECURITY: hasOwnConfig() treats a thrown error the same as "no config" -
+  // a cwd subfolder with a malformed (unparseable) task-flow.json must not
+  // crash the whole gate into failing closed. It must fall back to
+  // CLAUDE_PROJECT_DIR, whose real (here: approved) run then correctly
+  // governs. Using an APPROVED outer run makes this distinguishing: without
+  // the inner try/catch, the uncaught error would still exit non-zero (the
+  // gate's own outer fail-closed handler), which would wrongly block a write
+  // that should be allowed.
+  const outerRoot = makeProject({ approved: true });
+  const nestedRoot = path.join(outerRoot, 'nested-worktree');
+  makeProject({ root: nestedRoot, config: '{ not valid json', withStateDir: false });
+  const payload = JSON.parse(payloadFor(nestedRoot, win(nestedRoot, 'src', 'Foo.cs')));
+  payload.cwd = nestedRoot.replace(/\//g, '\\');
+  check('T30g SECURITY a cwd with an unparseable config of its own falls back to CLAUDE_PROJECT_DIR instead of failing closed', ALLOW,
+    runGate(outerRoot, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: outerRoot.replace(/\\/g, '/') }));
 }
 
 // --- report ---------------------------------------------------------------

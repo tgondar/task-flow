@@ -32,6 +32,18 @@ Every rule below comes from something that went wrong, or nearly did, in them.
   the task list differ from project to project and from person to person, and a
   pipeline that guessed them wrote to the wrong place. A rule in prose can be
   talked past; `config.js check` exits 1 and the skill stops on it.
+- **Never isolate a run into its own `EnterWorktree` checkout.** A run spent a whole
+  session stuck, convinced the gate had a nested-worktree bug, when the real cause
+  was that the orchestrator had moved the build phase into a fresh `EnterWorktree`
+  worktree (default `baseRef: "fresh"` branches from `origin/<default-branch>`)
+  after the spec/plan/approval had already written `state.json` in the original
+  checkout. The worktree's own `.claude/task-flow.json` config is tracked in git
+  and came along; the run's `state.json` under `stateDir` did not, because it was
+  never committed and pushed. `gate.js`'s project-root resolution correctly picked
+  the worktree as its own project (it has a config of its own) and correctly found
+  no run there — it was never a hook bug, the run state and the gate's project root
+  had just been split across two checkouts. No code anchor for this one: the fix is
+  not building the run from two checkouts in the first place.
 
 ## The gate and the stops
 
@@ -252,6 +264,46 @@ among several, that was waiting on them.
   `stateDir`. Either can still win - this is not "prefer cwd", it is "prefer
   whichever one the evidence points at" - so the ordinary case (both point at
   the same project) is unchanged.
+- **`gate.js`'s worktree fix above only covered a sibling worktree.** This
+  harness's own `EnterWorktree` tool does not create a sibling directory next
+  to the project - it nests the worktree *inside* it
+  (`.claude/worktrees/<name>`). A file written there is a genuine subfolder of
+  the original checkout, so it sits under both `CLAUDE_PROJECT_DIR` and
+  `payload.cwd` at once. The old condition - prefer `cwd` when the file is
+  under it *and not* under `CLAUDE_PROJECT_DIR` - was written for the sibling
+  case, where only one candidate ever contains the file; for the nested case
+  that second half is never true, so the gate stayed stuck reading the outer
+  checkout's `state.json`, where the approved run never lived, and blocked
+  every write in the worktree forever. `gate.js` now prefers whichever
+  candidate's normalised path is *longer* when both contain the file: a path
+  inside another path is always the longer string, so the worktree - being a
+  subfolder of the outer checkout - wins without a second, worktree-specific
+  branch. The sibling case is unaffected, because there only one candidate
+  contains the file in the first place, and the ordinary no-worktree case is
+  unaffected too, because both candidates then normalise to the same path and
+  their lengths tie.
+- **Path length alone was not evidence of authorization - it let an
+  unconfigured subfolder impersonate the project.** The longer-path rule
+  above picked `cwd` whenever its path was longer and contained the written
+  file, with no check on what `cwd` actually *was*. Any plain subfolder of an
+  opted-in project - no `.claude/task-flow.json` of its own, reachable by a
+  scratch directory, another tool, or `payload.cwd` steered by anything
+  untrusted - is also a longer string than the project root and also
+  contains whatever file is written inside it. Preferring it made that
+  subfolder "the project"; `stateDirOf()` on a directory with no config
+  returns `null`, and the gate's own "this project never opted in" exemption
+  (`if (stateDirRaw === null) allow()`) then let the write through with no
+  approval check at all - even while the real, outer project had an
+  unapproved run sitting unfinished. That is not a refinement of the
+  worktree fix, it is a hole the fix opened: an authorization check decided
+  by string length. `gate.js` now requires `cwd` to resolve its own valid,
+  non-null `stateDirOf()` before it is even a candidate to prefer; only once
+  both `cwd` and `CLAUDE_PROJECT_DIR` are real, configured projects does path
+  length break the tie. A genuinely nested `EnterWorktree` checkout keeps its
+  own copied `.claude/task-flow.json`, so it still passes and still wins the
+  tie-break as before; a bare subfolder with no config now falls back to
+  `CLAUDE_PROJECT_DIR`, whose approval state correctly governs since the file
+  is still inside it either way. The ordinary no-worktree case is untouched.
 
 ## Gate: say "no run in progress" instead of "approve the plan"
 

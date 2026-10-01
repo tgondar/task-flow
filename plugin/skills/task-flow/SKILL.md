@@ -239,6 +239,14 @@ Write a step yourself in exactly two cases:
 Never delegate: the state machine, the approval gate, the question budget (§3),
 and the project conventions in section 6.
 
+**Never isolate a run into its own `EnterWorktree` checkout.** `state.json` and
+everything else under `stateDir` lives in the checkout the run was started in; a
+fresh `EnterWorktree` worktree branches from `origin/<default-branch>` and does not
+carry uncommitted run state with it. Build in the same checkout the spec and plan
+were written in. If the user explicitly asks for worktree isolation anyway, commit
+and push `<stateDir>/<slug>/` first so the new worktree actually has the run — do
+not treat the gate's "no run in progress" refusal there as a hook bug.
+
 ## 1b. A fresh context per phase — spawn, do not carry
 
 **Each phase starts from zero**, so that nothing from writing the spec leaks into
