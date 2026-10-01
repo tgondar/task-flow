@@ -32,6 +32,18 @@ Every rule below comes from something that went wrong, or nearly did, in them.
   the task list differ from project to project and from person to person, and a
   pipeline that guessed them wrote to the wrong place. A rule in prose can be
   talked past; `config.js check` exits 1 and the skill stops on it.
+- **Never isolate a run into its own `EnterWorktree` checkout.** A run spent a whole
+  session stuck, convinced the gate had a nested-worktree bug, when the real cause
+  was that the orchestrator had moved the build phase into a fresh `EnterWorktree`
+  worktree (default `baseRef: "fresh"` branches from `origin/<default-branch>`)
+  after the spec/plan/approval had already written `state.json` in the original
+  checkout. The worktree's own `.claude/task-flow.json` config is tracked in git
+  and came along; the run's `state.json` under `stateDir` did not, because it was
+  never committed and pushed. `gate.js`'s project-root resolution correctly picked
+  the worktree as its own project (it has a config of its own) and correctly found
+  no run there — it was never a hook bug, the run state and the gate's project root
+  had just been split across two checkouts. No code anchor for this one: the fix is
+  not building the run from two checkouts in the first place.
 
 ## The gate and the stops
 
