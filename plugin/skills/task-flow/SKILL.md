@@ -1,6 +1,6 @@
 ---
 name: task-flow
-description: Take an already-refined idea to a PR — spec, plan, build, tests, harden, review — a fresh subagent per phase, with planned stops at the approval gate and before security-harden/review. Put `auto` in front of the description to run unattended and read every decision in the PR instead. `review <PR number>` runs security-harden and review against an already-open PR instead (design only, §0c — not yet implemented). Only when the user types /task-flow; never on your own initiative.
+description: Take an already-refined idea to a PR — spec, plan, build, tests, harden, review — a fresh subagent per phase, with planned stops at the approval gate and before security-harden/review. Put `auto` in front of the description to run unattended and read every decision in the PR instead. `review <PR number>` runs security-harden and review against an already-open PR instead. Only when the user types /task-flow; never on your own initiative.
 argument-hint: [auto] [the refined idea, in your own words, or leave empty to resume] | review <PR number>
 ---
 
@@ -217,11 +217,15 @@ what you would have asked, not a tidied-up account of what you did.
 
 ## 0c. `/task-flow review <PR number>` — harden and review an already-open PR
 
-**Design only — not yet implemented.** The detection rule in §0b today checks only
-for the first token `auto`; until the code below is built, typing `/task-flow
-review 123` is read as an ordinary attended run whose description happens to be
-"review 123", not this command. This section is the spec for that build step, kept
-here so the behaviour is decided once, in one place, before it is coded.
+**Implemented, and confirmed to need no code change outside SKILL.md.** The spec
+behind this section read the three scripts a run touches and found each already
+tolerant of exactly the shape this mode produces: `gate.js` only ever looks at
+`approvedBy`/`phase`/`status` to decide `hasApproval`/`isFinished`/`approvesNow`,
+never at `artifacts`, so it accepts this preset the same way it accepts `auto`'s,
+without requiring a plan; `render-run.js` and `metrics.js` both already degrade
+gracefully for a run with no `artifacts.idea`/`spec`/`plan` that starts at
+`phase: "tests"`. No change was needed to `gate.js`, `render-run.js`, or
+`metrics.js` for this mode to work.
 
 **What it is for.** §4c step 2 lets the user send a PR to review/UAT/prod without
 waiting for security-harden and review. This command is the "check later" half of
@@ -237,7 +241,9 @@ Say in one line which PR you resolved, the same way auto mode announces itself.
 **What it does, in order:**
 
 1. Resolve the PR (its branch, base, and diff) with the project's own tooling
-   (e.g. `gh pr view <number>`) — never assume `gh` or a given remote name.
+   (e.g. `gh pr view <number>`) — never assume `gh` or a given remote name. The PR
+   number itself is already validated against `^[0-9]+$` by §0b's detection; do
+   not re-parse or re-validate `$ARGUMENTS` here.
 2. `slug = "pr-<number>"`. **A run already exists for that slug:** resume it, same
    as §2's rule for any other slug. Otherwise create
    `<stateDir>/<slug>/state.json` directly at `phase: "tests"` — meaning build and
@@ -258,12 +264,6 @@ Say in one line which PR you resolved, the same way auto mode announces itself.
    commits and a review report** (`.claude/reviews/<slug>-review.md`) — it never
    merges, never changes the PR's base or title, and never approves it.
 6. Render the run page as usual (§8).
-
-**Open questions the build step has to resolve, not this section:** `state.json`
-created this way has no `artifacts.idea`/`spec`/`plan` — `render-run.js` currently
-reads task headings from the plan (`readPlanTasks`) to build the page, and that
-path needs to tolerate a run with no plan at all. Resolve it in code, with tests,
-not by guessing here.
 
 ## 1. Delegate the method, own the state
 
