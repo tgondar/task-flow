@@ -382,6 +382,35 @@ console.log('\n--- the document it produces ---');
   check('R24 a run with no mode says nothing about the mode', !/modo /.test(doc), doc);
 }
 
+// --- R36: a run with no plan at all still renders a clean page ---------------
+// A run can reach `tests` before any plan artifact was ever recorded (or with
+// `artifacts: {}`): readPlanTasks(null) returns no tasks, and the page must
+// degrade to "no Tasks section", never to a crash or a page that prints
+// "undefined" where a count or a link should be.
+{
+  const f = fixture({
+    slug: 'pr-999',
+    plan: null,
+    state: { phase: 'tests', artifacts: {}, buildCursor: undefined },
+  });
+  let threw = null;
+  try {
+    renderAll({ projectDir: f.projectDir });
+  } catch (error) {
+    threw = error;
+  }
+  check('R36 a run with no plan does not throw', threw === null, threw && threw.stack);
+  const doc = read(f.live('260908_pr-999.md'));
+  check('R36 the page was written', doc !== null);
+  check('R36 harden shows in flight', doc && /\*\*Fase 6 de 7 · harden\*\*/.test(doc), doc);
+  check('R36 the Tarefas section is absent, not an empty table', doc && !/## Tarefas/.test(doc), doc);
+  check(
+    'R36 no section prints undefined, NaN, or a link to null/empty',
+    doc && !/undefined/.test(doc) && !/NaN/.test(doc) && !/\]\((?:null|)\)/.test(doc),
+    doc
+  );
+}
+
 console.log('\n--- what it refuses to do ---');
 
 // --- S1: a configuration config.js refuses renders nothing -------------------
