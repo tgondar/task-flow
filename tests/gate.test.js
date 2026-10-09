@@ -692,6 +692,35 @@ for (const value of [true, 1, { by: 'me' }, ['me']]) {
     runGate(outerRoot, JSON.stringify(payload), { CLAUDE_PROJECT_DIR: outerRoot.replace(/\\/g, '/') }));
 }
 
+// --- T31: the "review <n>" preset approves the same way "auto" does --------
+// Confidence test, not new behavior: gate.js does not change here. It proves,
+// by running the hook, that an approvedBy shape written by `/task-flow review
+// <n>` ("pr-review (/task-flow review 123)") goes through the same
+// hasApproval/isFinished/approvesNow path as the existing "auto (/task-flow
+// auto)" preset - no plan or artifacts required - while an empty/absent
+// approvedBy on the very same state.json shape still blocks, so this is a
+// real proof and not just a happy-path echo.
+{
+  const root = makeProject({ approved: false, withStateDir: false });
+  const taskDir = path.join(root, '.claude', 'task-flow', 'pr-123');
+  fs.mkdirSync(taskDir, { recursive: true });
+  const stateFor = (approvedBy) => JSON.stringify({
+    task: 'pr-123',
+    phase: 'tests',
+    status: 'running',
+    approvedBy,
+    // deliberately no "artifacts" field at all, matching what `review <n>` writes
+  });
+
+  fs.writeFileSync(path.join(taskDir, 'state.json'), stateFor('pr-review (/task-flow review 123)'));
+  check('T31a review <n> preset without artifacts approves code, same as auto', ALLOW,
+    runGate(root, payloadFor(root, win(root, 'src', 'Foo.cs'))));
+
+  fs.writeFileSync(path.join(taskDir, 'state.json'), stateFor(''));
+  check('T31b SECURITY the same shape with an empty approvedBy still blocks', BLOCK,
+    runGate(root, payloadFor(root, win(root, 'src', 'Foo.cs'))));
+}
+
 // --- report ---------------------------------------------------------------
 const total = passed + failures.length;
 console.log(`\n${passed}/${total} passed`);

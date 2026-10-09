@@ -59,6 +59,28 @@ Every rule below comes from something that went wrong, or nearly did, in them.
   the shape of an exception, never a target.
 - **The ceiling is three.** Three decisions waiting is when an attended run stops
   to ask — not five, and not rounded up because the run is going well.
+- **Security-harden and review are asked, not automatic (§4c step 2).** They used
+  to always run before the PR. The user wanted to deploy faster and check later,
+  so now there is a question — run them now, or skip to the PR and run
+  `/task-flow review <PR number>` (§0c) afterward. This question is the one
+  deliberate exception to "no `AskUserQuestion` in an auto run": the user chose,
+  up front, to trade unattended speed for a say on this specific point, so the run
+  still waits for the answer even in auto mode. Simplify (step 1) kept running
+  unconditionally — it changes no behaviour, so there was never a decision to ask
+  about.
+- **`/task-flow review <PR number>` is the "check later" half of that trade
+  (§0c), implemented.** It points at a PR that already exists — develop→UAT,
+  UAT→prod, or a plain PR into develop — instead of an idea, and runs only
+  security-harden and review against it, pushing fixes onto the PR's own branch.
+  It reuses the existing `tests`→`harden` phase machinery (preset `approvedBy`,
+  same as auto) rather than inventing a new state shape, because a run with no
+  plan still needs the gate's "approved" guarantee to hold, and a second meaning
+  for "approved" was more to maintain than reusing the one auto already has.
+  Measured, not assumed, before writing §0c as implemented: `gate.js` only reads
+  `approvedBy`/`phase`/`status`, never `artifacts`, so it accepts this preset
+  without a plan the same way it accepts auto's; `render-run.js` and `metrics.js`
+  both already tolerate a run with no `artifacts.idea`/`spec`/`plan` starting at
+  `phase: "tests"`. No change was needed in any of the three files.
 
 ## Deciding alone, and saying so
 

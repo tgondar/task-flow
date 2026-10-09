@@ -1,7 +1,7 @@
 ---
 name: task-flow
-description: Take an already-refined idea to a PR — spec, plan, build, tests, harden, review — a fresh subagent per phase, with one planned stop at the approval gate. Put `auto` in front of the description to run unattended and read every decision in the PR instead. Only when the user types /task-flow; never on your own initiative.
-argument-hint: [auto] [the refined idea, in your own words, or leave empty to resume]
+description: Take an already-refined idea to a PR — spec, plan, build, tests, harden, review — a fresh subagent per phase, with planned stops at the approval gate and before security-harden/review. Put `auto` in front of the description to run unattended and read every decision in the PR instead. `review <PR number>` runs security-harden and review against an already-open PR instead. Only when the user types /task-flow; never on your own initiative.
+argument-hint: [auto] [the refined idea, in your own words, or leave empty to resume] | review <PR number>
 ---
 
 # task-flow — one refined idea, one command, one invocation
@@ -144,6 +144,22 @@ mode; description: …"*. A description that genuinely begins with the word "aut
 would be swallowed by this rule, and that one line lets the user correct it before
 the run has written anything.
 
+**`review <PR number>` is a third mode, detected the same way.** The mode is
+`review` when the **first whitespace-separated token** of `$ARGUMENTS` is
+`review`, in any case, **and** a second token is present. That second token is
+the only thing this mode ever treats as a PR number, and it is validated before
+it is used for anything else: it must match `^[0-9]+$` in full. A second token
+that fails that match — missing, empty, non-numeric, or a value shaped like a
+flag (e.g. `--upload-pack=...`) — means this is **not** the `review` mode: fall
+through and read all of `$ARGUMENTS` as an ordinary attended description instead
+(§2), exactly as if the first token had never been `review`. Only after the
+match succeeds is the token used for anything — passed to `gh pr view`, `git
+checkout`, or any other command — it is never interpolated unvalidated. See §0c
+for what the `review` mode does once detected.
+
+Say in one line which PR number you read, the same way auto mode announces
+itself — *"review mode; PR: 123"*.
+
 Write `mode` into `state.json` — `"auto"` or `"attended"` — when you create or
 resume the run. It has to survive a compaction: afterwards you re-read
 `state.json`, not this conversation, and a run that silently reverts to attended
@@ -158,14 +174,19 @@ never because the run is long or because they are away.
 | §5 approval gate | `AskUserQuestion` (approval **and** performance, one call), then build | auto-approved: write `approvedBy: "auto (/task-flow auto)"` and `approvedAt` with Bash, put the plan summary in the log and the PR body, and build |
 | §3 decision ceiling | stop at 3 | no ceiling — keep counting, keep recording, never stop |
 | §4c performance | runs if the user said yes at the gate | do not run it; record the default as a ⚠️ decision |
+| §4c step 2 (security-harden + review ask) | `AskUserQuestion` | **not waived** — the same `AskUserQuestion` fires and blocks; see the note below |
 | §7.3 a minor or major bump | stop and ask | decide it, mark it ⚠️, and lead with it in the PR body |
 | §7.2 red tests | stop, do not commit | fix it — at most 3 attempts at the same failure — and if it is still red, open the PR **as a draft** with the real output in the body (§8c) |
 | §7.4 three decisions waiting | stop | never stops |
 | §3 a question the loop could not settle | counts toward the 3 | parks its task and carries on; stops when every task left is pending or depends on one |
 
-**`AskUserQuestion` is not used at all in an auto run.** There is nobody at the
-keyboard: a question asked in an auto run is a run that hangs until the user comes
-back, which is the one thing this mode exists to prevent.
+**`AskUserQuestion` is not used at all in an auto run, with one exception.**
+There is nobody at the keyboard: a question asked in an auto run is a run that
+hangs until the user comes back, which is the one thing this mode exists to
+prevent. **§4c step 2 is that exception**: the user chose, in advance, to trade
+"never stop" for a say in whether security-harden and review run before the PR
+or after it — so this one question is asked and the run waits, in auto exactly
+as in attended.
 
 ### What auto does not waive
 
@@ -174,8 +195,11 @@ back, which is the one thing this mode exists to prevent.
   run *stops*, not what it *starts from*. No idea artifact, no run: say so and
   stop.
 - **§4a — the security pass on every build task**, **§4b — positive and negative
-  tests**, **§4d — the review before the PR exists.** An unattended run is the one
-  that needs them most: the user is reading the PR, not watching the build.
+  tests.** An unattended run is the one that needs them most: the user is reading
+  the PR, not watching the build.
+- **§4c step 2 / §4d — the security-harden and review ask.** Not silently waived
+  in either direction: it runs or it skips only on the user's own answer, and that
+  answer is collected the same way in every mode (see above).
 - **§6 — every convention in it**, including never merging and never stating a
   number that was not measured.
 
@@ -190,6 +214,56 @@ work exactly as §3 describes. What changes is only *when* the user reads them: 
 the PR instead of mid-run. **That makes the log more important, not less** — it is
 the only record of a decision they never saw taken. Write it as you go, and write
 what you would have asked, not a tidied-up account of what you did.
+
+## 0c. `/task-flow review <PR number>` — harden and review an already-open PR
+
+**Implemented, and confirmed to need no code change outside SKILL.md.** The spec
+behind this section read the three scripts a run touches and found each already
+tolerant of exactly the shape this mode produces: `gate.js` only ever looks at
+`approvedBy`/`phase`/`status` to decide `hasApproval`/`isFinished`/`approvesNow`,
+never at `artifacts`, so it accepts this preset the same way it accepts `auto`'s,
+without requiring a plan; `render-run.js` and `metrics.js` both already degrade
+gracefully for a run with no `artifacts.idea`/`spec`/`plan` that starts at
+`phase: "tests"`. No change was needed to `gate.js`, `render-run.js`, or
+`metrics.js` for this mode to work.
+
+**What it is for.** §4c step 2 lets the user send a PR to review/UAT/prod without
+waiting for security-harden and review. This command is the "check later" half of
+that trade: point it at the PR that already exists — develop→UAT, UAT→prod, or a
+plain PR into develop — and it runs security-harden and review against that PR's
+current diff and pushes the fixes onto its branch.
+
+**Detection.** Same shape as `auto` (§0b): the first whitespace-separated token of
+`$ARGUMENTS` is `review` (any case), the second token is the PR number, and nothing
+after that is read as a description — this entry point names a PR, not an idea.
+Say in one line which PR you resolved, the same way auto mode announces itself.
+
+**What it does, in order:**
+
+1. Resolve the PR (its branch, base, and diff) with the project's own tooling
+   (e.g. `gh pr view <number>`) — never assume `gh` or a given remote name. The PR
+   number itself is already validated against `^[0-9]+$` by §0b's detection; do
+   not re-parse or re-validate `$ARGUMENTS` here.
+2. `slug = "pr-<number>"`. **A run already exists for that slug:** resume it, same
+   as §2's rule for any other slug. Otherwise create
+   `<stateDir>/<slug>/state.json` directly at `phase: "tests"` — meaning build and
+   tests are taken as already done, since they happened outside this run — with
+   `approvedBy`/`approvedAt` preset (e.g. `"pr-review (/task-flow review
+   <number>)"`), the same way auto presets them (§0b): there is no plan here for
+   §5's gate to approve.
+3. Check out the PR's branch, following §1c's existing rule about an already
+   checked-out branch — never isolate this into its own fresh `EnterWorktree`
+   worktree (see `HISTORY.md`, "Never isolate a run into its own `EnterWorktree`
+   checkout").
+4. Run §4c step 1 (simplify) if it has not already run against this exact diff,
+   then go straight to security-harden and §4d review — step 2's ask has nothing
+   left to ask, since typing this command already answered "later". Performance
+   (§4c step 3) is not offered here either: no gate ran to ask it, and this
+   command is scoped to security and review only.
+5. Push the resulting commits onto the PR's branch. **This command only adds
+   commits and a review report** (`.claude/reviews/<slug>-review.md`) — it never
+   merges, never changes the PR's base or title, and never approves it.
+6. Render the run page as usual (§8).
 
 ## 1. Delegate the method, own the state
 
@@ -405,6 +479,13 @@ spec without one. The one exception is the user's own explicit instruction, in t
 conversation, to proceed from the description alone; then record it as a ⚠️→asked
 entry and carry on. **Typing `auto` is not that instruction** (§0b): it waives the
 stops, not the input. An auto run with no idea artifact stops here like any other.
+
+**Exception: `slug = "pr-<number>"`.** A `review` mode run (§0b, §0c) does not
+derive its slug from a description and this idea-artifact requirement does not
+apply to it — its entry condition is the PR resolved in §0c step 1, not a file
+under `ideas/`. This exception is narrow: it matches only that exact slug shape,
+produced only by `review` mode detection in §0b; every other slug, including one
+that merely starts with "pr", still requires the idea artifact above.
 
 Create `<stateDir>/<slug>/state.json` with `phase: "idea"`, `approvedBy: ""`,
 `pendingDecisions: 0`, `mode` (§0b), `created` (today, `yyyy-MM-dd`), `startedAt`
@@ -834,32 +915,43 @@ its security tests or a written "no security-relevant surface" verdict in the
 log** — a task with neither is a gap you report, not one you quietly fill in
 yourself here.
 
-### 4c. The `harden` phase — simplify, harden, and performance if the user said yes
+### 4c. The `harden` phase — simplify always, then ask before hardening and review
 
-Up to three steps, in this order, each its own fresh subagent, each committed
-separately so the diff stays readable:
+Up to three steps, each its own fresh subagent, each committed separately so the
+diff stays readable:
 
-1. **`agent-skills:code-simplification`** — always. Behaviour must not change; if
-   simplifying wants to change behaviour, that is a finding for the review, not an
-   edit. Re-run the tests after.
-2. **`agent-skills:security-and-hardening`** — always. Same rule: tests green after.
-3. **Performance — only on the answer the user gave at the gate** (§5). It is not
-   asked here: it was asked with the approval, so the run has no stop between the
-   gate and the PR. On yes, spawn `agent-skills:web-performance-auditor` when the
-   target is a web front end, otherwise `general-purpose` with
-   `agent-skills:performance-optimization`. On no, write that they declined into
-   the log and move to `review` — it is not a banked decision, they answered it.
+1. **`agent-skills:code-simplification`** — always, no ask. Behaviour must not
+   change; if simplifying wants to change behaviour, that is a finding for the
+   review, not an edit. Re-run the tests after.
+2. **Ask before security-harden and review.** Once simplify lands, ask with
+   `AskUserQuestion`: run `agent-skills:security-and-hardening` plus the §4d review
+   pass now, or skip straight to the PR and check later with `/task-flow review <PR
+   number>` (§0c). **This question is asked even in an auto run** — the one
+   exception to "`AskUserQuestion` is not used at all in an auto run" (§0b, and see
+   the note there): the user is trading an unattended answer for speed-to-PR on
+   this one question, so the run waits for them instead of guessing.
+   - **Yes:** run `agent-skills:security-and-hardening` (tests green after), then
+     go to §4d.
+   - **No:** record it in the log (marker ⚠️→perguntado — they answered when
+     asked, this is not a would-have-asked decision), skip §4d entirely, and go
+     straight to opening the PR (§7). The PR body says the harden and review
+     passes were skipped and that `/task-flow review <PR number>` runs them later.
+3. **Performance — only on the answer the user gave at the gate** (§5), and only
+   when step 2 was a yes. It is not asked here: it was asked with the approval. On
+   yes, spawn `agent-skills:web-performance-auditor` when the target is a web front
+   end, otherwise `general-purpose` with `agent-skills:performance-optimization`.
+   On no, write that they declined into the log and move to `review`.
 
-   **In an auto run it does not run** (§0b). Write into the log, as a ⚠️ decision,
-   that performance was skipped, what you would have looked at, and roughly what it
-   would have cost — so the PR hands the user the choice this step would have. Where
-   performance is the actual point of the change, that is the ⚠️ entry to lead
-   with.
+   **In an auto run it still does not run** (§0b) — only step 2's ask overrides the
+   no-`AskUserQuestion`-in-auto rule; this step does not. Write into the log, as a
+   ⚠️ decision, that performance was skipped, what you would have looked at, and
+   roughly what it would have cost.
 
-If any of the three turns a test red, that is §7.2: stop, do not commit.
+If any step turns a test red, that is §7.2: stop, do not commit.
 
 When the phase closes, if the hardening step reported a number of findings, write it
-as `health.hardenFindings` (§8). It is optional: no number reported, no field.
+as `health.hardenFindings` (§8). It is optional: no number reported, no field —
+including when step 2 was a no.
 
 ### 4d. The `review` phase — split by area, evidence or it is not blocking
 

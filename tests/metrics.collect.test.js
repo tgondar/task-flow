@@ -297,6 +297,18 @@ writeRun(baseState(), QUESTIONS()); // renderAll may have archived nothing in st
   check('collect writes nothing: no metrics.jsonl appears', !fs.existsSync(path.join(STATE, 'metrics.jsonl')));
 }
 
+// --- 11b. T4: a different run (slug pr-999), no artifacts.plan, done -----------------------------------------------
+{
+  const prSlug = 'pr-999';
+  fs.rmSync(path.join(STATE, prSlug), { recursive: true, force: true });
+  put(path.join(STATE, prSlug, 'state.json'), baseState({ task: prSlug, artifacts: {} }));
+  const r = collect({ projectDir: PROJECT, config: CONFIG, slug: prSlug, now: () => NOW });
+  check('pr-999 without artifacts.plan: collect succeeds without throwing', r.ok === true, JSON.stringify(r).slice(0, 200));
+  check('pr-999 without artifacts.plan: tasks block is null', r.ok && r.row.tasks === null);
+  check('pr-999 without artifacts.plan: the row still validates', r.ok && validateRow(r.row).ok === true);
+  fs.rmSync(path.join(STATE, prSlug), { recursive: true, force: true });
+}
+
 // --- 11. by construction ----------------------------------------------------------------------------------------------------
 {
   const src = fs.readFileSync(path.resolve(__dirname, '../plugin/scripts/metrics.js'), 'utf8');
