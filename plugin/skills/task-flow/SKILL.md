@@ -1058,6 +1058,40 @@ blocks you somewhere else, ask — do not route around it.
 - **Artifacts to the docs folder**, never to the repository: date prefix `yyMMdd_`,
   frontmatter `type`/`created`, a `_log.md` beside the artifact, and a line added to
   that folder's `index.md` when it has one. Written in `language`.
+- **Spec body: spec-kit's template, not the skill's own.**
+  `agent-skills:spec-driven-development` explicitly lets a project supply its own
+  artifact format ("External spec tools") — this is this project's. Put this in the
+  spec brief at spawn (§1b), replacing the skill's six-area template:
+
+  ```markdown
+  ## User Scenarios & Testing
+  ### User Story 1 - <title> (Priority: P1)
+  <journey, in plain language>
+  **Why this priority**: …
+  **Independent Test**: can ship and be verified alone
+  **Acceptance Scenarios**: Given …, When …, Then …
+  (repeat per story, P1 = most critical, each independently shippable)
+  ### Edge Cases
+  - What happens when …?
+
+  ## Requirements
+  ### Functional Requirements
+  - **FR-001**: System MUST …
+  - **FR-002**: System MUST … [NEEDS CLARIFICATION: …]
+  ### Key Entities
+  - **<Entity>**: what it represents, no implementation detail
+
+  ## Success Criteria
+  - **SC-001**: measurable, technology-agnostic outcome
+
+  ## Assumptions
+  - reasonable defaults chosen where the idea didn't specify
+  ```
+
+  Every `[NEEDS CLARIFICATION: …]` is a question for **this command's own loop
+  (§3)** — spawn no `/clarify` step and no second clarification pass; the spec
+  agent lists them, they go straight into `questions.json` like any other spec-phase
+  question.
 - **Questions and banked decisions to `<stateDir>/<slug>/questions.json`** (§3) —
   one file per run, items only ever added; the renderer makes the page
   `questions/yyMMdd_<slug>_questions.md` in the docs folder from it, and files it

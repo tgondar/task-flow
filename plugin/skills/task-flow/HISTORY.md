@@ -125,6 +125,22 @@ Every rule below comes from something that went wrong, or nearly did, in them.
 - **A message mid-run is folded in, not a restart**; the plan carries its own
   checklist and a discovered-tasks section; every brief says answered decisions are
   settled; every subagent reports what it could not confirm.
+- **The spec body follows GitHub spec-kit's template, not
+  `agent-skills:spec-driven-development`'s own.** The skill's default template
+  (objective/tech stack/commands/project structure/code style/testing
+  strategy/boundaries) answers questions this repository already answers once in
+  `CLAUDE.md` and `.claude/task-flow.json` — repeating them per spec was waste.
+  spec-kit's shape (prioritized, independently-testable user stories with
+  Given/When/Then acceptance scenarios, numbered functional requirements with
+  `[NEEDS CLARIFICATION: …]` markers, edge cases, measurable success criteria)
+  is aimed at the part that actually varies per task. The skill's own "External
+  spec tools" clause exists precisely so a project can swap in a format like this
+  without forking the skill — so the template moved into the spec brief (§6), not
+  into a vendored copy of the skill, keeping §1's "never a copy of the same skill
+  that happens to sit in a repository" rule intact. `NEEDS CLARIFICATION` markers
+  feed this command's own question loop (§3); spec-kit's separate `/clarify` step
+  was deliberately not adopted, to avoid a second, competing clarification
+  mechanism.
 
 ## The run page
 
