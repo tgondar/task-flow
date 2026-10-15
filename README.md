@@ -193,8 +193,9 @@ plugin/
   scripts/render-run.js           the run page, the questions page and the viewer's feed
   scripts/questions.js            questions.json: validation and the generated page
   scripts/answers.js              takes the viewer's answers into a run
-  viewer/                          the local viewer (a static page, no server); code
-                                  from FluidPlan, see viewer/NOTICE.md
+  viewer/                          the local viewer (a static page, no server), its own
+                                  code throughout; see viewer/THIRD_PARTY.md for the
+                                  vendored Lucide icons and Geist fonts
 shim/task-flow.md                 the /task-flow forwarder install.ps1 deploys
 scripts/enable-autoupdate.js      install.ps1's settings.json step
 tests/                            unit tests (node) and end-to-end probes (claude -p)
@@ -223,8 +224,9 @@ claude plugin validate .
 
 - [agent-skills](https://github.com/addyosmani/agent-skills) by Addy Osmani — the
   skills and personas task-flow delegates the method to.
-- [FluidPlan](https://github.com/morganhub/fluidplan) by morganhub — the viewer
-  started from its components, styles and fonts (MIT; see `plugin/viewer/NOTICE.md`).
+- The viewer's design follows [shadcn/ui](https://ui.shadcn.com)'s public component
+  spec and colour tokens; see `plugin/viewer/THIRD_PARTY.md` for the vendored Lucide
+  icons (ISC) and Geist fonts (OFL) it bundles.
 
 ## License
 

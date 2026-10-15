@@ -458,3 +458,30 @@ own recent runs.
   closed names only, and is written after the PR is open, so it never enters the PR
   of the run it measures. `metrics.js` never edits a `.gitignore` or runs `git add`;
   SKILL.md tells the user they may ignore the file.
+
+## The viewer's components, CSS and icon vendoring, decoupled from FluidPlan (2026-10-15)
+
+- **`js/dom.js`, `i18n.js`, `icons.js`'s wrapper functions, `ui.js`, `css/tokens.css`,
+  `base.css`, `components.css`, `fonts.css`, and `tests/support/browser.mjs`** were
+  originally brought in from FluidPlan (via the task-flow panel this viewer replaced,
+  see "Questions as data, and the viewer" above), under its MIT license, with the
+  licence and file list recorded in `plugin/viewer/NOTICE.md`.
+- **All eight were rewritten from scratch**, at the maintainer's request: same CSS
+  class names, same `window.TFV` function names and call shapes (so nothing else in
+  the viewer needed to change), different internal code. `NOTICE.md` is gone because
+  there is nothing left in this folder that it would need to cover.
+- **The Lucide icon data in `icons.js` was kept as is** — it was always Lucide's own
+  SVG paths (ISC licence, independently documented in `THIRD_PARTY.md`), vendored by
+  way of FluidPlan's copy rather than owed to FluidPlan itself. Same for the Geist
+  fonts (SIL OFL): `fonts.css` only declares `@font-face` rules over files licensed
+  separately.
+- **`tokens.css`'s base colours are shadcn/ui's own published registry**
+  (`ui.shadcn.com/r/colors/neutral.json`), not FluidPlan's invention either — kept
+  as is, re-sourced from the public spec. What actually needed an independent choice:
+  `--success`/`--warning`/`--info` (now Tailwind's own green-600/amber-600/blue-600,
+  the same reasoning FluidPlan used, arrived at independently rather than copied) and
+  the five chart colours (now the Okabe-Ito colour-blind-safe set, a well-known public
+  palette, replacing FluidPlan's own validated-but-unpublished picks).
+- **Why bother, given MIT only asks for a kept notice.** The maintainer judged the
+  dependency not worth carrying once the viewer had its own identity; this was his
+  call to make, not a compliance problem being worked around.

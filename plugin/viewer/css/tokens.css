@@ -1,11 +1,16 @@
-/* shadcn/ui tokens (Tailwind v4, "neutral" base), taken as is from the registry
-   https://ui.shadcn.com/r/colors/neutral.json (cssVarsV4). The only file where colors are written:
-   everything else goes through these variables.
-   fluidplan's own additions, not in shadcn: --success, --warning, --info (Tailwind green / amber /
-   blue palette).
-   Charts: --chart-1..5 do not reuse shadcn's, which fail the color-blindness and contrast checks;
-   a categorical palette validated (lightness band, chroma, CVD separation ≥ 8, contrast) on these
-   surfaces, in light and dark. Fixed order: series 1, then 2… never recycled. */
+/* Design tokens (Tailwind v4 "neutral" base), read from shadcn/ui's own public registry
+   (https://ui.shadcn.com/r/colors/neutral.json, cssVarsV4) - these oklch values are shadcn's
+   published spec, not anyone's invention. The only file where colours are written: everything
+   else goes through these variables.
+
+   --success/--warning/--info are not part of that registry: Tailwind's own green-600 /
+   amber-600 / blue-600 (https://tailwindcss.com/docs/colors), picked because they read as text
+   on a light background and have a documented dark counterpart.
+
+   Charts: --chart-1..5 use the Okabe-Ito colour-blind-safe set
+   (https://jfly.uni-koeln.de/color/, a widely cited, public palette designed for CVD
+   separation), minus black and yellow (poor contrast on a light card). Fixed order: series 1,
+   then 2... never recycled. */
 
 :root {
   color-scheme: light;
@@ -38,13 +43,12 @@
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
 
-  --chart-1: #2a78d6;
-  --chart-2: #eb6834;
-  --chart-3: #1baf7a;
-  --chart-4: #eda100;
-  --chart-5: #e87ba4;
+  --chart-1: #0072b2;
+  --chart-2: #d55e00;
+  --chart-3: #009e73;
+  --chart-4: #e69f00;
+  --chart-5: #cc79a7;
 
-  /* green-600 / amber-600 / blue-600: readable as text on a light background. */
   --success: oklch(0.627 0.194 149.214);
   --success-foreground: oklch(0.985 0 0);
   --warning: oklch(0.666 0.179 58.318);
@@ -89,12 +93,11 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
-  --chart-1: #3987e5;
-  --chart-2: #d95926;
-  --chart-3: #199e70;
-  --chart-4: #c98500;
-  --chart-5: #d55181;
-  /* green-500 / amber-400 / blue-400: enough contrast on a dark background. */
+  --chart-1: #5aa9db;
+  --chart-2: #ea8a4b;
+  --chart-3: #3fc79e;
+  --chart-4: #f0b84a;
+  --chart-5: #daa0c2;
   --success: oklch(0.723 0.219 149.579);
   --success-foreground: oklch(0.145 0 0);
   --warning: oklch(0.828 0.189 84.429);
@@ -137,11 +140,11 @@
     --sidebar-accent-foreground: oklch(0.985 0 0);
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.556 0 0);
-    --chart-1: #3987e5;
-    --chart-2: #d95926;
-    --chart-3: #199e70;
-    --chart-4: #c98500;
-    --chart-5: #d55181;
+    --chart-1: #5aa9db;
+    --chart-2: #ea8a4b;
+    --chart-3: #3fc79e;
+    --chart-4: #f0b84a;
+    --chart-5: #daa0c2;
     --success: oklch(0.723 0.219 149.579);
     --success-foreground: oklch(0.145 0 0);
     --warning: oklch(0.828 0.189 84.429);
@@ -155,7 +158,7 @@
   }
 }
 
-/* Primary color: shadcn presets (https://ui.shadcn.com/r/themes.css). Only --primary,
+/* Primary colour: shadcn's own presets (https://ui.shadcn.com/r/themes.css). Only --primary,
    --primary-foreground and --ring change; the rest of the theme stays neutral. */
 :root[data-accent="blue"] { --primary: hsl(221.2 83.2% 53.3%); --primary-foreground: hsl(210 40% 98%); --ring: hsl(221.2 83.2% 53.3%); }
 :root[data-accent="green"] { --primary: hsl(142.1 76.2% 36.3%); --primary-foreground: hsl(355.7 100% 97.3%); --ring: hsl(142.1 76.2% 36.3%); }

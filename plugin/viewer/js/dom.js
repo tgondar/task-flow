@@ -1,6 +1,7 @@
-// Tiny DOM builder: h("div", { class: "x", onclick: fn }, child, "text"…). Text always goes through
-// text nodes. From FluidPlan (see NOTICE.md), minus its `html` attribute: every text the viewer
-// shows comes from a feed a repository fed, and there is no way left here to turn one into markup.
+// Minimal DOM builder: h("div", { class: "x", onclick: fn }, child, "text"...) creates an element,
+// sets its attributes/listeners, and appends its children. Text arguments always become text
+// nodes - there is no "html" escape hatch, because every string this viewer ever shows comes from
+// a feed a repository fed, and nothing here should be able to turn one into markup.
 //
 // A plain script, not `type="module"`: Chrome and Edge refuse to load ES modules
 // at all over file:// ("Cross origin requests are only supported for protocol
@@ -13,45 +14,53 @@
 // files naming the same local (both calling a parameter `h`, say) would collide.
 window.TFV = window.TFV || {};
 (function () {
-  function h(tag, attrs = {}, ...children) {
-    const el = document.createElement(tag);
-    applyAttrs(el, attrs, false);
-    append(el, children);
-    return el;
-  }
+  const SVG_NS = "http://www.w3.org/2000/svg";
 
-  function svg(tag, attrs = {}, ...children) {
-    const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
-    applyAttrs(el, attrs, true);
-    append(el, children);
-    return el;
-  }
-
-  function applyAttrs(el, attrs, isSvg) {
-    for (const [key, value] of Object.entries(attrs ?? {})) {
-      if (value === undefined || value === null || value === false) continue;
-      if (key === "class") {
-        if (isSvg) el.setAttribute("class", value);
-        else el.className = value;
-      } else if (key === "dataset") {
-        Object.assign(el.dataset, value);
-      } else if (key === "style" && typeof value === "object") {
-        for (const [prop, v] of Object.entries(value)) el.style.setProperty(prop, v);
-      } else if (key.startsWith("on") && typeof value === "function") {
-        el.addEventListener(key.slice(2), value);
-      } else if (value === true) {
-        el.setAttribute(key, "");
-      } else {
-        el.setAttribute(key, String(value));
-      }
+  function setAttr(el, key, value, svgMode) {
+    if (value === undefined || value === null || value === false) return;
+    if (key === "class") {
+      if (svgMode) el.setAttribute("class", value);
+      else el.className = value;
+      return;
     }
+    if (key === "dataset") {
+      for (const [dataKey, dataValue] of Object.entries(value)) el.dataset[dataKey] = dataValue;
+      return;
+    }
+    if (key === "style" && value && typeof value === "object") {
+      for (const [prop, propValue] of Object.entries(value)) el.style.setProperty(prop, propValue);
+      return;
+    }
+    if (key.length > 2 && key.startsWith("on") && typeof value === "function") {
+      el.addEventListener(key.slice(2), value);
+      return;
+    }
+    if (value === true) {
+      el.setAttribute(key, "");
+      return;
+    }
+    el.setAttribute(key, String(value));
   }
 
-  function append(el, children) {
+  function appendChildren(el, children) {
     for (const child of children.flat(Infinity)) {
       if (child === null || child === undefined || child === false) continue;
       el.append(child instanceof Node ? child : document.createTextNode(String(child)));
     }
+  }
+
+  function build(el, attrs, children, svgMode) {
+    for (const key of Object.keys(attrs || {})) setAttr(el, key, attrs[key], svgMode);
+    appendChildren(el, children);
+    return el;
+  }
+
+  function h(tag, attrs, ...children) {
+    return build(document.createElement(tag), attrs || {}, children, false);
+  }
+
+  function svg(tag, attrs, ...children) {
+    return build(document.createElementNS(SVG_NS, tag), attrs || {}, children, true);
   }
 
   Object.assign(window.TFV, { h, svg });

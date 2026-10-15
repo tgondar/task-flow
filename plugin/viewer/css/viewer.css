@@ -1,6 +1,5 @@
 /* The panel's own layout. Colours, radii and components come from tokens.css,
-   base.css and components.css (FluidPlan, see NOTICE.md); nothing here defines a
-   colour of its own. */
+   base.css and components.css; nothing here defines a colour of its own. */
 
 .panel {
   max-width: 60rem;

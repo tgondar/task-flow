@@ -291,8 +291,7 @@ function hasNewAnswers({ projectDir, slug }) {
  * answers are checked and taken in.
  *
  * Resolves 0 when there is something to consume, 3 when `timeoutMs` ran out.
- * Checks every `intervalMs`, as FluidPlan's wait does (fs.watch is unreliable on
- * Windows).
+ * Checks every `intervalMs` (fs.watch is unreliable on Windows).
  */
 async function wait({ projectDir, slug, timeoutMs = Infinity, intervalMs = 2000 }) {
   const started = Date.now();

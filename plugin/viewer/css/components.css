@@ -1,5 +1,5 @@
-/* shadcn/ui components recreated in CSS, same names and same variants as the React library:
-   https://ui.shadcn.com/docs/components. The functions in js/ui.js set these classes. */
+/* shadcn/ui components (https://ui.shadcn.com/docs/components) reimplemented in plain CSS,
+   same class names and variants as the React library, set by the functions in js/ui.js. */
 
 /* --- Button ----------------------------------------------------------------------------------- */
 .btn {
@@ -332,7 +332,7 @@ input[type="radio"]:focus-visible, input[type="checkbox"]:focus-visible { border
 .table tbody tr:hover { background: color-mix(in oklab, var(--muted) 50%, transparent); }
 .table caption { margin-top: 1rem; color: var(--muted-foreground); font-size: 0.8125rem; }
 
-/* --- Kbd, separator, skeleton, avatar-like medal -------------------------------------------------- */
+/* --- Kbd, separator, skeleton -------------------------------------------------------------------- */
 .kbd {
   display: inline-flex; align-items: center; justify-content: center; gap: 0.25rem;
   height: 1.25rem; min-width: 1.25rem; padding: 0 0.25rem; border-radius: var(--radius-sm);
