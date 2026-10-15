@@ -1,4 +1,4 @@
-/* Base: derived radii, typography, focus ring — the shadcn/ui conventions. */
+/* Base layer: derived radii, typography scale and the focus ring, on top of tokens.css. */
 
 :root {
   --radius-sm: calc(var(--radius) - 4px);

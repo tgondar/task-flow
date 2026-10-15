@@ -1,151 +1,180 @@
-// shadcn/ui components as functions: each returns DOM with the classes from css/components.css.
-// Same names and same variants as the React library, so anyone used to it feels at home.
+// shadcn/ui components (https://ui.shadcn.com/docs/components), reimplemented as plain
+// functions returning DOM nodes instead of React - same names and variants as the React
+// library, so anyone used to it feels at home. The classes they set are defined in
+// css/components.css.
 window.TFV = window.TFV || {};
 (function () {
 const { h, icon } = window.TFV;
 
-const cx = (...parts) => parts.filter(Boolean).join(" ");
+const classes = (...parts) => parts.filter(Boolean).join(" ");
 
-function button({ label, icon: name, iconRight, variant = "default", size, title, onclick, type = "button", disabled, className, attrs = {} } = {}) {
-  const cls = cx("btn", variant !== "default" && `btn-${variant}`, size && `btn-${size}`, !label && name && "btn-icon", className);
-  return h("button", { type, class: cls, title, "aria-label": label ? undefined : title, disabled, onclick, ...attrs },
-    name ? icon(name) : null,
+function button(opts = {}) {
+  const { label, icon: iconName, iconRight, variant = "default", size, title, onclick, type = "button", disabled, className, attrs = {} } = opts;
+  const cls = classes("btn", variant !== "default" && `btn-${variant}`, size && `btn-${size}`, !label && iconName && "btn-icon", className);
+  const children = [
+    iconName ? icon(iconName) : null,
     label ? h("span", {}, label) : null,
-    iconRight ? icon(iconRight) : null);
+    iconRight ? icon(iconRight) : null,
+  ];
+  return h("button", { type, class: cls, title, "aria-label": label ? undefined : title, disabled, onclick, ...attrs }, ...children);
 }
 
-function badge(text, { variant = "secondary", icon: name, title, className } = {}) {
-  return h("span", { class: cx("badge", `badge-${variant}`, className), title }, name ? icon(name) : null, text);
+function badge(text, opts = {}) {
+  const { variant = "secondary", icon: iconName, title, className } = opts;
+  return h("span", { class: classes("badge", `badge-${variant}`, className), title }, iconName ? icon(iconName) : null, text);
 }
 
-function alert({ variant = "default", icon: name = "info", title, description, actions, className } = {}) {
+function alert(opts = {}) {
+  const { variant = "default", icon: iconName = "info", title, description, actions, className } = opts;
   const role = variant === "destructive" ? "alert" : "status";
-  return h("div", { class: cx("alert", variant !== "default" && `alert-${variant}`, className), role },
-    icon(name),
+  return h("div", { class: classes("alert", variant !== "default" && `alert-${variant}`, className), role },
+    icon(iconName),
     title ? h("div", { class: "alert-title" }, title) : null,
     description ? h("div", { class: "alert-description" }, description) : null,
-    actions?.length ? h("div", { class: "alert-actions" }, actions) : null);
+    actions && actions.length ? h("div", { class: "alert-actions" }, actions) : null);
 }
 
-function card({ id, className, header, content, footer, attrs = {} } = {}) {
-  return h("section", { id, class: cx("card", className), ...attrs },
+function card(opts = {}) {
+  const { id, className, header, content, footer, attrs = {} } = opts;
+  return h("section", { id, class: classes("card", className), ...attrs },
     header ? h("header", { class: "card-header" }, header) : null,
     content ? h("div", { class: "card-content" }, content) : null,
     footer ? h("footer", { class: "card-footer" }, footer) : null);
 }
 
-// Accessible tabs (left / right arrows). Panels are rendered once; `update` refreshes them if the
-// caller needs it.
-function tabs({ items, value, onChange, ariaLabel, className } = {}) {
+// Accessible tabs following the WAI-ARIA tabs pattern (left/right/Home/End move focus and
+// selection together). Each panel renders once and is cached; switching tabs just swaps it in.
+function tabs(opts = {}) {
+  const { items, value, onChange, ariaLabel, className } = opts;
+  const triggerOf = new Map();
+  const panelCache = new Map();
+  let activeId = value ?? items[0]?.id;
+
   const list = h("div", { class: "tabs-list", role: "tablist", "aria-label": ariaLabel });
-  const panels = h("div", {});
-  const triggers = new Map();
-  const cache = new Map();
-  let current = value ?? items[0]?.id;
   for (const item of items) {
-    const trigger = h("button", { type: "button", class: "tabs-trigger", role: "tab", id: `tab-${item.id}`, "aria-selected": "false", tabindex: "-1", onclick: () => select(item.id, true) },
-      item.icon ? icon(item.icon) : null, h("span", {}, item.label), item.count !== undefined ? h("span", { class: "count" }, String(item.count)) : null);
-    triggers.set(item.id, trigger);
+    const trigger = h("button", {
+      type: "button", class: "tabs-trigger", role: "tab", id: `tab-${item.id}`,
+      "aria-selected": "false", tabindex: "-1",
+      onclick: () => activate(item.id, true),
+    }, item.icon ? icon(item.icon) : null, h("span", {}, item.label), item.count !== undefined ? h("span", { class: "count" }, String(item.count)) : null);
+    triggerOf.set(item.id, trigger);
     list.append(trigger);
   }
-  list.addEventListener("keydown", (event) => {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    event.preventDefault();
-    const ids = items.map((i) => i.id);
-    let index = ids.indexOf(current);
-    if (event.key === "ArrowLeft") index = (index - 1 + ids.length) % ids.length;
-    if (event.key === "ArrowRight") index = (index + 1) % ids.length;
-    if (event.key === "Home") index = 0;
-    if (event.key === "End") index = ids.length - 1;
-    select(ids[index], true);
-    triggers.get(ids[index]).focus();
-  });
-  function select(id, fromUser = false) {
-    current = id;
-    for (const [key, trigger] of triggers) {
-      const on = key === id;
-      trigger.setAttribute("aria-selected", String(on));
-      trigger.tabIndex = on ? 0 : -1;
-    }
-    const item = items.find((i) => i.id === id);
-    if (item?.render) {
-      if (!cache.has(id)) cache.set(id, h("div", { role: "tabpanel", "aria-labelledby": `tab-${id}` }, item.render()));
-      panels.replaceChildren(cache.get(id));
-    }
-    if (fromUser) onChange?.(id);
+
+  const panels = h("div", {});
+  const hasPanels = items.some((item) => item.render);
+
+  function moveFocus(direction) {
+    const order = items.map((item) => item.id);
+    const from = order.indexOf(activeId);
+    const steps = { left: -1, right: 1, home: -from, end: order.length - 1 - from };
+    const to = (from + steps[direction] + order.length) % order.length;
+    activate(order[to], true);
+    triggerOf.get(order[to]).focus();
   }
-  select(current);
-  const el = h("div", { class: cx("tabs", className) }, list, items.some((i) => i.render) ? panels : null);
+  list.addEventListener("keydown", (event) => {
+    const key = { ArrowLeft: "left", ArrowRight: "right", Home: "home", End: "end" }[event.key];
+    if (!key) return;
+    event.preventDefault();
+    moveFocus(key);
+  });
+
+  function activate(id, byUser) {
+    activeId = id;
+    for (const [itemId, trigger] of triggerOf) {
+      const selected = itemId === id;
+      trigger.setAttribute("aria-selected", String(selected));
+      trigger.tabIndex = selected ? 0 : -1;
+    }
+    const item = items.find((entry) => entry.id === id);
+    if (item && item.render) {
+      if (!panelCache.has(id)) panelCache.set(id, h("div", { role: "tabpanel", "aria-labelledby": `tab-${id}` }, item.render()));
+      panels.replaceChildren(panelCache.get(id));
+    }
+    if (byUser && onChange) onChange(id);
+  }
+  activate(activeId);
+
+  const el = h("div", { class: classes("tabs", className) }, list, hasPanels ? panels : null);
   return {
     el,
-    select,
+    select: activate,
     get value() {
-      return current;
+      return activeId;
     },
     setCount(id, count) {
-      const target = triggers.get(id)?.querySelector(".count");
+      const target = triggerOf.get(id)?.querySelector(".count");
       if (target) target.textContent = String(count);
     },
   };
 }
 
-// Group of exclusive toggles; pressing again clears the value (null).
-function toggleGroup({ items, get, onSelect, ariaLabel, compact = false, labels = true } = {}) {
-  const buttons = new Map();
-  const el = h("div", { class: cx("toggle-group", compact && "compact"), role: "group", "aria-label": ariaLabel });
+// A row of exclusive toggle buttons; clicking the active one clears the selection (null).
+function toggleGroup(opts = {}) {
+  const { items, get, onSelect, ariaLabel, compact = false, labels = true } = opts;
+  const buttonOf = new Map();
+  const el = h("div", { class: classes("toggle-group", compact && "compact"), role: "group", "aria-label": ariaLabel });
+
   for (const item of items) {
-    const b = h("button", {
+    const btn = h("button", {
       type: "button",
-      class: cx("toggle", item.tone && `tone-${item.tone}`),
+      class: classes("toggle", item.tone && `tone-${item.tone}`),
       "aria-pressed": "false",
       title: item.title ?? item.label,
       "aria-label": labels ? undefined : item.label,
       onclick: () => onSelect(get() === item.value ? null : item.value),
     }, item.icon ? icon(item.icon) : null, labels ? h("span", { class: "toggle-label" }, item.label) : null);
-    buttons.set(item.value, b);
-    el.append(b);
+    buttonOf.set(item.value, btn);
+    el.append(btn);
   }
+
   el.addEventListener("keydown", (event) => {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-    const list = [...buttons.values()];
-    const index = list.indexOf(document.activeElement);
-    if (index < 0) return;
+    const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+    if (!step) return;
+    const order = [...buttonOf.values()];
+    const from = order.indexOf(document.activeElement);
+    if (from < 0) return;
     event.preventDefault();
-    list[(index + (event.key === "ArrowRight" ? 1 : list.length - 1)) % list.length].focus();
+    order[(from + step + order.length) % order.length].focus();
   });
-  function update() {
-    const value = get();
-    for (const [key, b] of buttons) b.setAttribute("aria-pressed", String(key === value));
+
+  function refresh() {
+    const current = get();
+    for (const [value, btn] of buttonOf) btn.setAttribute("aria-pressed", String(value === current));
   }
-  update();
+  refresh();
+
   return {
     el,
-    update,
+    update: refresh,
     setDisabled(disabled) {
-      for (const b of buttons.values()) b.disabled = disabled;
+      for (const btn of buttonOf.values()) btn.disabled = disabled;
     },
   };
 }
 
-function selectBox({ options, value, onChange, ariaLabel, placeholder }) {
+function selectBox(opts) {
+  const { options, value, onChange, ariaLabel, placeholder } = opts;
   const select = h("select", { class: "select", "aria-label": ariaLabel, onchange: () => onChange(select.value) },
     placeholder ? h("option", { value: "" }, placeholder) : null,
-    options.map((o) => h("option", { value: o.value }, o.label)));
+    options.map((option) => h("option", { value: option.value }, option.label)));
   select.value = value ?? "";
   return { el: h("span", { class: "select-wrap" }, select, icon("chevrons-up-down")), select };
 }
 
-function progress(segments) {
-  const total = segments.reduce((sum, s) => sum + s.value, 0) || 1;
+function progress(initialSegments) {
+  const baseline = initialSegments.reduce((sum, segment) => sum + segment.value, 0) || 1;
   const el = h("div", { class: "progress", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100" });
-  const update = (list) => {
-    const sum = list.reduce((n, s) => n + s.value, 0);
-    const all = list.reduce((n, s) => n + (s.total ?? 0), 0) || total;
-    el.replaceChildren(...list.filter((s) => s.tone).map((s) => h("span", { class: `seg-${s.tone}`, style: { width: `${(s.value / all) * 100}%` } })));
-    el.setAttribute("aria-valuenow", String(Math.round((sum / all) * 100)));
-  };
-  update(segments);
-  return { el, update };
+  function refresh(segments) {
+    const filled = segments.reduce((sum, segment) => sum + segment.value, 0);
+    const outOf = segments.reduce((sum, segment) => sum + (segment.total ?? 0), 0) || baseline;
+    const bars = segments.filter((segment) => segment.tone)
+      .map((segment) => h("span", { class: `seg-${segment.tone}`, style: { width: `${(segment.value / outOf) * 100}%` } }));
+    el.replaceChildren(...bars);
+    el.setAttribute("aria-valuenow", String(Math.round((filled / outOf) * 100)));
+  }
+  refresh(initialSegments);
+  return { el, update: refresh };
 }
 
 function kbd(text) {
@@ -153,21 +182,24 @@ function kbd(text) {
 }
 
 function separator(vertical = false) {
-  return h("div", { class: cx("separator", vertical && "vertical"), role: "separator" });
+  return h("div", { class: classes("separator", vertical && "vertical"), role: "separator" });
 }
 
-// --- Dialog and sheet: native <dialog>, which handles focus and the Escape key ----------------------
+// --- Dialog and sheet: the native <dialog> element, which already handles focus and Escape ---
 
-function dialog({ title, description, content, actions, closeLabel = "Close", onClose } = {}) {
+function dialog(opts = {}) {
+  const { title, description, content, actions, closeLabel = "Close", onClose } = opts;
   const el = h("dialog", { class: "dialog", "aria-labelledby": "dialog-title" });
   const close = () => el.close();
   const inner = h("div", { class: "dialog-inner" },
-    h("div", { class: "dialog-header" }, h("h2", { class: "dialog-title", id: "dialog-title" }, title), description ? h("p", { class: "dialog-description" }, description) : null),
+    h("div", { class: "dialog-header" },
+      h("h2", { class: "dialog-title", id: "dialog-title" }, title),
+      description ? h("p", { class: "dialog-description" }, description) : null),
     content ?? null,
     actions ? h("div", { class: "dialog-footer" }, actions({ close })) : null);
   el.append(inner, button({ icon: "x", variant: "ghost", size: "sm", title: closeLabel, className: "dialog-close", onclick: close }));
   el.addEventListener("close", () => {
-    onClose?.();
+    if (onClose) onClose();
     el.remove();
   });
   el.addEventListener("click", (event) => {
@@ -178,9 +210,10 @@ function dialog({ title, description, content, actions, closeLabel = "Close", on
   return { el, close };
 }
 
-function sheet({ title, description, content, side = "left", closeLabel = "Close" } = {}) {
+function sheet(opts = {}) {
+  const { title, description, content, side = "left", closeLabel = "Close" } = opts;
   const body = h("div", { class: "sheet-body" });
-  const el = h("dialog", { class: cx("sheet", side === "right" && "right"), "aria-label": title },
+  const el = h("dialog", { class: classes("sheet", side === "right" && "right"), "aria-label": title },
     h("div", { class: "sheet-inner" },
       h("div", { class: "sheet-header" },
         h("div", { class: "sheet-title" }, title),
@@ -201,31 +234,33 @@ function sheet({ title, description, content, side = "left", closeLabel = "Close
   };
 }
 
-// --- Toast -------------------------------------------------------------------------------------------
+// --- Toast ---------------------------------------------------------------------------------
 
-function toast(message, { title, variant = "default", duration = 3500 } = {}) {
+function toast(message, opts = {}) {
+  const { title, variant = "default", duration = 3500 } = opts;
   let host = document.querySelector(".toaster");
   if (!host) {
     host = h("div", { class: "toaster", role: "status", "aria-live": "polite" });
     document.body.append(host);
   }
-  const names = { success: "circle-check", error: "circle-alert", info: "info", default: "info" };
-  const el = h("div", { class: cx("toast", variant) },
-    icon(names[variant] ?? "info"),
+  const iconByVariant = { success: "circle-check", error: "circle-alert", info: "info", default: "info" };
+  const el = h("div", { class: classes("toast", variant) },
+    icon(iconByVariant[variant] ?? "info"),
     h("div", {}, title ? h("div", { class: "toast-title" }, title) : null, h("div", { class: title ? "toast-text" : "toast-title" }, message)),
-    button({ icon: "x", variant: "ghost", size: "sm", title: "×", onclick: () => el.remove() }));
+    button({ icon: "x", variant: "ghost", size: "sm", title: "x", onclick: () => el.remove() }));
   host.append(el);
   setTimeout(() => el.remove(), duration);
   return el;
 }
 
-// --- Tooltip and hover card: a single shared floating element -------------------------------------------
+// --- Tooltip and hover card: one shared floating element, moved and refilled per call ------
 
 let floatingEl = null;
 let hideTimer = null;
 
 const floating = {
-  show(content, x, y, { variant = "tooltip" } = {}) {
+  show(content, x, y, opts = {}) {
+    const { variant = "tooltip" } = opts;
     clearTimeout(hideTimer);
     if (!floatingEl) {
       floatingEl = h("div", { class: "floating", role: "tooltip" });
@@ -252,8 +287,9 @@ const floating = {
   },
 };
 
-// Tooltip on hover and keyboard focus, placed above the element.
-function attachFloating(target, content, { variant = "tooltip" } = {}) {
+// Shows on hover and keyboard focus, placed above the target element.
+function attachFloating(target, content, opts = {}) {
+  const { variant = "tooltip" } = opts;
   const show = () => {
     const rect = target.getBoundingClientRect();
     floating.show(typeof content === "function" ? content() : content, rect.left + rect.width / 2, rect.top, { variant });

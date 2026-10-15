@@ -82,6 +82,62 @@ Every rule below comes from something that went wrong, or nearly did, in them.
   both already tolerate a run with no `artifacts.idea`/`spec`/`plan` starting at
   `phase: "tests"`. No change was needed in any of the three files.
 
+## The approval gate, removed (2026-10-15)
+
+- **The maintainer asked to stop being stopped.** The gate's "no run in
+  progress" refusal kept surfacing on ordinary, outside-the-pipeline edits
+  (markdown through an `EnterWorktree` path, for one), and the `plan → build`
+  pause itself was friction he no longer wanted on every run — he wanted
+  `/task-flow` to run its phases straight through, with the run pages and
+  `metrics.jsonl` still updating as before. Explicitly scoped before the
+  change: keep the harden/review ask (§4c step 2) as the one remaining planned
+  stop; accept losing the gate's anti-self-approval guard, since there is
+  nothing left to self-approve once nothing blocks on `approvedBy`.
+- **`gate.js` and its `PreToolUse` registration are gone**, not merely
+  disabled — `hooks.json` now ships only the `Stop` hook. `TASK_FLOW_GATE=off`
+  stays as `stop.js`'s own escape hatch (it already shared the name before
+  this change).
+- **`approvedBy`/`approvedAt` stay in `state.json`**, written automatically at
+  `plan → build` (§5) with no question asked, in every run, attended or auto —
+  the transition now behaves the way auto always behaved at this step. The
+  fields are a record of which mode a run was in (for the run page's "approved
+  by" line), never permission: nothing reads them to decide whether to
+  continue.
+- **Performance moved into the harden/review ask (§4c step 2)** rather than
+  disappearing or becoming its own new stop. It used to be asked at the gate,
+  bundled with approval, specifically so there was "no planned stop between
+  approval and PR"; with the gate gone, bundling it where the one remaining
+  stop already is keeps that same property — still exactly one pause in the
+  whole pipeline — instead of quietly dropping the feature or adding a second
+  pause right after planning.
+- **What this gives up.** The gate was a guardrail against a careless `Write`
+  starting code before a human looked at the plan, not a security boundary
+  (Bash always bypassed it). Removing it means that guardrail no longer
+  exists, by the maintainer's own choice — it does not mean a determined agent
+  could not already get around it.
+
+## `ponytail` and `caveman`, assumed installed (2026-10-15)
+
+- **Loaded at the start of the run, and in every subagent's brief**, not left
+  to whatever the invoking session happens to have configured. Before this,
+  the maintainer's own build/harden output stayed lean only because his
+  account has a `ponytail` `SessionStart` hook running everywhere — that is
+  per-account, not a property of task-flow, so a run on a different machine
+  got none of it. Making both an explicit, assumed dependency means every
+  installation behaves the same way, not just this one.
+- **No silent fallback.** A run that cannot load either plugin says so in one
+  line and stops, the same posture as a missing `agent-skills` install —
+  task-flow does not quietly degrade to a different behaviour when a plugin
+  it depends on is absent.
+- **Ponytail governs the diff, caveman governs the prose, and neither crosses
+  into the other's territory.** The artifacts' own required shape (specs,
+  plans, the PR body, the language table's labels) stays exactly as §6/§8/§0
+  already specify — caveman compresses the orchestrator's and subagents'
+  status lines and reports, not the documents written to the docs folder.
+  Ponytail's own "when not to be lazy" list (input validation, error
+  handling, security) already excludes exactly what §4a and §4b require, so
+  the two were never in tension.
+
 ## Deciding alone, and saying so
 
 - **Every open question goes through a loop first.** Code questions are decided by
@@ -402,3 +458,30 @@ own recent runs.
   closed names only, and is written after the PR is open, so it never enters the PR
   of the run it measures. `metrics.js` never edits a `.gitignore` or runs `git add`;
   SKILL.md tells the user they may ignore the file.
+
+## The viewer's components, CSS and icon vendoring, decoupled from FluidPlan (2026-10-15)
+
+- **`js/dom.js`, `i18n.js`, `icons.js`'s wrapper functions, `ui.js`, `css/tokens.css`,
+  `base.css`, `components.css`, `fonts.css`, and `tests/support/browser.mjs`** were
+  originally brought in from FluidPlan (via the task-flow panel this viewer replaced,
+  see "Questions as data, and the viewer" above), under its MIT license, with the
+  licence and file list recorded in `plugin/viewer/NOTICE.md`.
+- **All eight were rewritten from scratch**, at the maintainer's request: same CSS
+  class names, same `window.TFV` function names and call shapes (so nothing else in
+  the viewer needed to change), different internal code. `NOTICE.md` is gone because
+  there is nothing left in this folder that it would need to cover.
+- **The Lucide icon data in `icons.js` was kept as is** — it was always Lucide's own
+  SVG paths (ISC licence, independently documented in `THIRD_PARTY.md`), vendored by
+  way of FluidPlan's copy rather than owed to FluidPlan itself. Same for the Geist
+  fonts (SIL OFL): `fonts.css` only declares `@font-face` rules over files licensed
+  separately.
+- **`tokens.css`'s base colours are shadcn/ui's own published registry**
+  (`ui.shadcn.com/r/colors/neutral.json`), not FluidPlan's invention either — kept
+  as is, re-sourced from the public spec. What actually needed an independent choice:
+  `--success`/`--warning`/`--info` (now Tailwind's own green-600/amber-600/blue-600,
+  the same reasoning FluidPlan used, arrived at independently rather than copied) and
+  the five chart colours (now the Okabe-Ito colour-blind-safe set, a well-known public
+  palette, replacing FluidPlan's own validated-but-unpublished picks).
+- **Why bother, given MIT only asks for a kept notice.** The maintainer judged the
+  dependency not worth carrying once the viewer had its own identity; this was his
+  call to make, not a compliance problem being worked around.

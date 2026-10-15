@@ -1,9 +1,7 @@
 // One run's questions as cards, and the "Send to agent" button.
 //
-// The card is the panel's own - FluidPlan's decision card drags in its rounds,
-// visuals and glossary - but it is built from the same components and styles
-// (ui.js, components.css) and keeps FluidPlan's four answers: OK, Not OK, Change,
-// Explain. A decision the agent took can be accepted, rejected or changed; an
+// The card is the panel's own, built from the same components and styles
+// (ui.js, components.css), with four answers: OK, Not OK, Change, Explain. A decision the agent took can be accepted, rejected or changed; an
 // open question is answered by picking one of its options or in words; "Explain"
 // asks the agent to say more and leaves the question open.
 //
