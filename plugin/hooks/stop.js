@@ -1,22 +1,18 @@
 #!/usr/bin/env node
 // The task-flow continuation hook: refuses to end the turn while a run is live.
 //
-// Why this exists. The skill says "chain every phase, stop only at the approval
-// gate". That is an instruction, and instructions drift - the failure that
+// Why this exists. The skill says "chain every phase, stop only at the planned
+// stops". That is an instruction, and instructions drift - the failure that
 // actually happens is handing the turn back at the end of a phase because it
 // looks like a good place to stop. The user then has to re-type the command,
 // which is the whole thing this pipeline was supposed to remove. So the
 // instruction gets an anchor outside the prose.
 //
-// It is the mirror of gate.js: the gate protects the step that is hard to undo,
-// this one holds the automation up. Neither substitutes for the other.
-//
 // Two properties matter more than anything else here:
 //
-//   1. It FAILS OPEN. The gate fails closed, and that asymmetry is deliberate:
-//      a gate that fails open lets unapproved code through, but a Stop hook that
-//      fails closed locks the session. Unreadable payload, missing state,
-//      corrupt JSON - every one of them lets the turn end.
+//   1. It FAILS OPEN. A Stop hook that fails closed locks the session, so
+//      every failure mode here - unreadable payload, missing state, corrupt
+//      JSON - lets the turn end rather than trap it.
 //
 //   2. It GIVES UP. Nothing upstream is relied on to break a loop, so the hook
 //      tracks a signature of the run and stops pushing once three pushes in a row
@@ -47,8 +43,7 @@ const keepGoing = (why, whatToDo) => {
   process.exit(KEEP_GOING);
 };
 
-// --- the escape hatch comes first, and it is the same one as the gate ------
-// One switch to remember, not two.
+// --- the escape hatch comes first ----------------------------------------
 if (String(process.env.TASK_FLOW_GATE || '').toLowerCase() === 'off') {
   letItStop('off (TASK_FLOW_GATE=off) - the run is not being pushed.');
 }

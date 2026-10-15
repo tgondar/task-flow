@@ -1,6 +1,6 @@
 ---
 name: task-flow
-description: Take an already-refined idea to a PR — spec, plan, build, tests, harden, review — a fresh subagent per phase, with planned stops at the approval gate and before security-harden/review. Put `auto` in front of the description to run unattended and read every decision in the PR instead. `review <PR number>` runs security-harden and review against an already-open PR instead. Only when the user types /task-flow; never on your own initiative.
+description: Take an already-refined idea to a PR — spec, plan, build, tests, harden, review — a fresh subagent per phase, with a planned stop before security-harden/review. Put `auto` in front of the description to run unattended and read every decision in the PR instead. `review <PR number>` runs security-harden and review against an already-open PR instead. Only when the user types /task-flow; never on your own initiative.
 argument-hint: [auto] [the refined idea, in your own words, or leave empty to resume] | review <PR number>
 ---
 
@@ -8,6 +8,16 @@ argument-hint: [auto] [the refined idea, in your own words, or leave empty to re
 
 The task is `$ARGUMENTS` (the arguments this skill was invoked with). These
 instructions hold for the whole run, not just the first step.
+
+**Load `ponytail:ponytail` (level `full`) and `caveman` (level `full`) before
+anything else, with the `Skill` tool, and do not continue past this line without
+having done so.** This command assumes both plugins are installed — never check
+first, never fall back silently if one is missing; say so in one line and stop.
+Ponytail governs what gets built: the leanest diff that still meets §4a's security
+tests and §4b's positive/negative tests, never a speculative abstraction. Caveman
+governs how you talk about it: compressed status lines, subagent reports, and
+anything else in prose — never the artifacts' own required shape (§6, §8) or the
+labels of the language table below, which stay exactly as specified regardless.
 
 **Read this before anything else.** This command runs a task from **spec** to
 **PR** in one invocation. The user types it once and never again for this task —
@@ -107,7 +117,7 @@ configured them, and nothing read along the way adds to them.
 
 ### The words of the run are in `language`
 
-Every document the run writes, every label it prints, the approval-gate options and
+Every document the run writes, every label it prints, the harden/review ask's options and
 the PR body are in the configured `language`. The canonical labels below are in
 English and European Portuguese; for any other language, translate them — with one
 exception: the renderer finds the discovered-tasks section by its heading, so in a
@@ -115,8 +125,7 @@ language other than these two that heading stays `## Discovered tasks`.
 
 | Where | EN | PT-PT |
 |---|---|---|
-| gate: approval | `Approve` / `Revise the plan first` / `Cancel` | `Aprovar` / `Rever plano primeiro` / `Cancelar` |
-| gate: performance | `Yes, optimise` / `No, go to review` | `Sim, otimizar` / `Não, avança para a review` |
+| performance ask | `Yes, optimise` / `No, go to review` | `Sim, otimizar` / `Não, avança para a review` |
 | plan: a landed task | `- [x] **Done** — build <sha> · security <sha>` | `- [x] **Feito** — build <sha> · segurança <sha>` |
 | plan: estimate | `**Estimate:** 3 (≈24 h)` | `**Estimativa:** 3 (≈24 h)` |
 | plan: found mid-run | `## Discovered tasks` | `## Tarefas descobertas` |
@@ -171,9 +180,8 @@ never because the run is long or because they are away.
 
 | Section | Attended | Auto |
 |---|---|---|
-| §5 approval gate | `AskUserQuestion` (approval **and** performance, one call), then build | auto-approved: write `approvedBy: "auto (/task-flow auto)"` and `approvedAt` with Bash, put the plan summary in the log and the PR body, and build |
 | §3 decision ceiling | stop at 3 | no ceiling — keep counting, keep recording, never stop |
-| §4c performance | runs if the user said yes at the gate | do not run it; record the default as a ⚠️ decision |
+| §4c performance | runs if the user said yes in §4c step 2 | do not run it; record the default as a ⚠️ decision |
 | §4c step 2 (security-harden + review ask) | `AskUserQuestion` | **not waived** — the same `AskUserQuestion` fires and blocks; see the note below |
 | §7.3 a minor or major bump | stop and ask | decide it, mark it ⚠️, and lead with it in the PR body |
 | §7.2 red tests | stop, do not commit | fix it — at most 3 attempts at the same failure — and if it is still red, open the PR **as a draft** with the real output in the body (§8c) |
@@ -218,14 +226,11 @@ what you would have asked, not a tidied-up account of what you did.
 ## 0c. `/task-flow review <PR number>` — harden and review an already-open PR
 
 **Implemented, and confirmed to need no code change outside SKILL.md.** The spec
-behind this section read the three scripts a run touches and found each already
-tolerant of exactly the shape this mode produces: `gate.js` only ever looks at
-`approvedBy`/`phase`/`status` to decide `hasApproval`/`isFinished`/`approvesNow`,
-never at `artifacts`, so it accepts this preset the same way it accepts `auto`'s,
-without requiring a plan; `render-run.js` and `metrics.js` both already degrade
-gracefully for a run with no `artifacts.idea`/`spec`/`plan` that starts at
-`phase: "tests"`. No change was needed to `gate.js`, `render-run.js`, or
-`metrics.js` for this mode to work.
+behind this section read the scripts a run touches and found each already
+tolerant of exactly the shape this mode produces: `render-run.js` and `metrics.js`
+both already degrade gracefully for a run with no `artifacts.idea`/`spec`/`plan`
+that starts at `phase: "tests"`. No change was needed to either script for this
+mode to work.
 
 **What it is for.** §4c step 2 lets the user send a PR to review/UAT/prod without
 waiting for security-harden and review. This command is the "check later" half of
@@ -249,8 +254,8 @@ Say in one line which PR you resolved, the same way auto mode announces itself.
    `<stateDir>/<slug>/state.json` directly at `phase: "tests"` — meaning build and
    tests are taken as already done, since they happened outside this run — with
    `approvedBy`/`approvedAt` preset (e.g. `"pr-review (/task-flow review
-   <number>)"`), the same way auto presets them (§0b): there is no plan here for
-   §5's gate to approve.
+   <number>)"`), the same way auto presets them (§0b): there is no plan phase in
+   this mode at all.
 3. Check out the PR's branch, following §1c's existing rule about an already
    checked-out branch — never isolate this into its own fresh `EnterWorktree`
    worktree (see `HISTORY.md`, "Never isolate a run into its own `EnterWorktree`
@@ -258,8 +263,8 @@ Say in one line which PR you resolved, the same way auto mode announces itself.
 4. Run §4c step 1 (simplify) if it has not already run against this exact diff,
    then go straight to security-harden and §4d review — step 2's ask has nothing
    left to ask, since typing this command already answered "later". Performance
-   (§4c step 3) is not offered here either: no gate ran to ask it, and this
-   command is scoped to security and review only.
+   (§4c step 3) is not offered here either: nothing in this mode ever asks for
+   it, and this command is scoped to security and review only.
 5. Push the resulting commits onto the PR's branch. **This command only adds
    commits and a review report** (`.claude/reviews/<slug>-review.md`) — it never
    merges, never changes the PR's base or title, and never approves it.
@@ -269,7 +274,7 @@ Say in one line which PR you resolved, the same way auto mode announces itself.
 
 Use the **`agent-skills` plugin** — both halves of it. Never a copy of the same
 skill that happens to sit in a repository; those shadow the plugin and go stale.
-This command does not reimplement methodology. It supplies state, gates, and this
+This command does not reimplement methodology. It supplies state and this
 project's conventions, and delegates the rest.
 
 The plugin has two kinds of thing and they are not interchangeable:
@@ -292,7 +297,7 @@ The plugin has two kinds of thing and they are not interchangeable:
 | running and auditing the tests | **persona `agent-skills:test-engineer`** |
 | simplifying after the build | skill `agent-skills:code-simplification` |
 | hardening after the build | skill `agent-skills:security-and-hardening` |
-| performance, **only if the user said yes at the gate** | skill `agent-skills:performance-optimization` |
+| performance, **only if the user said yes in §4c step 2** | skill `agent-skills:performance-optimization` |
 | the security tests of **every** task | **agent `task-flow:security-auditor`** (the persona, at low effort) |
 | review before merge | **agent `task-flow:code-reviewer`** (the persona, at low effort) |
 
@@ -310,16 +315,15 @@ Write a step yourself in exactly two cases:
 2. **No skill or persona covers it.** Say so in one line before proceeding, so the
    user knows you are off the catalogue.
 
-Never delegate: the state machine, the approval gate, the question budget (§3),
-and the project conventions in section 6.
+Never delegate: the state machine, the question budget (§3), and the project
+conventions in section 6.
 
 **Never isolate a run into its own `EnterWorktree` checkout.** `state.json` and
 everything else under `stateDir` lives in the checkout the run was started in; a
 fresh `EnterWorktree` worktree branches from `origin/<default-branch>` and does not
 carry uncommitted run state with it. Build in the same checkout the spec and plan
 were written in. If the user explicitly asks for worktree isolation anyway, commit
-and push `<stateDir>/<slug>/` first so the new worktree actually has the run — do
-not treat the gate's "no run in progress" refusal there as a hook bug.
+and push `<stateDir>/<slug>/` first so the new worktree actually has the run.
 
 ## 1b. A fresh context per phase — spawn, do not carry
 
@@ -344,7 +348,7 @@ tool:
 | tests, after the build | `agent-skills:test-engineer` | — |
 | simplify, after the tests | `general-purpose` | skill `agent-skills:code-simplification` |
 | harden, after the simplify | `general-purpose` | skill `agent-skills:security-and-hardening` |
-| performance — **only on the user's yes at the gate** | `agent-skills:web-performance-auditor` for a web front end, otherwise `general-purpose` | skill `agent-skills:performance-optimization` |
+| performance — **only on the user's yes in §4c step 2** | `agent-skills:web-performance-auditor` for a web front end, otherwise `general-purpose` | skill `agent-skills:performance-optimization` |
 | review — one per area (§4d) | `task-flow:code-reviewer` | — |
 | second opinion on a business question — one per round (§3) | `task-flow:second-opinion-low` … `-max` | — |
 
@@ -374,14 +378,17 @@ subagent that wants another pair of eyes writes that into its report; it does no
 spawn anything.
 
 **The brief you hand a subagent must stand on its own.** It has none of your
-context. It gets, in order: the one-line task, the slug, the absolute paths of the
-artifacts already written (idea, spec, plan, logs) and of `.claude/task-flow.json`,
-the docs folder and the `language`, the branch, the exact commands to build and
-test, what artifact to produce and where, what to return — and this line,
-verbatim: **"Decisions marked ⚠️→asked in the logs, and every answered `- [x]` in
-the run's questions file, are settled. Build on them; do not reopen, re-argue or
-'double-check' them. If you find a fact that contradicts one, report the fact — do
-not change the decision."** Do not paste the artifacts' contents — give paths and
+context, which includes not having loaded `ponytail` or `caveman` — it gets, in
+order: the instruction to load `ponytail:ponytail` (level `full`) and `caveman`
+(level `full`) with the `Skill` tool before anything else, the one-line task, the
+slug, the absolute paths of the artifacts already written (idea, spec, plan, logs)
+and of `.claude/task-flow.json`, the docs folder and the `language`, the branch,
+the exact commands to build and test, what artifact to produce and where, what to
+return — and this line, verbatim: **"Decisions marked ⚠️→asked in the logs, and
+every answered `- [x]` in the run's questions file, are settled. Build on them; do
+not reopen, re-argue or 'double-check' them. If you find a fact that contradicts
+one, report the fact — do not change the decision."** Do not paste the artifacts'
+contents — give paths and
 let it read what it needs.
 
 **What a subagent returns**, and nothing else:
@@ -394,9 +401,8 @@ let it read what it needs.
    it did not verify against the code, a command or a measurement, each with the
    places it checked. An empty list is a claim too: say "nothing unconfirmed".
 
-It does **not** talk to the user, does **not** touch `state.json`, does **not** run
-the approval gate, and does **not** open the PR. Those four are the orchestrator's,
-always. Treat its report as a claim: anything in item 5, and any number that
+It does **not** talk to the user, does **not** touch `state.json`, and does
+**not** open the PR. Those three are the orchestrator's, always. Treat its report as a claim: anything in item 5, and any number that
 matters, you check yourself before it reaches the PR.
 
 **You stay small.** Between phases you hold state, paths and the question budget —
@@ -432,8 +438,9 @@ correction in.
 - **Restate it in one line**, then apply it from the next step on. Record it in
   the relevant `_log.md` as ⚠️→asked — they decided it — with their words.
 - **It adds work** ("keep the old endpoint too") → add it as a task to the plan's
-  discovered-tasks section (§4) and schedule it in dependency order. It does not go
-  back through the approval gate: their message *is* the approval.
+  discovered-tasks section (§4) and schedule it in dependency order. It does not
+  restart the plan phase or wait for anything else: their message is already
+  acted on.
 - **It changes something already built** → the next build subagent gets it in its
   brief; if a finished task has to change, that is a new task in the same section.
 - **It answers a banked question** → treat it exactly as §7 describes for answers.
@@ -632,8 +639,8 @@ question loop could not settle it.** Code questions (logged ⚠️, above) and
 mechanisms (🔹) do not count, and neither does a business question the loop
 answered.
 
-**An answered question is closed.** Once the user has answered something — at the
-gate, in the questions file, or mid-run (§1c) — it is not reopened, re-asked as a
+**An answered question is closed.** Once the user has answered something — in
+the questions file, or mid-run (§1c) — it is not reopened, re-asked as a
 caveat, or relitigated by a later phase. A fact that contradicts their reason is
 said once, and their decision still stands until they change it.
 
@@ -646,9 +653,8 @@ beside its `state.json`:
 <stateDir>/<slug>/questions.json
 ```
 
-Create it the moment the first question or banked decision appears. The approval
-gate lets exactly that path through before approval, like `state.json`. **Write
-it, then render** (§8): the renderer turns it into the page the user reads,
+Create it the moment the first question or banked decision appears, the same as
+`state.json` can exist before `phase` reaches `build`. **Write it, then render** (§8): the renderer turns it into the page the user reads,
 `<docsDir>/questions/yyMMdd_<slug>_questions.md`, in `language`, and that page is
 never written by hand — the next render overwrites it. The file's shape is in §8.
 In short, one item per question or decision:
@@ -746,8 +752,10 @@ Run `consume`:
   arrives while a task is being built waits for the task to land;
 - **when the wait wakes you** (§7).
 
-**An answer from the viewer never approves a plan.** Approval is the gate's alone
-(§5), through `AskUserQuestion`; nothing on the viewer's path writes `approvedBy`.
+**An answer from the viewer never changes `phase` or `status` on its own.**
+Consuming an answer (§3) only clears it from `pendingTasks`; `approvedBy` is
+written once, automatically, at the `plan → build` transition (§5), never from
+the viewer's path.
 
 ## 4. Run every phase, in one turn
 
@@ -755,7 +763,7 @@ Run `consume`:
 |---|---|---|---|
 | `idea` | `general-purpose` → `agent-skills:spec-driven-development` | `specs/yyMMdd_<slug>.md` | `spec` |
 | `spec` | `general-purpose` → `agent-skills:planning-and-task-breakdown` | `plans/yyMMdd_<slug>.plan.md` | `plan` |
-| `plan` | approval gate (§5), **then** per task: the build subagent (TDD for backend, `frontend-ui-engineering` for frontend) **and then `task-flow:security-auditor` on that task's diff** (§4a) | `plans/…plan_log.md`, commits | `build` |
+| `plan` | §5, **then** per task: the build subagent (TDD for backend, `frontend-ui-engineering` for frontend) **and then `task-flow:security-auditor` on that task's diff** (§4a) | `plans/…plan_log.md`, commits | `build` |
 | `build` | persona `agent-skills:test-engineer` — runs the suite, audits positive **and** negative cover (§4b) | the tests it adds, commits | `tests` |
 | `tests` | `general-purpose` → `agent-skills:code-simplification`, then `agent-skills:security-and-hardening`, then performance if the user said yes (§4c) | commits | `harden` |
 | `harden` | `task-flow:code-reviewer` on the branch diff, one per area, **before any PR exists** (§4d) | `.claude/reviews/<task>-review.md` | `review` |
@@ -823,7 +831,7 @@ work:
 | 8 | 2 weeks (80 h) |
 
 - **8 is the ceiling.** Only these five values exist; an estimate between two of
-  them rounds up. A task that comes out above 8 is split before the gate.
+  them rounds up. A task that comes out above 8 is split before the build starts.
 - **The day is a unit for sizing, not a working day.** Nothing stops after 8 h; the
   number only decides whether a task is small enough.
 - **Tasks that arrive already split** — by the idea, or by the task list — are
@@ -923,29 +931,33 @@ diff stays readable:
 1. **`agent-skills:code-simplification`** — always, no ask. Behaviour must not
    change; if simplifying wants to change behaviour, that is a finding for the
    review, not an edit. Re-run the tests after.
-2. **Ask before security-harden and review.** Once simplify lands, ask with
-   `AskUserQuestion`: run `agent-skills:security-and-hardening` plus the §4d review
-   pass now, or skip straight to the PR and check later with `/task-flow review <PR
-   number>` (§0c). **This question is asked even in an auto run** — the one
-   exception to "`AskUserQuestion` is not used at all in an auto run" (§0b, and see
-   the note there): the user is trading an unattended answer for speed-to-PR on
-   this one question, so the run waits for them instead of guessing.
-   - **Yes:** run `agent-skills:security-and-hardening` (tests green after), then
-     go to §4d.
+2. **Ask before security-harden and review — the pipeline's one planned stop.**
+   Once simplify lands, ask with `AskUserQuestion` whether to run
+   `agent-skills:security-and-hardening` plus the §4d review pass now, or skip
+   straight to the PR and check later with `/task-flow review <PR number>` (§0c).
+   **This question is asked even in an auto run** — the one exception to
+   "`AskUserQuestion` is not used at all in an auto run" (§0b, and see the note
+   there): the user is trading an unattended answer for speed-to-PR on this one
+   question, so the run waits for them instead of guessing.
+   - **Yes:** in an **attended** run only, ask a second, one-question
+     `AskUserQuestion` — performance: `Yes, optimise` / `No, go to review` (an
+     auto run never asks it, step 3 below) — then run
+     `agent-skills:security-and-hardening` (tests green after), then go to §4d.
    - **No:** record it in the log (marker ⚠️→perguntado — they answered when
-     asked, this is not a would-have-asked decision), skip §4d entirely, and go
-     straight to opening the PR (§7). The PR body says the harden and review
-     passes were skipped and that `/task-flow review <PR number>` runs them later.
-3. **Performance — only on the answer the user gave at the gate** (§5), and only
-   when step 2 was a yes. It is not asked here: it was asked with the approval. On
-   yes, spawn `agent-skills:web-performance-auditor` when the target is a web front
-   end, otherwise `general-purpose` with `agent-skills:performance-optimization`.
-   On no, write that they declined into the log and move to `review`.
+     asked, this is not a would-have-asked decision), skip §4d and the performance
+     question entirely, and go straight to opening the PR (§7). The PR body says
+     the harden and review passes were skipped and that `/task-flow review <PR
+     number>` runs them later.
+3. **Performance — only on the answer the user gave in step 2**, and only when
+   that was a yes. On yes, spawn `agent-skills:web-performance-auditor` when the
+   target is a web front end, otherwise `general-purpose` with
+   `agent-skills:performance-optimization`. On no, write that they declined into
+   the log and move to `review`.
 
-   **In an auto run it still does not run** (§0b) — only step 2's ask overrides the
-   no-`AskUserQuestion`-in-auto rule; this step does not. Write into the log, as a
-   ⚠️ decision, that performance was skipped, what you would have looked at, and
-   roughly what it would have cost.
+   **In an auto run it never runs** (§0b) — step 2's own question still fires in
+   auto, but the performance follow-up does not; auto always decides "no" here.
+   Write into the log, as a ⚠️ decision, that performance was skipped, what you
+   would have looked at, and roughly what it would have cost.
 
 If any step turns a test red, that is §7.2: stop, do not commit.
 
@@ -993,65 +1005,29 @@ its go/no-go field is `Verdict: APPROVE | REQUEST CHANGES`. The run's verdict is
 - When the merged report exists, write its counts as `health.review` (§8): the
   reviewers' own four labels, plus `notReproduced` for findings that did not hold.
 
-## 5. The approval gate — the one planned stop
+## 5. Plan into build — written automatically, never asked
 
-`plan → build` is the transition that starts writing code, and nothing before it
-touches a source file.
+`plan → build` is the transition that starts writing code. It used to stop here
+for an `Approve` / `Revise the plan first` / `Cancel` answer; that gate is gone
+(see `HISTORY.md` for why), and this transition now behaves, in every run, the
+way an auto run always behaved at this step.
 
 1. Summarise the plan: how many tasks, which layers, whether there is a database
-   migration, what the version bump will be — and, for the performance question,
-   what you would look at and roughly what it would cost.
-2. Ask with **one** `AskUserQuestion` call holding two questions — the only place
-   this command uses that tool, because both answers are discrete:
-   - approval: `Approve` / `Revise the plan first` / `Cancel`;
-   - performance: `Yes, optimise` / `No, go to review`.
+   migration, what the version bump will be. Put the summary, whole, into the
+   plan's `_log.md` and the PR body — the PR is where the user reads it, since
+   nobody is asked to approve it live.
+2. Write `approvedBy` and `approvedAt` into `state.json`, then continue into the
+   build **in the same turn**. `approvedBy` is `"attended (/task-flow)"` or
+   `"auto (/task-flow auto)"` depending on `mode` — a record of which mode the run
+   was in, nothing more: no script reads it as permission any more, and
+   `render-run.js` keeps the "approved by" line on the run page only for that
+   history.
 
-   Every other question is prose. Asking about performance here, and not after the
-   harden phase, is what leaves the run with no planned stop between approval and
-   PR: the user approves, and the next thing they see is the PR.
-3. On `Approve` only: write `approvedBy`, `approvedAt` and `performance`
-   (`"yes"` / `"no"`) into `state.json` **using Bash**, then continue into the build
-   **in the same turn**. The `AskUserQuestion` result arrives mid-turn; there is no
-   technical reason to stop here.
-4. On anything else: change nothing, take `status` out of `"running"`, and stop.
-   When the gate runs again after `Revise the plan first`, both questions are asked
-   again — a revised plan can change what performance work would be worth.
-
-**In an auto run the gate is pre-answered, and the answer is the word `auto`.**
-Skip steps 2–4: write `approvedBy: "auto (/task-flow auto)"`, `approvedAt` and
-`performance: "no"` with Bash and go straight into the build. Step 1 still happens —
-the summary goes into the plan's `_log.md` and, whole, into the PR body, because
-the PR is where the user now approves the plan.
-
-**That does not weaken the guarantee; it moves it.** In an attended run the thing
-you cannot fabricate is an `AskUserQuestion` result. In an auto run it is
-`$ARGUMENTS`: the word `auto` sits in the user's own message and you cannot put it
-there. So **approval always comes from the user**, as an answer or as that word.
-What you must never do is *infer* auto mode: not from a long task, not from their
-being away, not from an earlier run in the same session. First token of
-`$ARGUMENTS`, or attended.
-
-**Why Bash, and what it means.** The plugin's `gate.js` refuses to let an editing
-tool fill `approvedBy`, so `Write`/`Edit` are blocked there. Writing it with Bash
-uses the hole the gate already documents. Be clear-eyed about what that says: the
-check never protected the user from a determined agent — it catches the careless
-`Write`, which is the failure that actually happens. **The real guarantee is that
-you cannot fabricate an `AskUserQuestion` result.** Either they chose `Approve`, or
-there is no answer to read.
-
-**The hooks ship with this plugin and switch on per project.** `gate.js`
-(PreToolUse on `Write|Edit|NotebookEdit`) and `stop.js` (Stop) run wherever the
-plugin is enabled, and act **only in a repository with `.claude/task-flow.json`**,
-reading runs from its `stateDir`. `TASK_FLOW_GATE=off` disables both. Never tell the
-user a hook stopped you, or would have, without having looked — and where the
-plugin's hooks are not active (the plugin disabled, a session that predates its
-install), the gate and the budget are held up by this document and by you alone,
-which is a reason to keep them, not a licence to relax them.
-
-So: **never write `approvedBy` without an `Approve` answer in hand — or, in an auto
-run, without `auto` as the first token of `$ARGUMENTS`.** Not to unblock yourself,
-not to get past the gate, not because the plan looks obviously fine. If the gate
-blocks you somewhere else, ask — do not route around it.
+Performance is no longer decided here — it moved into the harden/review ask
+(§4c step 2), the one planned stop left in the pipeline. The hooks still ship
+with this plugin: `stop.js` (Stop) runs wherever the plugin is enabled, acting
+only in a repository with `.claude/task-flow.json`. `TASK_FLOW_GATE=off`
+disables it.
 
 ## 6. Conventions this command owns
 
@@ -1140,14 +1116,13 @@ Everything else is decided, logged and counted (§3).
 **In an auto run there are only the ones §0b lists**: a missing or invalid
 configuration (§0) and a missing idea artifact (§2a), both before any work exists,
 and a question the loop could not settle once every task left is pending or depends
-on one (§3). Stops 1, 2 and 4 below are replaced by §0b, and the rest of stop 3 is
-decided and marked ⚠️ like anything else. Read §0b before you read the four below.
+on one (§3). Stops 1 and 3 below are replaced by §0b, and the rest of stop 2 is
+decided and marked ⚠️ like anything else. Read §0b before you read the three below.
 
-1. **The approval gate** (§5) — the only one that is planned.
-2. **Red tests.** Do not commit, do not carry on: write what failed into the log,
+1. **Red tests.** Do not commit, do not carry on: write what failed into the log,
    set `status: "failed"`, say what broke, and stop. **In an auto run, fix it
    instead** — at most three attempts at the same failure, then a draft PR (§8c).
-3. **A genuine block** — there is no assumption under which you can continue
+2. **A genuine block** — there is no assumption under which you can continue
    without making the work useless if it turns out wrong. That includes: a missing
    or invalid configuration (§0), a missing idea artifact on a new run (§2a), a new
    fact that changes the design of an **already-approved** plan (an approved plan
@@ -1160,11 +1135,11 @@ decided and marked ⚠️ like anything else. Read §0b before you read the four
    are decided, marked **URGENT** and listed first in the PR body (§8c). Those three
    are the ones the user is most likely to overrule, so they are the ones that must
    be impossible to miss when they open it.
-4. **`pendingDecisions` reaches 3.** Put all three to the user together, in prose,
+3. **`pendingDecisions` reaches 3.** Put all three to the user together, in prose,
    each with what you chose, what else was on the table, and what changes if they
    overrule you. Say which phase they came from and what is still ahead.
 
-To stop for 3 or 4: put what you need in this run's `questions.json`, set
+To stop for 2 or 3: put what you need in this run's `questions.json`, set
 `status: "blocked"`, leave `phase` unchanged, render, and then — **in this order,
 after `blocked` is written** — start the wait for the viewer **in the background**
 (the `run_in_background` option of the Bash tool):
@@ -1274,7 +1249,7 @@ the same.
 ## 8b. Closing a phase, and closing the run
 
 At each phase boundary, without pausing — **every one of them, every time**,
-including the approval gate, a block and the close:
+including a block and the close:
 
 - write the artifact and its index line;
 - add any ⚠️ decisions the phase produced to this run's `questions.json` (§3), and
@@ -1346,8 +1321,9 @@ PR is the only thing the user will read.
 
 **The decisions go into the PR body inline, not as a link.** `## Needs you` is
 filled exactly as §8b says, with one insertion: right after the **URGENT** items,
-**the plan summary from §5.1 that the user never got to approve, and the performance
-question they never got to answer**. Every ⚠️ entry is written out in full — what
+**the plan summary from §5 step 1, and — because an auto run never asks
+§4c step 2's performance follow-up — the fact that performance was skipped and
+why**. Every ⚠️ entry is written out in full — what
 got fixed, what else was on the table, why this one, and what changes if they
 overrule it.
 

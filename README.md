@@ -2,8 +2,8 @@
 
 A Claude Code plugin that takes one refined idea to one pull request, in one
 command: spec → plan → build → tests → harden → review, a fresh subagent per phase,
-with an approval gate before any code is written, a continuation hook that keeps the
-run going, and a generated page that shows where every run is.
+with a continuation hook that keeps the run going, and a generated page that
+shows where every run is.
 
 ```
 /task-flow <the task, in your own words>
@@ -15,9 +15,10 @@ run going, and a generated page that shows where every run is.
 
 - **Starts from a refined idea**, never from nothing: a run needs an idea document
   in the docs folder before it begins.
-- **One planned stop** — the approval gate between plan and build. Everything else
-  is decided, written into a decision log, and counted; after three decisions that
-  only a person can take, an attended run stops and asks.
+- **One planned stop** — whether to run security-harden and review now or check
+  later with `/task-flow review <PR number>`. Everything else is decided, written
+  into a decision log, and counted; after three decisions that only a person can
+  take, an attended run stops and asks.
 - **Auto mode** for long runs: nothing stops it, and the PR carries every decision
   it took without asking.
 - **Security tests on every task**, written by a security-auditor subagent on that
@@ -41,6 +42,10 @@ run going, and a generated page that shows where every run is.
 - The [agent-skills](https://github.com/addyosmani/agent-skills) plugin, installed
   as `agent-skills@addy-agent-skills`: task-flow delegates the method (spec,
   planning, TDD, review personas) to it rather than reimplementing it.
+- The `ponytail` and `caveman` plugins, loaded at the start of the run and in
+  every subagent's brief: the leanest diff that still meets the pipeline's own
+  security and test requirements, reported in compressed prose. Assumed
+  installed — a run that cannot load either says so in one line and stops.
 - `gh`, authenticated, for opening pull requests.
 
 ## Install (once per machine)
@@ -172,9 +177,6 @@ Know what you are installing:
   browser's own File System Access API grants it, and nothing else - and cannot
   approve a run. An answer reaches the model as data, after `answers.js` has
   checked it against the run's open questions.
-- **The approval gate is a guardrail, not a sandbox.** It stops code being written
-  by drift before a plan is approved. It does not stop an agent determined to get
-  around it (Bash is not gated), and it is not meant to.
 
 ## Layout
 
@@ -186,7 +188,7 @@ plugin/
   skills/task-flow/HISTORY.md     why each rule is the way it is
   agents/                         security-auditor, code-reviewer at effort: low;
                                   second-opinion-low..max, the question loop (SKILL.md §3)
-  hooks/hooks.json, gate.js, stop.js
+  hooks/hooks.json, stop.js
   scripts/config.js               reads and validates .claude/task-flow.json
   scripts/render-run.js           the run page, the questions page and the viewer's feed
   scripts/questions.js            questions.json: validation and the generated page
@@ -202,7 +204,6 @@ tests/                            unit tests (node) and end-to-end probes (claud
 
 ```sh
 node tests/config.test.js
-node tests/gate.test.js
 node tests/stop.test.js
 node tests/render-run.test.js
 node tests/enable-autoupdate.test.js
@@ -210,14 +211,13 @@ node tests/questions.test.js
 node tests/answers.test.js
 node tests/viewer-feed-logic.test.js
 node tests/viewer.smoke.js  # headless Edge/Chrome; skipped without one
-bash tests/gate.e2e.sh     # real claude -p sessions; needs the CLI on PATH
-bash tests/stop.e2e.sh
+bash tests/stop.e2e.sh      # real claude -p sessions; needs the CLI on PATH
 claude plugin validate .
 ```
 
 ## Escape hatch
 
-`TASK_FLOW_GATE=off` disables both hooks for a session.
+`TASK_FLOW_GATE=off` disables the Stop hook for a session.
 
 ## Credits
 

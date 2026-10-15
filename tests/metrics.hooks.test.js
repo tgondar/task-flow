@@ -1,18 +1,17 @@
 #!/usr/bin/env node
 // Tests for plan T9 (spec M-R3.4, M-R4.5): a `metrics.jsonl` sitting in the ROOT of the
-// state folder must not disturb gate.js, stop.js or renderAll. The three readers walk
-// stateDir with readdirSync and only look at `<entry>/state.json`, so a FILE named
-// metrics.jsonl has no state.json under it and is skipped. These tests anchor that
-// reading of the code: a future reader that treated every stateDir entry as a run would
-// fail here, not in somebody's session.
+// state folder must not disturb stop.js or renderAll. Both readers walk stateDir with
+// readdirSync and only look at `<entry>/state.json`, so a FILE named metrics.jsonl has
+// no state.json under it and is skipped. These tests anchor that reading of the code: a
+// future reader that treated every stateDir entry as a run would fail here, not in
+// somebody's session.
 //
 // The method is differential: every scenario runs once WITHOUT the file (the baseline)
 // and once per variant of it, and the exit code and the model-facing stderr must be equal.
 // The variants are what a cloned repository (or a bug) could leave there: valid rows,
 // 5 MiB of garbage, an empty file, a FOLDER named metrics.jsonl, a link to outside the
-// project, and an unrelated non-run file. The gate must stay fail-closed and the Stop
-// hook fail-open in all of them - that asymmetry is deliberate (CLAUDE.md), so both
-// directions are asserted, not just "nothing broke".
+// project, and an unrelated non-run file. The Stop hook must stay fail-open in all of
+// them, so that is asserted, not just "nothing broke".
 //
 // Everything is synthetic under a throwaway HOME (also LOCALAPPDATA / XDG_STATE_HOME, so
 // the viewer feed never touches the real one); the spawned hooks inherit it.
@@ -32,7 +31,6 @@ process.env.XDG_STATE_HOME = TEST_HOME;
 delete process.env.TASK_FLOW_METRICS;
 delete process.env.TASK_FLOW_GATE;
 
-const GATE = path.join(__dirname, '..', 'plugin', 'hooks', 'gate.js');
 const STOP = path.join(__dirname, '..', 'plugin', 'hooks', 'stop.js');
 const { renderAll } = require('../plugin/scripts/render-run.js');
 const ALLOW = 0;
@@ -88,40 +86,14 @@ const runHook = (script, root, payload) => {
   const r = spawnSync(process.execPath, [script], { input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, TASK_FLOW_GATE: '', CLAUDE_PROJECT_DIR: root.replace(/\\/g, '/') } });
   return { code: r.status, stderr: r.stderr || '' };
 };
-const gate = (root, file) => runHook(GATE, root, { session_id: sid(), cwd: root, hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: file, content: 'x' } });
 const stop = (root) => runHook(STOP, root, { session_id: sid(), cwd: root, hook_event_name: 'Stop', last_assistant_message: 'ok' });
-// A message may quote the project path (gate does); paths differ per fixture, so blank them.
+// A message may quote the project path; paths differ per fixture, so blank them.
 const noPath = (text, root) => text.split(root.replace(/\\/g, '/')).join('R').split(root).join('R');
 
 const run = (over) => ({ task: 'demo', phase: 'plan', status: 'ready', approvedBy: '', ...over });
 const noLeak = (text) => !/IGNORE PREVIOUS|<\/script>|claude-opus/.test(text);
 
-// --- 1. gate.js: same decision, same message, in every variant ------------------------------
-const gateScenarios = [
-  ['code write before approval', [run()], (r) => path.join(r, 'src', 'a.js'), BLOCK],
-  ['code write with an approved run', [run({ approvedBy: 'user' })], (r) => path.join(r, 'src', 'a.js'), ALLOW],
-  ['code write with only a finished approved run', [run({ approvedBy: 'user', phase: 'done', status: 'done' })], (r) => path.join(r, 'src', 'a.js'), BLOCK],
-  ['markdown in docs stays exempt', [run()], (r) => path.join(r, 'docs', 'x.md'), ALLOW],
-  ['state.json bookkeeping stays exempt', [run()], (r) => path.join(stateDirOf(r), 'demo', 'state.json'), ALLOW],
-  // Current behaviour, asserted rather than assumed: metrics.jsonl is not state.json, not
-  // markdown and not questions.json, so a Write TOOL call to it is "code" and needs an
-  // approved run. metrics.js writes with fs, never the Write tool, so this costs it nothing.
-  ['a Write TO <stateDir>/metrics.jsonl before approval', [run()], (r) => path.join(stateDirOf(r), 'metrics.jsonl'), BLOCK],
-  ['a Write TO <stateDir>/metrics.jsonl with an approved run', [run({ approvedBy: 'user' })], (r) => path.join(stateDirOf(r), 'metrics.jsonl'), ALLOW],
-];
-for (const [label, runs, file, expected] of gateScenarios) {
-  const baseRoot = makeProject(runs, 'none');
-  const base = gate(baseRoot, file(baseRoot));
-  check(`gate baseline - ${label}: exit ${expected}`, base.code === expected, `got ${base.code}: ${base.stderr}`);
-  for (const variant of HOSTILE) {
-    const root = makeProject(runs, variant);
-    const got = gate(root, file(root));
-    check(`gate [${variant}] - ${label}: same exit and message as without the file`, got.code === base.code && noPath(got.stderr, root) === noPath(base.stderr, baseRoot), `${got.code} vs ${base.code}: ${got.stderr}`);
-    check(`gate [${variant}] - ${label}: nothing of the file in the message`, noLeak(got.stderr));
-  }
-}
-
-// --- 2. stop.js: push a running run, silent otherwise, fail open -----------------------------
+// --- 1. stop.js: push a running run, silent otherwise, fail open -----------------------------
 const stopScenarios = [
   ['a running run is pushed', [{ task: 'demo', phase: 'build', status: 'running', approvedBy: 'user', buildCursor: 'T3' }], BLOCK],
   ['a done run stays silent', [{ task: 'demo', phase: 'done', status: 'done', approvedBy: 'user' }], ALLOW],
@@ -138,7 +110,7 @@ for (const [label, runs, expected] of stopScenarios) {
   }
 }
 
-// --- 3. Stop hook backstop: a forgotten finished run is closed once, no push -----------------
+// --- 2. Stop hook backstop: a forgotten finished run is closed once, no push -----------------
 {
   const finished = { task: 'forgot', phase: 'done', status: 'done', approvedBy: 'user', startedAt: '2026-09-29T09:00:00Z', outcome: 'merged', size: { points: 2 }, phaseChangedAt: '2026-09-29T10:00:00Z' };
   for (const variant of ['none', 'valid rows']) {
@@ -168,7 +140,7 @@ for (const [label, runs, expected] of stopScenarios) {
   }
 }
 
-// --- 4. renderAll: metrics.jsonl is not a run ------------------------------------------------
+// --- 3. renderAll: metrics.jsonl is not a run ------------------------------------------------
 // Runs that are NOT done, so the comparison is about enumeration, not about the close
 // (T8 covers that): same pages, no 'skipped' note, no error, and a feed equal to the baseline.
 const tree = (dir) => {
