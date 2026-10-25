@@ -313,7 +313,19 @@ const paperclipTrustFile = () => path.join(os.homedir(), '.claude', 'task-flow-t
  *  that is ever stored, compared or shown is `origin` alone - scheme, host,
  *  port, nothing a path or query could hide a difference in. Returns null for
  *  anything that does not meet all of that, never throws: callers decide
- *  whether null is a stop or just "not trusted". */
+ *  whether null is a stop or just "not trusted".
+ *
+ *  `origin` alone is not automatically safe to go on and print, e.g. inside a
+ *  double-quoted shell argument in a suggested fix-it command (which this
+ *  file's own `trust-paperclip` output, and send-to-paperclip.js's "not
+ *  trusted" message, both do): a measured case on this very engine parses
+ *  `http://evil"quote.example/` without throwing and keeps the `"` in
+ *  `hostname`, even though it is a forbidden host code point per the WHATWG
+ *  URL spec - parser leniency a future engine version is free to change
+ *  either direction. So the host is re-checked against an explicit allowlist
+ *  after parsing, rather than trusting "didn't throw" to mean "safe to
+ *  interpolate": a plain hostname/IPv4 (letters, digits, dot, hyphen) or a
+ *  bracketed IPv6 literal, nothing else. */
 function parsePaperclipOrigin(raw) {
   if (typeof raw !== 'string' || !raw) return null;
   let url;
@@ -324,6 +336,11 @@ function parsePaperclipOrigin(raw) {
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
   if (url.username || url.password) return null;
+  // url.hostname already carries its own brackets for an IPv6 literal
+  // ("[::1]"), so the two patterns below are not redundant with each other.
+  const hostOk = /^[A-Za-z0-9.-]+$/.test(url.hostname) || /^\[[0-9a-fA-F:]+\]$/.test(url.hostname);
+  if (!hostOk) return null;
+  if (url.port && !/^[0-9]+$/.test(url.port)) return null;
   return url.origin;
 }
 

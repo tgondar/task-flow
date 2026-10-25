@@ -241,6 +241,22 @@ check('parsePaperclipOrigin normalizes away path, query and trailing slash', () 
   assert(a === 'http://192.168.20.5:3100' && a === b && b === c, `expected the same origin for all three, got: ${a}, ${b}, ${c}`);
 });
 
+check('parsePaperclipOrigin rejects a hostname a parser quirk let through unthrown (quote-bearing host)', () => {
+  // On at least one engine, new URL() does not throw for this and keeps the
+  // `"` in .hostname, even though it is a forbidden host code point per the
+  // WHATWG URL spec - exactly the value that would break out of a
+  // double-quoted shell argument if `.origin` were trusted on "didn't throw"
+  // alone. The host allowlist, not the absence of a thrown error, is what
+  // must refuse it.
+  const origin = parsePaperclipOrigin('http://evil"quote.example/');
+  assert(origin === null, `must refuse a quote-bearing hostname even though new URL() did not throw, got: ${origin}`);
+});
+
+check('parsePaperclipOrigin accepts a bracketed IPv6 literal', () => {
+  const origin = parsePaperclipOrigin('http://[::1]:3100/');
+  assert(origin === 'http://[::1]:3100', `expected the IPv6 origin kept, got: ${origin}`);
+});
+
 check('trustPaperclipUrl stores the normalized origin, not the raw value with its path', () => {
   const project = temp('trust-origin');
   trustPaperclipUrl(project, 'http://192.168.20.5:3100/some/path?x=1');
