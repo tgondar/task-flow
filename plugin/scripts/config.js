@@ -286,6 +286,62 @@ function trustDocsDir(projectDir, docsDir) {
   return file;
 }
 
+// --- trusting where a secret may be sent ------------------------------------
+//
+// `.claude/task-flow.json` is committed: anyone who can land a change to it
+// controls `paperclip.url`, the destination the paperclip board token (held
+// only in the PAPERCLIP_TOKEN environment variable, never in this file) gets
+// sent to. Without a check here, a malicious edit to that one committed value
+// would turn an ordinary `/task-flow paperclip` run into sending that token
+// to an attacker's host. So the URL gets the exact same treatment an outside
+// docsDir already gets above: read, shown to the person, and not used until
+// they confirm it on this machine - a second file, because a URL and a
+// filesystem path are trusted for different reasons and neither list should
+// grow silently from someone trusting the other.
+
+const paperclipTrustFile = () => path.join(os.homedir(), '.claude', 'task-flow-trusted-paperclip.json');
+
+function readTrustedPaperclipUrls() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(paperclipTrustFile(), 'utf8').replace(/^﻿/, ''));
+    return Array.isArray(parsed && parsed.trusted) ? parsed.trusted : [];
+  } catch {
+    return [];
+  }
+}
+
+function isPaperclipUrlTrusted(projectDir, url) {
+  return readTrustedPaperclipUrls().some(
+    (entry) =>
+      entry && typeof entry.project === 'string' && typeof entry.url === 'string' &&
+      samePath(entry.project, projectDir) && entry.url === url
+  );
+}
+
+/** Adds the pair to the list. Refuses to overwrite a list it cannot read, rather
+ *  than silently dropping the pairs already in it - the same discipline
+ *  trustDocsDir applies to its own file. */
+function trustPaperclipUrl(projectDir, url) {
+  const file = paperclipTrustFile();
+  let current = { trusted: [] };
+  if (isFile(file)) {
+    try {
+      current = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
+    } catch (error) {
+      throw new Error(`${file} is not valid JSON (${error.message}); fix or remove it first`);
+    }
+    if (!current || typeof current !== 'object' || !Array.isArray(current.trusted)) {
+      throw new Error(`${file} does not hold a "trusted" list; fix or remove it first`);
+    }
+  }
+  if (!isPaperclipUrlTrusted(projectDir, url)) {
+    current.trusted.push({ project: path.resolve(projectDir), url });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(current, null, 2) + '\n');
+  }
+  return file;
+}
+
 // --- the per-machine folder shared with the viewer --------------------------
 //
 // plugin/viewer/index.html shows the runs of every project on this machine and
@@ -504,6 +560,9 @@ module.exports = {
   stateDirOf,
   trustDocsDir,
   trustFile,
+  isPaperclipUrlTrusted,
+  trustPaperclipUrl,
+  paperclipTrustFile,
 };
 
 // --- CLI -------------------------------------------------------------------
@@ -571,8 +630,24 @@ if (require.main === module) {
       process.stderr.write(`trust failed: ${error.message}\n`);
       process.exitCode = 1;
     }
+  } else if (command === 'trust-paperclip') {
+    // The consent step for §0d: run only after the person has confirmed the
+    // URL themselves, same as `trust` above for docsDir.
+    const url = value('--url');
+    if (!url) {
+      process.stderr.write('trust-paperclip needs --url <paperclip base url>\n');
+      process.exitCode = 2;
+    } else {
+      try {
+        const file = trustPaperclipUrl(projectDir, url);
+        process.stdout.write(`Trusted ${url} for ${projectDir} on this machine (${file}).\n`);
+      } catch (error) {
+        process.stderr.write(`trust-paperclip failed: ${error.message}\n`);
+        process.exitCode = 1;
+      }
+    }
   } else {
-    process.stderr.write('usage: config.js check | trust | init --docs-dir <dir> --tasks-file <file> [--language <tag>]\n');
+    process.stderr.write('usage: config.js check | trust | trust-paperclip --url <url> | init --docs-dir <dir> --tasks-file <file> [--language <tag>]\n');
     process.exitCode = 2;
   }
 }

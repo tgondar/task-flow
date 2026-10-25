@@ -8,12 +8,15 @@
 // plugin's README on anchoring drifting prose in code). This file is that
 // anchor: SKILL.md says what the mode is for, this does the one thing it does.
 //
-// Everything project-specific — the paperclip URL, which env var holds the
-// token, which agent gets the issue, which GitHub Project field to flip — comes
-// from .claude/task-flow.json's optional `paperclip`/`githubProject` objects,
-// the same way every other project-specific setting in this plugin does. The
-// token itself is never read from that file: only the name of the environment
-// variable that holds it, because the config file is committed.
+// Everything project-specific — the paperclip URL, which agent gets the
+// issue, which GitHub Project field to flip — comes from
+// .claude/task-flow.json's optional `paperclip`/`githubProject` objects, the
+// same way every other project-specific setting in this plugin does. Two
+// things that file does NOT get a say in, because it is committed and a PR
+// could change it: the token is always PAPERCLIP_TOKEN, a fixed environment
+// variable never named by config; and paperclip.url must be confirmed on this
+// machine first (config.js's trustPaperclipUrl/isPaperclipUrlTrusted) before
+// it is ever sent a request carrying that token.
 
 'use strict';
 
@@ -22,10 +25,19 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const { execFileSync } = require('child_process');
-const { crossesLink, loadConfig } = require('./config.js');
+const { crossesLink, isPaperclipUrlTrusted, loadConfig } = require('./config.js');
 
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const ISSUE_NUMBER = /^[1-9][0-9]*$/;
+// GitHub owner/repo names: validated before they ever reach `gh`, so a
+// committed config value cannot smuggle a `gh` flag or (on some `gh`
+// versions) an `@file`-style argument into the call.
+const GITHUB_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,99})$/;
+// The opaque node ids GitHub's GraphQL API and REST API hand out
+// (ProjectV2 ids, field ids, single-select option ids): letters, digits,
+// underscore and hyphen only, observed and documented nowhere to contain
+// anything else.
+const GRAPHQL_ID = /^[A-Za-z0-9_-]{1,100}$/;
 
 function fail(message) {
   process.stderr.write(`send-to-paperclip: ${message}\n`);
@@ -107,12 +119,19 @@ function postIssue({ baseUrl, token, companyId, title, description, assigneeAgen
 // --- the GitHub Project status flip -----------------------------------------
 //
 // Shells out to `gh`, already authenticated on this machine, rather than
-// reimplementing GitHub auth. Every value gh sees here is either validated
-// (the issue number, against ISSUE_NUMBER) or passed as a GraphQL variable
-// (`-F`), never string-interpolated into the query text, so nothing in a
-// project's config or a run's artifacts can inject GraphQL.
+// reimplementing GitHub auth. Every value gh sees here is passed as its own
+// argv entry (execFileSync, never a shell string, so no argument can inject
+// another flag) AND validated first against GITHUB_NAME/GRAPHQL_ID/ISSUE_NUMBER
+// — belt and suspenders, because `gh api`'s `-f`/`-F` both give an `@value`
+// special, file-reading meaning on some versions, and a value out of a
+// project's own committed config is not this script's to trust blindly.
 
 function findProjectItemId({ owner, repo, issueNumber, projectId }) {
+  if (!GITHUB_NAME.test(owner)) fail(`githubProject.owner is not a valid GitHub name: ${owner}`);
+  if (!GITHUB_NAME.test(repo)) fail(`githubProject.repo is not a valid GitHub name: ${repo}`);
+  if (!GRAPHQL_ID.test(projectId)) fail(`githubProject.projectId is not a valid id: ${projectId}`);
+  if (!ISSUE_NUMBER.test(String(issueNumber))) fail(`issue number is not valid: ${issueNumber}`);
+
   const out = execFileSync(
     'gh',
     [
@@ -122,9 +141,9 @@ function findProjectItemId({ owner, repo, issueNumber, projectId }) {
       'query=query($owner:String!,$repo:String!,$number:Int!){' +
         'repository(owner:$owner,name:$repo){issue(number:$number){' +
         'projectItems(first:20){nodes{id project{id}}}}}}',
-      '-F',
+      '-f',
       `owner=${owner}`,
-      '-F',
+      '-f',
       `repo=${repo}`,
       '-F',
       `number=${issueNumber}`,
@@ -139,6 +158,10 @@ function findProjectItemId({ owner, repo, issueNumber, projectId }) {
 }
 
 function flipStatus({ projectId, itemId, fieldId, optionId }) {
+  if (!GRAPHQL_ID.test(projectId)) fail(`githubProject.projectId is not a valid id: ${projectId}`);
+  if (!GRAPHQL_ID.test(itemId)) fail(`project item id is not valid: ${itemId}`);
+  if (!GRAPHQL_ID.test(fieldId)) fail(`githubProject.statusFieldId is not a valid id: ${fieldId}`);
+  if (!GRAPHQL_ID.test(optionId)) fail(`githubProject.readyOptionId is not a valid id: ${optionId}`);
   execFileSync('gh', [
     'project', 'item-edit',
     '--project-id', projectId,
@@ -165,7 +188,7 @@ async function main() {
   const raw = config.raw || {};
 
   const pc = raw.paperclip || {};
-  for (const field of ['url', 'tokenEnv', 'companyId', 'agentId']) {
+  for (const field of ['url', 'companyId', 'agentId']) {
     if (typeof pc[field] !== 'string' || !pc[field]) fail(`.claude/task-flow.json is missing paperclip.${field}`);
   }
   const gh = raw.githubProject || {};
@@ -173,8 +196,23 @@ async function main() {
     if (typeof gh[field] !== 'string' || !gh[field]) fail(`.claude/task-flow.json is missing githubProject.${field}`);
   }
 
-  const token = process.env[pc.tokenEnv];
-  if (!token) fail(`environment variable ${pc.tokenEnv} is not set`);
+  // The destination of a board-level secret must never be picked by committed
+  // config alone (HISTORY.md, "handing build onward to a separate agent
+  // org"): a malicious edit to paperclip.url in a merged PR must not be able
+  // to silently redirect where the token goes. The URL needs the person's own
+  // confirmation on this machine first, exactly like an outside docsDir does.
+  if (!isPaperclipUrlTrusted(projectDir, pc.url)) {
+    fail(
+      `paperclip.url is not trusted on this machine (${pc.url}); confirm the URL with the person, then run: `
+      + `node "${path.join(__dirname, 'config.js')}" trust-paperclip --project-dir "${projectDir}" --url "${pc.url}"`,
+    );
+  }
+
+  // The token is never named by committed config (only its destination was,
+  // above) — one fixed, purpose-specific environment variable, so a malicious
+  // config edit cannot redirect an unrelated secret into this request either.
+  const token = process.env.PAPERCLIP_TOKEN;
+  if (!token) fail('environment variable PAPERCLIP_TOKEN is not set');
 
   const stateDir = path.join(config.stateDir, slug);
   const statePath = path.join(stateDir, 'state.json');
@@ -254,4 +292,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { readArtifact, findProjectItemId };
+module.exports = { readArtifact, findProjectItemId, flipStatus };

@@ -21,7 +21,8 @@ process.env.HOME = TEST_HOME;
 process.env.USERPROFILE = TEST_HOME;
 
 const MODULE = path.join(__dirname, '..', 'plugin', 'scripts', 'send-to-paperclip.js');
-const { readArtifact } = require(MODULE);
+const { readArtifact, findProjectItemId, flipStatus } = require(MODULE);
+const { trustPaperclipUrl } = require(path.join(__dirname, '..', 'plugin', 'scripts', 'config.js'));
 
 let passed = 0;
 const failures = [];
@@ -44,7 +45,7 @@ function assert(condition, message) {
 const temp = (prefix) => fs.mkdtempSync(path.join(os.tmpdir(), `taskflow-s2p-${prefix}-`));
 
 const VALID_PAPERCLIP = {
-  paperclip: { url: 'http://127.0.0.1:1', tokenEnv: 'TEST_PAPERCLIP_TOKEN', companyId: 'c1', agentId: 'a1' },
+  paperclip: { url: 'http://127.0.0.1:1', companyId: 'c1', agentId: 'a1' },
   githubProject: {
     owner: 'o', repo: 'r', projectId: 'PVT_x', statusFieldId: 'PVTSSF_x', readyOptionId: 'opt1',
   },
@@ -61,6 +62,7 @@ function makeRun({
   writePlan = true,
   specPath = 'specs/260101_demo.md',
   planPath = 'plans/260101_demo.plan.md',
+  trustUrl = true,
 } = {}) {
   const project = temp('project');
   const docs = path.join(project, 'docs');
@@ -88,6 +90,10 @@ function makeRun({
     ...state,
   };
   fs.writeFileSync(path.join(stateDir, 'state.json'), JSON.stringify(finalState, null, 2));
+
+  if (trustUrl && config.paperclip && config.paperclip.url) {
+    trustPaperclipUrl(project, config.paperclip.url);
+  }
 
   return { project, docs, slug };
 }
@@ -164,6 +170,48 @@ check('readArtifact returns null for a missing file, never throws', () => {
   assert(body === null, 'a missing artifact is null, not an error - callers decide if it is required');
 });
 
+// --- findProjectItemId/flipStatus: every value validated before `gh` sees it -
+
+check('findProjectItemId refuses an owner value that is not a valid GitHub name', () => {
+  let threw = false;
+  try {
+    findProjectItemId({ owner: '@evil', repo: 'r', issueNumber: '1', projectId: 'PVT_x' });
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'an owner starting with @ (gh\'s @file syntax on some versions) must never reach `gh`');
+});
+
+check('findProjectItemId refuses a repo value that is not a valid GitHub name', () => {
+  let threw = false;
+  try {
+    findProjectItemId({ owner: 'o', repo: '../../etc/passwd', issueNumber: '1', projectId: 'PVT_x' });
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'a path-shaped repo value must never reach `gh`');
+});
+
+check('findProjectItemId refuses a non-numeric issue number', () => {
+  let threw = false;
+  try {
+    findProjectItemId({ owner: 'o', repo: 'r', issueNumber: '1 && rm -rf /', projectId: 'PVT_x' });
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'a shell-metacharacter-bearing issue number must never reach `gh`, even via execFileSync argv');
+});
+
+check('flipStatus refuses an invalid field or option id', () => {
+  let threw = false;
+  try {
+    flipStatus({ projectId: 'PVT_x', itemId: 'ITEM_x', fieldId: '@secrets.txt', optionId: 'opt1' });
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'an @-prefixed field id must never reach `gh`');
+});
+
 // --- CLI: validation stops before any network call ---------------------------
 
 check('rejects a slug with path-traversal characters', () => {
@@ -200,12 +248,46 @@ check('stops when githubProject config is missing a field', () => {
   assert(/githubProject\.readyOptionId/.test(result.stderr), `expected the specific missing field named, got: ${result.stderr}`);
 });
 
-check('stops when the token env var is configured but not set', () => {
-  const { project } = makeRun({ slug: 'demo', extraConfig: VALID_PAPERCLIP });
-  const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { TEST_PAPERCLIP_TOKEN: '' });
+check('stops when paperclip.url is not trusted on this machine yet', () => {
+  const { project } = makeRun({ slug: 'demo', extraConfig: VALID_PAPERCLIP, trustUrl: false });
+  const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { PAPERCLIP_TOKEN: 'x' });
   assert(result.status !== 0, 'must exit non-zero');
-  assert(/TEST_PAPERCLIP_TOKEN/.test(result.stderr), `expected the env var name, got: ${result.stderr}`);
+  assert(/not trusted on this machine/.test(result.stderr), `expected a not-trusted complaint, got: ${result.stderr}`);
+  assert(/trust-paperclip/.test(result.stderr), `expected the fix command named, got: ${result.stderr}`);
+});
+
+check('a committed paperclip.url pointing somewhere else than what was trusted is still refused', () => {
+  const { project } = makeRun({ slug: 'demo', extraConfig: VALID_PAPERCLIP }); // trusts VALID_PAPERCLIP.paperclip.url
+  const statePath = path.join(project, '.claude', 'task-flow.json');
+  const config = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  config.paperclip.url = 'http://attacker.example:9/'; // never trusted for this project
+  fs.writeFileSync(statePath, JSON.stringify(config, null, 2));
+  const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { PAPERCLIP_TOKEN: 'x' });
+  assert(result.status !== 0, 'must exit non-zero');
+  assert(/not trusted on this machine/.test(result.stderr), `expected a not-trusted complaint, got: ${result.stderr}`);
+});
+
+check('stops when the token env var is not set', () => {
+  const { project } = makeRun({ slug: 'demo', extraConfig: VALID_PAPERCLIP });
+  const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { PAPERCLIP_TOKEN: '' });
+  assert(result.status !== 0, 'must exit non-zero');
+  assert(/PAPERCLIP_TOKEN/.test(result.stderr), `expected the env var name, got: ${result.stderr}`);
   assert(!/Bearer/.test(result.stderr), 'must never print a token or an Authorization header value');
+});
+
+check('config cannot choose which environment variable the token comes from', () => {
+  // Even if a committed config tried to name a different variable, the
+  // script only ever reads PAPERCLIP_TOKEN - there is no field left for it
+  // to redirect. A run with an unrelated "valuable" secret present but no
+  // PAPERCLIP_TOKEN must still fail, and must never read the other one.
+  const { project } = makeRun({ slug: 'demo', extraConfig: VALID_PAPERCLIP });
+  const result = run(project, ['--slug', 'demo', '--github-issue', '1'], {
+    PAPERCLIP_TOKEN: '',
+    SOME_OTHER_VALUABLE_SECRET: 'do-not-send-this-anywhere',
+  });
+  assert(result.status !== 0, 'must exit non-zero');
+  assert(!result.stdout.includes('do-not-send-this-anywhere') && !result.stderr.includes('do-not-send-this-anywhere'),
+    'an unrelated secret in the environment must never be read or echoed');
 });
 
 check('never leaks a configured token into stdout or stderr, even on a later failure', () => {
@@ -217,21 +299,21 @@ check('never leaks a configured token into stdout or stderr, even on a later fai
     },
   });
   const secretToken = 'super-secret-token-value';
-  const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { TEST_PAPERCLIP_TOKEN: secretToken });
+  const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { PAPERCLIP_TOKEN: secretToken });
   assert(!result.stdout.includes(secretToken), 'token must never appear in stdout');
   assert(!result.stderr.includes(secretToken), 'token must never appear in stderr');
 });
 
 check('stops when the run is not at phase "plan"', () => {
   const { project } = makeRun({ slug: 'demo', state: { phase: 'build' }, extraConfig: VALID_PAPERCLIP });
-  const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { TEST_PAPERCLIP_TOKEN: 'x' });
+  const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { PAPERCLIP_TOKEN: 'x' });
   assert(result.status !== 0, 'must exit non-zero');
   assert(/phase "build", not "plan"/.test(result.stderr), `expected a phase complaint, got: ${result.stderr}`);
 });
 
 check('stops when the run has no plan artifact', () => {
   const { project } = makeRun({ slug: 'demo', writePlan: false, extraConfig: VALID_PAPERCLIP });
-  const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { TEST_PAPERCLIP_TOKEN: 'x' });
+  const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { PAPERCLIP_TOKEN: 'x' });
   assert(result.status !== 0, 'must exit non-zero');
   assert(/no plan artifact/.test(result.stderr), `expected a missing-plan complaint, got: ${result.stderr}`);
 });
@@ -244,7 +326,7 @@ check('stops when state.json.artifacts.plan escapes docsDir, never reads it', ()
   const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
   state.artifacts.plan = outsideSecret;
   fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
-  const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { TEST_PAPERCLIP_TOKEN: 'x' });
+  const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { PAPERCLIP_TOKEN: 'x' });
   assert(result.status !== 0, 'must exit non-zero');
   assert(/escapes docsDir/.test(result.stderr), `expected an escape complaint, got: ${result.stderr}`);
   assert(!result.stdout.includes('SHOULD NEVER BE SENT') && !result.stderr.includes('SHOULD NEVER BE SENT'),
@@ -254,7 +336,7 @@ check('stops when state.json.artifacts.plan escapes docsDir, never reads it', ()
 
 check('rejects a missing required flag instead of defaulting it', () => {
   const { project } = makeRun({ slug: 'demo', extraConfig: VALID_PAPERCLIP });
-  const result = run(project, ['--github-issue', '1'], { TEST_PAPERCLIP_TOKEN: 'x' });
+  const result = run(project, ['--github-issue', '1'], { PAPERCLIP_TOKEN: 'x' });
   assert(result.status !== 0, 'must exit non-zero without --slug');
 });
 

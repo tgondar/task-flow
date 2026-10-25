@@ -118,10 +118,33 @@ Every rule below comes from something that went wrong, or nearly did, in them.
   === 'done'`, to decide whether to archive the page) was checked too, which is
   exactly why `status` was set to `blocked` and not `done` — a `done` status
   here would have archived a run that is still, genuinely, in flight elsewhere.
-- **The real secret — a paperclip board/agent API token — is named by an env
-  var in config (`paperclip.tokenEnv`), never written into
-  `.claude/task-flow.json` itself.** That file is committed; a token in it
-  would ship to every clone of the repository.
+- **The real secret — a paperclip board/agent API token — lives only in the
+  fixed `PAPERCLIP_TOKEN` environment variable, never written into
+  `.claude/task-flow.json` itself, and config has no say over which variable
+  name is read.** An earlier draft let `.claude/task-flow.json` name the
+  environment variable (`paperclip.tokenEnv`), reasoning that only the name
+  was committed, never the value. A security review caught what that still
+  allowed: because the same committed file also names `paperclip.url`, a
+  malicious PR could change `tokenEnv` to point at an unrelated, more
+  valuable secret already in the environment (not just the paperclip token)
+  and `url` to an attacker's host, and the next `/task-flow paperclip` run
+  would send that secret there without anyone having approved either change.
+  Fixing the variable name removes the "which secret" half of that; the "where
+  does it go" half still needed its own fix (next point).
+- **`paperclip.url` must be confirmed on this machine before it is ever sent
+  a request** (`config.js trustPaperclipUrl`/`isPaperclipUrlTrusted`, a second
+  trust file alongside the one `docsDir` already uses, not a shared one — a
+  URL and a filesystem path are trusted for different reasons, and growing one
+  list from trusting the other would trust more than the person actually
+  confirmed). This is the other half of the same finding: even with the token
+  variable fixed, a committed `paperclip.url` pointing at an attacker's host
+  would still send that one fixed token there on every run until a person
+  looks at it — which is exactly the failure mode `docsDir`'s own trust file
+  exists to prevent for a filesystem path, so the same mechanism was reused
+  for a URL rather than inventing a different one (e.g. a blanket
+  "https unless loopback" rule, which would have also broken a real, working
+  LAN deployment — see "Operational notes" in the integration's memory file —
+  for a different threat model than the one actually found).
 - **Does not close the loop back from paperclip.** Pulling paperclip's decision
   history into this run's own log when its PR merges, and resuming anything in
   this session, is explicitly out of scope for the first version — paperclip's

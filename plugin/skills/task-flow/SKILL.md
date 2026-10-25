@@ -289,15 +289,21 @@ that needs them, and `config.js check` does not require them for every project):
 
 ```json
 {
-  "paperclip": { "url": "...", "tokenEnv": "PAPERCLIP_TOKEN", "companyId": "...", "agentId": "..." },
+  "paperclip": { "url": "...", "companyId": "...", "agentId": "..." },
   "githubProject": { "owner": "...", "repo": "...", "projectId": "PVT_...", "statusFieldId": "PVTSSF_...", "readyOptionId": "..." }
 }
 ```
 
-`tokenEnv` names an environment variable — the token itself never lives in the
-config file. Missing either object, or any field in it, is the same kind of stop
-as §0's missing `docsDir`/`language`/`tasksFile`: say what's missing, do not guess
-it, do not start.
+The token itself never lives in this file: it comes only from the
+`PAPERCLIP_TOKEN` environment variable, a fixed name config has no say over —
+this file is committed, and letting it name both a secret's source and its
+destination is exactly how a malicious edit would exfiltrate a token to
+somewhere else. `paperclip.url` gets the same treatment §0 already gives an
+outside `docsDir`: it must be confirmed on this machine first (`node
+"${CLAUDE_PLUGIN_ROOT}/scripts/config.js" trust-paperclip --url <url>`) before
+this mode will send it anything. Missing any other field is the same kind of
+stop as §0's missing `docsDir`/`language`/`tasksFile`: say what's missing, do
+not guess it, do not start.
 
 **Detection.** Same shape as `auto`/`review <PR>` (§0b/§0c): the first token of
 `$ARGUMENTS` is `paperclip`, the second token is the GitHub issue number the
