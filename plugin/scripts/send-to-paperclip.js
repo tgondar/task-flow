@@ -25,7 +25,7 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const { execFileSync } = require('child_process');
-const { crossesLink, isPaperclipUrlTrusted, loadConfig } = require('./config.js');
+const { crossesLink, isPaperclipUrlTrusted, loadConfig, parsePaperclipOrigin } = require('./config.js');
 
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const ISSUE_NUMBER = /^[1-9][0-9]*$/;
@@ -196,15 +196,32 @@ async function main() {
     if (typeof gh[field] !== 'string' || !gh[field]) fail(`.claude/task-flow.json is missing githubProject.${field}`);
   }
 
+  // Parsed once, here, with new URL() - never a raw string compare or a
+  // regex - and only the result (scheme+host+port, nothing a path or query
+  // could hide a difference in) is trusted, compared, shown, or ever reaches
+  // a message this process prints. A value that does not parse as a plain
+  // http(s) origin with no username/password is refused outright: it is
+  // never safe to echo into a suggested command, whatever it contains, so
+  // the message below cannot be built from it at all. See config.js's
+  // parsePaperclipOrigin for why userinfo specifically is rejected.
+  const origin = parsePaperclipOrigin(pc.url);
+  if (!origin) fail('paperclip.url is not a plain http(s) URL with no username or password');
+
   // The destination of a board-level secret must never be picked by committed
   // config alone (HISTORY.md, "handing build onward to a separate agent
   // org"): a malicious edit to paperclip.url in a merged PR must not be able
   // to silently redirect where the token goes. The URL needs the person's own
   // confirmation on this machine first, exactly like an outside docsDir does.
+  // The suggested fix-it command below is built only from `origin` (already
+  // validated to contain nothing but scheme/host/port) and from `projectDir`
+  // (this process's own resolved path, never a value out of state.json or
+  // the config file) - never the raw, unparsed `pc.url` a committed file
+  // could have set to anything, including a string that looks like a
+  // runnable shell command of its own.
   if (!isPaperclipUrlTrusted(projectDir, pc.url)) {
     fail(
-      `paperclip.url is not trusted on this machine (${pc.url}); confirm the URL with the person, then run: `
-      + `node "${path.join(__dirname, 'config.js')}" trust-paperclip --project-dir "${projectDir}" --url "${pc.url}"`,
+      `paperclip.url (${origin}) is not trusted on this machine; confirm it with the person, then run: `
+      + `node "${path.join(__dirname, 'config.js')}" trust-paperclip --project-dir "${projectDir}" --url "${origin}"`,
     );
   }
 
@@ -239,7 +256,7 @@ async function main() {
   const description = [PRECEDENCE, '', ...sections, `GitHub issue: #${githubIssue}`].join('\n');
 
   const issue = await postIssue({
-    baseUrl: pc.url,
+    baseUrl: origin,
     token,
     companyId: pc.companyId,
     title: slug,

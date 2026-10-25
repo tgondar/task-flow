@@ -22,7 +22,8 @@ process.env.USERPROFILE = TEST_HOME;
 
 const MODULE = path.join(__dirname, '..', 'plugin', 'scripts', 'send-to-paperclip.js');
 const { readArtifact, findProjectItemId, flipStatus } = require(MODULE);
-const { trustPaperclipUrl } = require(path.join(__dirname, '..', 'plugin', 'scripts', 'config.js'));
+const CONFIG_MODULE = path.join(__dirname, '..', 'plugin', 'scripts', 'config.js');
+const { trustPaperclipUrl, isPaperclipUrlTrusted, parsePaperclipOrigin } = require(CONFIG_MODULE);
 
 let passed = 0;
 const failures = [];
@@ -212,6 +213,53 @@ check('flipStatus refuses an invalid field or option id', () => {
   assert(threw, 'an @-prefixed field id must never reach `gh`');
 });
 
+// --- parsePaperclipOrigin / trust: normalized origin, not a raw string -------
+
+check('parsePaperclipOrigin rejects a URL carrying a username/password (host-confusion shape)', () => {
+  // http://192.168.20.5:3100@evil.com/ reads, to a human skimming it, as if
+  // it starts with the trusted LAN address - new URL() resolves the real
+  // host to evil.com. This is exactly the shape that must never slip through.
+  const origin = parsePaperclipOrigin('http://192.168.20.5:3100@evil.com/');
+  assert(origin === null, `must refuse a URL with userinfo, got: ${origin}`);
+});
+
+check('parsePaperclipOrigin rejects a non-http(s) scheme', () => {
+  assert(parsePaperclipOrigin('file:///etc/passwd') === null, 'file: must be refused');
+  assert(parsePaperclipOrigin('javascript:alert(1)') === null, 'javascript: must be refused');
+});
+
+check('parsePaperclipOrigin rejects an unparsable string without throwing', () => {
+  assert(parsePaperclipOrigin('not a url at all') === null, 'garbage input must return null, not throw');
+  assert(parsePaperclipOrigin('') === null, 'empty input must return null');
+  assert(parsePaperclipOrigin(undefined) === null, 'non-string input must return null');
+});
+
+check('parsePaperclipOrigin normalizes away path, query and trailing slash', () => {
+  const a = parsePaperclipOrigin('http://192.168.20.5:3100/api/foo?x=1');
+  const b = parsePaperclipOrigin('http://192.168.20.5:3100/');
+  const c = parsePaperclipOrigin('http://192.168.20.5:3100');
+  assert(a === 'http://192.168.20.5:3100' && a === b && b === c, `expected the same origin for all three, got: ${a}, ${b}, ${c}`);
+});
+
+check('trustPaperclipUrl stores the normalized origin, not the raw value with its path', () => {
+  const project = temp('trust-origin');
+  trustPaperclipUrl(project, 'http://192.168.20.5:3100/some/path?x=1');
+  assert(isPaperclipUrlTrusted(project, 'http://192.168.20.5:3100'), 'a bare origin must read as trusted');
+  assert(isPaperclipUrlTrusted(project, 'http://192.168.20.5:3100/api/companies/x/issues'),
+    'a different path on the same origin must also read as trusted - only the origin was ever confirmed');
+});
+
+check('trustPaperclipUrl refuses to store a userinfo-bearing URL', () => {
+  const project = temp('trust-userinfo');
+  let threw = false;
+  try {
+    trustPaperclipUrl(project, 'http://user:pass@192.168.20.5:3100/');
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'trusting a URL with userinfo must throw, never silently store the confused origin');
+});
+
 // --- CLI: validation stops before any network call ---------------------------
 
 check('rejects a slug with path-traversal characters', () => {
@@ -254,6 +302,26 @@ check('stops when paperclip.url is not trusted on this machine yet', () => {
   assert(result.status !== 0, 'must exit non-zero');
   assert(/not trusted on this machine/.test(result.stderr), `expected a not-trusted complaint, got: ${result.stderr}`);
   assert(/trust-paperclip/.test(result.stderr), `expected the fix command named, got: ${result.stderr}`);
+});
+
+check('rejects a userinfo-bearing paperclip.url before ever checking trust, and never echoes it as a runnable command', () => {
+  const { project } = makeRun({ slug: 'demo', extraConfig: VALID_PAPERCLIP, trustUrl: false });
+  const statePath = path.join(project, '.claude', 'task-flow.json');
+  const config = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  // Looks, to a human skimming it, like it starts with the trusted host; new
+  // URL() resolves the real host to evil.com. Also shaped like an attempt to
+  // break out of the suggested fix-it command's quoting if it were ever
+  // interpolated raw (backtick, $(), a stray quote).
+  config.paperclip.url = 'http://127.0.0.1:1`$(touch PWNED)`"@evil.com/';
+  fs.writeFileSync(statePath, JSON.stringify(config, null, 2));
+  const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { PAPERCLIP_TOKEN: 'x' });
+  assert(result.status !== 0, 'must exit non-zero');
+  assert(/not a plain http\(s\) URL/.test(result.stderr), `expected the URL-shape complaint, got: ${result.stderr}`);
+  assert(!/not trusted on this machine/.test(result.stderr), 'must fail at URL parsing, before ever reaching the trust check or building its message');
+  assert(!result.stdout.includes('evil.com') && !result.stderr.includes('evil.com'),
+    'the malicious raw value must never be echoed anywhere, not even inside an error message');
+  assert(!result.stdout.includes('touch PWNED') && !result.stderr.includes('touch PWNED'),
+    'the raw value must never appear in a position that looks like a runnable shell command');
 });
 
 check('a committed paperclip.url pointing somewhere else than what was trusted is still refused', () => {

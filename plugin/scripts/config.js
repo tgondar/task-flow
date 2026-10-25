@@ -301,6 +301,32 @@ function trustDocsDir(projectDir, docsDir) {
 
 const paperclipTrustFile = () => path.join(os.homedir(), '.claude', 'task-flow-trusted-paperclip.json');
 
+/** The one place a `paperclip.url` value is parsed, everywhere it is read -
+ *  the trust store, the check against it, and the request itself all have to
+ *  agree on what "the same URL" means, or a value one of them reads as inside
+ *  the trusted set and another resolves to a different host is a hole on its
+ *  own (userinfo is the classic shape: `http://192.168.20.5:3100@evil.com/`
+ *  LOOKS like it starts with a trusted host to a human skimming the string,
+ *  but `new URL()` reads `evil.com` as the actual host). So: parsed with
+ *  `new URL()` (never regex, never a string compare on the raw value),
+ *  `http:`/`https:` only, no username or password component, and the value
+ *  that is ever stored, compared or shown is `origin` alone - scheme, host,
+ *  port, nothing a path or query could hide a difference in. Returns null for
+ *  anything that does not meet all of that, never throws: callers decide
+ *  whether null is a stop or just "not trusted". */
+function parsePaperclipOrigin(raw) {
+  if (typeof raw !== 'string' || !raw) return null;
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  if (url.username || url.password) return null;
+  return url.origin;
+}
+
 function readTrustedPaperclipUrls() {
   try {
     const parsed = JSON.parse(fs.readFileSync(paperclipTrustFile(), 'utf8').replace(/^﻿/, ''));
@@ -310,18 +336,30 @@ function readTrustedPaperclipUrls() {
   }
 }
 
+/** False for anything parsePaperclipOrigin refuses, same as "not trusted" -
+ *  there is no list a malformed or userinfo-bearing URL could ever be on. */
 function isPaperclipUrlTrusted(projectDir, url) {
+  const origin = parsePaperclipOrigin(url);
+  if (!origin) return false;
   return readTrustedPaperclipUrls().some(
     (entry) =>
       entry && typeof entry.project === 'string' && typeof entry.url === 'string' &&
-      samePath(entry.project, projectDir) && entry.url === url
+      samePath(entry.project, projectDir) && entry.url === origin
   );
 }
 
-/** Adds the pair to the list. Refuses to overwrite a list it cannot read, rather
- *  than silently dropping the pairs already in it - the same discipline
- *  trustDocsDir applies to its own file. */
+/** Adds the pair to the list, storing the normalized origin - never the raw
+ *  string, for the same reason isPaperclipUrlTrusted compares against it.
+ *  Throws on a URL parsePaperclipOrigin refuses: this is the one path where
+ *  that has to be a stop, not a quiet "not trusted", because the person just
+ *  typed it themselves and deserves to know why it was rejected. Refuses to
+ *  overwrite a list it cannot read, rather than silently dropping the pairs
+ *  already in it - the same discipline trustDocsDir applies to its own file. */
 function trustPaperclipUrl(projectDir, url) {
+  const origin = parsePaperclipOrigin(url);
+  if (!origin) {
+    throw new Error(`not a trustworthy URL (need http: or https:, no username/password): ${JSON.stringify(url)}`);
+  }
   const file = paperclipTrustFile();
   let current = { trusted: [] };
   if (isFile(file)) {
@@ -335,7 +373,7 @@ function trustPaperclipUrl(projectDir, url) {
     }
   }
   if (!isPaperclipUrlTrusted(projectDir, url)) {
-    current.trusted.push({ project: path.resolve(projectDir), url });
+    current.trusted.push({ project: path.resolve(projectDir), url: origin });
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify(current, null, 2) + '\n');
   }
@@ -563,6 +601,7 @@ module.exports = {
   isPaperclipUrlTrusted,
   trustPaperclipUrl,
   paperclipTrustFile,
+  parsePaperclipOrigin,
 };
 
 // --- CLI -------------------------------------------------------------------
@@ -640,7 +679,13 @@ if (require.main === module) {
     } else {
       try {
         const file = trustPaperclipUrl(projectDir, url);
-        process.stdout.write(`Trusted ${url} for ${projectDir} on this machine (${file}).\n`);
+        // The normalized origin, never the raw --url the person typed: what
+        // gets shown back has to be exactly what was stored and what every
+        // future check compares against, or a confirmation read against one
+        // string and acted on against another is the same hole this command
+        // exists to close.
+        const origin = parsePaperclipOrigin(url);
+        process.stdout.write(`Trusted ${origin} for ${projectDir} on this machine (${file}).\n`);
       } catch (error) {
         process.stderr.write(`trust-paperclip failed: ${error.message}\n`);
         process.exitCode = 1;

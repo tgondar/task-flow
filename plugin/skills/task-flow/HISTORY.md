@@ -145,6 +145,27 @@ Every rule below comes from something that went wrong, or nearly did, in them.
   "https unless loopback" rule, which would have also broken a real, working
   LAN deployment — see "Operational notes" in the integration's memory file —
   for a different threat model than the one actually found).
+- **A second security review, on that same commit, found the trust mechanism
+  above still had two holes, both fixed in one pass:** the "not trusted"
+  message built a ready-to-run `trust-paperclip` command by interpolating
+  `paperclip.url` straight into a double-quoted shell argument — a committed
+  config value shaped like `http://host\`$(evil)\`"@x/` would survive that
+  quoting if whoever read the message (a person, or an agent that routinely
+  pastes a suggested fix-it command into a shell, which describes this
+  plugin's own orchestrator) ran it as shown. And the trust comparison itself
+  was a raw string equality on the URL, which is its own hole independent of
+  the first: `http://192.168.20.5:3100@evil.com/` reads, to someone skimming
+  it, as if it starts with a trusted LAN address, but `new URL()` resolves
+  the real host to `evil.com` — a person could confirm what they read as the
+  LAN address while actually trusting an attacker's host. Fixed by adding one
+  function, `config.js parsePaperclipOrigin`, that every one of these call
+  sites now goes through: `new URL()` (never a regex, never a raw compare),
+  `http:`/`https:` only, no username or password component allowed at all,
+  and only the resulting `origin` (scheme+host+port, nothing a path or query
+  could hide a difference in) is ever stored, compared, shown to the person,
+  or used to build a message — the raw value never reaches a message this
+  process prints, closing both holes with the same fix rather than patching
+  the quoting and the comparison separately.
 - **Does not close the loop back from paperclip.** Pulling paperclip's decision
   history into this run's own log when its PR merges, and resuming anything in
   this session, is explicitly out of scope for the first version — paperclip's
