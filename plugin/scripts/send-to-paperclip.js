@@ -1,0 +1,257 @@
+#!/usr/bin/env node
+// Hands a task-flow run's idea + spec + plan to a paperclip agent org instead of
+// running build/tests/harden/review in this session (SKILL.md §0d).
+//
+// Why a script and not more prose. The concatenation order, the precedence note,
+// and the state.json transition this mode makes are exactly the kind of logic
+// that drifts when it is only words an agent re-derives each run (see this
+// plugin's README on anchoring drifting prose in code). This file is that
+// anchor: SKILL.md says what the mode is for, this does the one thing it does.
+//
+// Everything project-specific — the paperclip URL, which env var holds the
+// token, which agent gets the issue, which GitHub Project field to flip — comes
+// from .claude/task-flow.json's optional `paperclip`/`githubProject` objects,
+// the same way every other project-specific setting in this plugin does. The
+// token itself is never read from that file: only the name of the environment
+// variable that holds it, because the config file is committed.
+
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const http = require('http');
+const https = require('https');
+const { execFileSync } = require('child_process');
+const { crossesLink, loadConfig } = require('./config.js');
+
+const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const ISSUE_NUMBER = /^[1-9][0-9]*$/;
+
+function fail(message) {
+  process.stderr.write(`send-to-paperclip: ${message}\n`);
+  process.exitCode = 1;
+  throw new Error(message);
+}
+
+function readArg(argv, flag) {
+  const index = argv.indexOf(flag);
+  return index >= 0 ? argv[index + 1] : undefined;
+}
+
+const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
+
+/** The same containment discipline render-run.js applies to every artifact path
+ *  out of state.json: it is repository data, written by an agent and editable by
+ *  hand, so a `../../..` in it must not let this script read a file outside the
+ *  docs folder and paste it into an external, third-party service.
+ *
+ *  Text containment alone is not enough - a symlink or junction anywhere between
+ *  docsDir and the target can resolve outside it while still *reading* as inside,
+ *  so `crossesLink` (lstat-only, never follows the link) is checked too, the same
+ *  two-part test render-run.js's `assertInside` applies to every path it touches. */
+function readArtifact(docsDir, label, relativeOrAbsolute) {
+  if (!relativeOrAbsolute || typeof relativeOrAbsolute !== 'string') return null;
+  const root = path.resolve(docsDir);
+  const joined = path.isAbsolute(relativeOrAbsolute)
+    ? relativeOrAbsolute
+    : path.join(docsDir, relativeOrAbsolute);
+  const target = path.resolve(joined);
+  if (target !== root && !target.startsWith(root + path.sep)) {
+    fail(`artifacts.${label} escapes docsDir: ${relativeOrAbsolute}`);
+  }
+  if (!fs.existsSync(target)) return null;
+  if (crossesLink(root, target)) fail(`artifacts.${label} goes through a link: ${relativeOrAbsolute}`);
+  return fs.readFileSync(target, 'utf8');
+}
+
+// --- the paperclip call -----------------------------------------------------
+
+function postIssue({ baseUrl, token, companyId, title, description, assigneeAgentId }) {
+  const url = new URL(`/api/companies/${encodeURIComponent(companyId)}/issues`, baseUrl);
+  const body = JSON.stringify({ title, description, assigneeAgentId });
+  const client = url.protocol === 'https:' ? https : http;
+  return new Promise((resolve, reject) => {
+    const req = client.request(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+          Authorization: `Bearer ${token}`,
+        },
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            // Never the token, never the full body (it may echo request fields back).
+            reject(new Error(`paperclip responded ${res.statusCode}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(data));
+          } catch {
+            reject(new Error('paperclip response was not valid JSON'));
+          }
+        });
+      },
+    );
+    req.on('error', (error) => reject(new Error(`paperclip request failed: ${error.code || error.message}`)));
+    req.write(body);
+    req.end();
+  });
+}
+
+// --- the GitHub Project status flip -----------------------------------------
+//
+// Shells out to `gh`, already authenticated on this machine, rather than
+// reimplementing GitHub auth. Every value gh sees here is either validated
+// (the issue number, against ISSUE_NUMBER) or passed as a GraphQL variable
+// (`-F`), never string-interpolated into the query text, so nothing in a
+// project's config or a run's artifacts can inject GraphQL.
+
+function findProjectItemId({ owner, repo, issueNumber, projectId }) {
+  const out = execFileSync(
+    'gh',
+    [
+      'api',
+      'graphql',
+      '-f',
+      'query=query($owner:String!,$repo:String!,$number:Int!){' +
+        'repository(owner:$owner,name:$repo){issue(number:$number){' +
+        'projectItems(first:20){nodes{id project{id}}}}}}',
+      '-F',
+      `owner=${owner}`,
+      '-F',
+      `repo=${repo}`,
+      '-F',
+      `number=${issueNumber}`,
+    ],
+    { encoding: 'utf8' },
+  );
+  const data = JSON.parse(out);
+  const nodes = (data && data.data && data.data.repository && data.data.repository.issue
+    && data.data.repository.issue.projectItems && data.data.repository.issue.projectItems.nodes) || [];
+  const hit = nodes.find((node) => node.project && node.project.id === projectId);
+  return hit ? hit.id : null;
+}
+
+function flipStatus({ projectId, itemId, fieldId, optionId }) {
+  execFileSync('gh', [
+    'project', 'item-edit',
+    '--project-id', projectId,
+    '--id', itemId,
+    '--field-id', fieldId,
+    '--single-select-option-id', optionId,
+  ], { stdio: ['ignore', 'ignore', 'inherit'] });
+}
+
+// --- main --------------------------------------------------------------------
+
+async function main() {
+  const argv = process.argv.slice(2);
+  const projectDir = readArg(argv, '--project-dir') || process.cwd();
+  const slug = readArg(argv, '--slug');
+  const githubIssue = readArg(argv, '--github-issue');
+
+  if (!slug || !SAFE_SEGMENT.test(slug)) fail(`--slug is required and must be a safe name (got ${JSON.stringify(slug)})`);
+  if (!githubIssue || !ISSUE_NUMBER.test(githubIssue)) fail(`--github-issue is required and must be a positive integer (got ${JSON.stringify(githubIssue)})`);
+
+  const loaded = loadConfig(projectDir);
+  if (!loaded.ok) fail(`configuration is not valid: ${loaded.errors.join('; ')}`);
+  const config = loaded.config;
+  const raw = config.raw || {};
+
+  const pc = raw.paperclip || {};
+  for (const field of ['url', 'tokenEnv', 'companyId', 'agentId']) {
+    if (typeof pc[field] !== 'string' || !pc[field]) fail(`.claude/task-flow.json is missing paperclip.${field}`);
+  }
+  const gh = raw.githubProject || {};
+  for (const field of ['owner', 'repo', 'projectId', 'statusFieldId', 'readyOptionId']) {
+    if (typeof gh[field] !== 'string' || !gh[field]) fail(`.claude/task-flow.json is missing githubProject.${field}`);
+  }
+
+  const token = process.env[pc.tokenEnv];
+  if (!token) fail(`environment variable ${pc.tokenEnv} is not set`);
+
+  const stateDir = path.join(config.stateDir, slug);
+  const statePath = path.join(stateDir, 'state.json');
+  if (!fs.existsSync(statePath)) fail(`no run at ${statePath}`);
+  const state = readJson(statePath);
+  if (state.phase !== 'plan') {
+    fail(`run "${slug}" is at phase "${state.phase}", not "plan" — task-flow paperclip only hands off right after the plan`);
+  }
+
+  const artifacts = state.artifacts || {};
+  const idea = readArtifact(config.docsDir, 'idea', artifacts.idea);
+  const spec = readArtifact(config.docsDir, 'spec', artifacts.spec);
+  const plan = readArtifact(config.docsDir, 'plan', artifacts.plan);
+  if (!spec) fail(`run "${slug}" has no spec artifact recorded in state.json`);
+  if (!plan) fail(`run "${slug}" has no plan artifact recorded in state.json`);
+
+  const PRECEDENCE = 'Precedence if these documents conflict: plan overrides spec overrides idea. '
+    + 'Treat the plan as current truth; earlier docs are context for why decisions were made.';
+
+  const sections = [['idea', idea], ['spec', spec], ['plan', plan]]
+    .filter(([, body]) => body)
+    .map(([name, body]) => `---\n## ${name}\n\n${body}\n`);
+
+  const description = [PRECEDENCE, '', ...sections, `GitHub issue: #${githubIssue}`].join('\n');
+
+  const issue = await postIssue({
+    baseUrl: pc.url,
+    token,
+    companyId: pc.companyId,
+    title: slug,
+    description,
+    assigneeAgentId: pc.agentId,
+  });
+
+  let statusFlipped = false;
+  try {
+    const itemId = findProjectItemId({
+      owner: gh.owner,
+      repo: gh.repo,
+      issueNumber: githubIssue,
+      projectId: gh.projectId,
+    });
+    if (itemId) {
+      flipStatus({ projectId: gh.projectId, itemId, fieldId: gh.statusFieldId, optionId: gh.readyOptionId });
+      statusFlipped = true;
+    } else {
+      process.stderr.write(`warning: issue #${githubIssue} is not on the configured GitHub Project; status not flipped\n`);
+    }
+  } catch (error) {
+    // The paperclip handoff already happened; a board-status failure is a note,
+    // not a reason to leave the run looking like nothing was sent at all.
+    process.stderr.write(`warning: could not flip the GitHub Project status: ${error.message}\n`);
+  }
+
+  // §0d's state transition: phase stays "plan" (build never ran in this run),
+  // status is "blocked" (reused, not a new value — see HISTORY.md). The
+  // orchestrator does not also write state.json for this step; this is the
+  // one place that does, the same division of labour every other subagent
+  // in this pipeline has (§1b).
+  const now = new Date().toISOString();
+  state.status = 'blocked';
+  state.updated = now;
+  if (!state.phaseChangedAt) state.phaseChangedAt = now;
+  state.outcome = 'handed-off';
+  state.outcomeNote = `paperclip issue ${issue.identifier || issue.id}${statusFlipped ? '' : ' (board status not flipped)'}`;
+  fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+
+  process.stdout.write(`handed off ${slug} to paperclip as ${issue.identifier || issue.id}\n`);
+}
+
+if (require.main === module) {
+  main().catch((error) => {
+    if (!process.exitCode) process.exitCode = 1;
+    if (error && error.message && !/^send-to-paperclip:/.test(error.message)) {
+      process.stderr.write(`send-to-paperclip: ${error.message}\n`);
+    }
+  });
+}
+
+module.exports = { readArtifact, findProjectItemId };

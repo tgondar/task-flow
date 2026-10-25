@@ -270,6 +270,77 @@ Say in one line which PR you resolved, the same way auto mode announces itself.
    merges, never changes the PR's base or title, and never approves it.
 6. Render the run page as usual (§8).
 
+## 0d. `/task-flow paperclip <GitHub issue number>` — spec and plan here, build elsewhere
+
+**What it is for.** Some projects run their build, tests, hardening and review
+through a separate agent org (paperclip), wired to a GitHub Project board, instead
+of inside this session. This mode writes only the **spec** and **plan** — the two
+phases that benefit from this session's own methodology and question loop — then
+hands the combined artifacts to paperclip and stops. It never runs `build`,
+`tests`, `harden` or `review` itself; paperclip's own execution-policy chain
+(build → test → security → code-review → human approval) does that instead, on
+its own infrastructure. Running both pipelines on the same task would duplicate
+the work, so treat this as a replacement for §4's `build` onward, not an addition
+to it.
+
+**Requires `.claude/task-flow.json` to carry two extra objects, beyond §0's three
+required fields** (both optional at the config level — this mode is the only thing
+that needs them, and `config.js check` does not require them for every project):
+
+```json
+{
+  "paperclip": { "url": "...", "tokenEnv": "PAPERCLIP_TOKEN", "companyId": "...", "agentId": "..." },
+  "githubProject": { "owner": "...", "repo": "...", "projectId": "PVT_...", "statusFieldId": "PVTSSF_...", "readyOptionId": "..." }
+}
+```
+
+`tokenEnv` names an environment variable — the token itself never lives in the
+config file. Missing either object, or any field in it, is the same kind of stop
+as §0's missing `docsDir`/`language`/`tasksFile`: say what's missing, do not guess
+it, do not start.
+
+**Detection.** Same shape as `auto`/`review <PR>` (§0b/§0c): the first token of
+`$ARGUMENTS` is `paperclip`, the second token is the GitHub issue number the
+PO/PM already created for this task (required — paperclip's build agent needs it
+to flip the Project status and link its PR back with `Closes #<n>`).
+
+**What it does, in order:**
+
+1. Run the `spec` phase (§1b) as normal.
+2. Run the `plan` phase (§1b) as normal, through its own existing steps (§5) —
+   but **stop before spawning any build subagent**. This is the one actual rule
+   change this mode makes to the pipeline: every other mode goes straight from
+   `plan` to `build` with no stop there.
+3. `node "${CLAUDE_PLUGIN_ROOT}/scripts/send-to-paperclip.js" --slug <slug>
+   --github-issue <n>` — reads `idea`/`spec`/`plan` from `state.json.artifacts`,
+   concatenates them behind one fixed line: **"Precedence if these documents
+   conflict: plan overrides spec overrides idea. Treat the plan as current truth;
+   earlier docs are context for why decisions were made."** — POSTs the result to
+   paperclip as an issue assigned to `paperclip.agentId`, and flips the GitHub
+   Project item's status field to `readyOptionId` (Backlog → Ready, in the
+   project's own words). On success it also sets `state.json`'s `phase`/`status`
+   itself (step 4) — the orchestrator does not touch `state.json` for this mode
+   beyond what the script already wrote, the same division of labour §1b gives
+   every other subagent.
+4. The script leaves the run at **`phase: "plan"`, `status: "blocked"`** — not a
+   new status value. Reusing `blocked` costs nothing: `render-run.js` already
+   renders "stopped - waiting for an answer" for it, which reads true here too
+   (waiting on paperclip, not on a person, but still waiting on an answer this
+   session cannot give itself), and every file that already knows about the
+   `blocked` status — the run page, the viewer's feed, `stop.js` — needs no
+   change at all. A genuinely new status would have needed one in three places
+   kept "in lockstep by hand" (`render-run.js`, `plugin/viewer/js/feed-logic.js`,
+   and `metrics.js`'s own closed shapes) for no behaviour the existing value
+   does not already give.
+5. Render the run page as usual (§8), then stop. Say in one line which paperclip
+   issue the run was handed to, the same way auto mode announces its own entry
+   point.
+
+**What this mode does not do.** It does not poll paperclip for the task's
+outcome, does not pull paperclip's decision history into this run's log, and
+does not resume `build` when paperclip's PR merges — closing the loop back from
+paperclip into this run's own `state.json`/decision log is not implemented yet.
+
 ## 1. Delegate the method, own the state
 
 Use the **`agent-skills` plugin** — both halves of it. Never a copy of the same

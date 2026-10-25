@@ -82,6 +82,55 @@ Every rule below comes from something that went wrong, or nearly did, in them.
   both already tolerate a run with no `artifacts.idea`/`spec`/`plan` starting at
   `phase: "tests"`. No change was needed in any of the three files.
 
+## `/task-flow paperclip <issue>`, handing build onward to a separate agent org (2026-10-25)
+
+- **Why it exists.** The maintainer wanted to keep writing specs and plans with
+  this session's own methodology and question loop, but have the actual build,
+  tests, hardening and review run through paperclip (a separate multi-agent org
+  product), wired to a GitHub Project board for visibility across the whole
+  flow. Rather than reimplement task-flow's phase machinery inside paperclip, or
+  paperclip's org-chart/review-policy machinery inside task-flow, the two run
+  side by side on the same task: this session does `idea → spec → plan`,
+  paperclip does `build → tests → harden → review` on its own infrastructure.
+- **Stops before `build`, on purpose — the one rule change this mode makes.**
+  Every other mode (`auto`, attended, `review <PR>`) goes from `plan` straight
+  into `build` with no stop there (see "The approval gate, removed" below: that
+  stop was deliberately removed for the normal pipeline). This mode needs the
+  stop back, but only for itself, and only because there is somewhere else for
+  the work to go — it is not a reversal of that earlier decision.
+- **`blocked` was reused rather than inventing a new status.** The natural label
+  for "this run is not running, and is not done, it is waiting on something
+  outside this session" is already what `blocked` means on the run page
+  ("stopped - waiting for an answer"), and `render-run.js`, the viewer's feed
+  (`feed-logic.js`'s `STATUSES` list) and the Stop hook already handle it
+  correctly with no code change. A new status (e.g. `handed-off`) was
+  considered and rejected: `STATUSES` in `feed-logic.js` is kept in lockstep by
+  hand with the renderer specifically because splitting one concept across
+  files drifts (see "Questions as data, and the viewer" below) — adding a
+  fourth place that needed updating for a label that was already true would
+  have repeated exactly the mistake that section's architecture exists to
+  avoid.
+- **Verified before choosing to reuse `blocked`, not assumed:** read
+  `render-run.js`'s `buildDocument` — its own `isDone` is `state.phase ===
+  'done'` alone (not `status`), so a run left at `phase: "plan"` never gets its
+  `build`/`tests`/`harden`/`review` phases wrongly ticked off, whatever
+  `status` says. The outer `renderAll`'s `isDone` (which *does* OR in `status
+  === 'done'`, to decide whether to archive the page) was checked too, which is
+  exactly why `status` was set to `blocked` and not `done` — a `done` status
+  here would have archived a run that is still, genuinely, in flight elsewhere.
+- **The real secret — a paperclip board/agent API token — is named by an env
+  var in config (`paperclip.tokenEnv`), never written into
+  `.claude/task-flow.json` itself.** That file is committed; a token in it
+  would ship to every clone of the repository.
+- **Does not close the loop back from paperclip.** Pulling paperclip's decision
+  history into this run's own log when its PR merges, and resuming anything in
+  this session, is explicitly out of scope for the first version — paperclip's
+  own "Decisions"/`ask_user_questions` interaction mechanism was verified, in a
+  real test run, to pause correctly on a genuinely ambiguous requirement and to
+  auto-wake the build agent once a human answered through its normal chat, with
+  no extra paperclip-side engineering needed; task-flow does not yet read any
+  of that back.
+
 ## The approval gate, removed (2026-10-15)
 
 - **The maintainer asked to stop being stopped.** The gate's "no run in
