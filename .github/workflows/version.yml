@@ -1,0 +1,30 @@
+# Every change to plugin/ must raise plugin.json's "version" and add a
+# CHANGELOG.md entry - Claude Code keys its plugin cache on that version, so a
+# change without a bump never reaches installed users. See
+# scripts/check-version.js for the rule and why it is enforced in code.
+#
+# For this to block a merge (not just report), make "version" a required status
+# check on main in the repository's branch protection.
+
+name: version
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: node tests/check-version.test.js
+      # The SHA goes through env, never ${{ }} inside the script text.
+      - run: node scripts/check-version.js --base "$BASE"
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}

@@ -10,7 +10,7 @@
 #      and its hooks only act where .claude/task-flow.json exists);
 #   3. turns on background auto-update for that marketplace, via the documented
 #      extraKnownMarketplaces.<name>.autoUpdate setting in ~/.claude/settings.json.
-#      With no "version" in plugin.json, every commit on main is an update;
+#      Every "version" bump in plugin.json on main is an update;
 #   4. puts a forwarder at ~/.claude/commands/task-flow.md, so the pipeline is
 #      invoked as /task-flow (plugin skills can otherwise only be invoked with their
 #      prefix, /task-flow:task-flow).

@@ -36,6 +36,7 @@ node tests/metrics.security.test.js
 node tests/metrics.test.js
 node tests/metrics.tokens.security.test.js
 node tests/metrics.tokens.test.js
+node tests/check-version.test.js
 node tests/viewer.smoke.js     # headless Edge/Chrome over CDP; skipped without one
 claude plugin validate .
 ```
@@ -74,7 +75,7 @@ Installation pieces: `install.ps1` (marketplace add, install at user scope, auto
 
 ## Conventions
 
-- `plugin.json` intentionally has **no `version`**: the commit SHA is the version, so every commit on `main` ships as an update to installed users.
+- `plugin.json` carries a semver **`version`**, and Claude Code only ships a change to installed users when it goes up. Any commit that touches `plugin/` must raise it and add a `## X.Y.Z — yyyy-MM-dd` entry to `CHANGELOG.md`; `scripts/check-version.js` enforces both in CI (`.github/workflows/version.yml`). Changes outside `plugin/` (tests, README, `install.ps1`, `scripts/`) need no bump.
 - Line endings: LF everywhere, CRLF for `*.ps1` (`.gitattributes`). `install.ps1` must stay ASCII-only (Windows PowerShell 5.1 reads BOM-less files as ANSI).
 - Tests for the hooks are mostly security tests (path traversal, casing, backslash vs forward-slash paths on Windows, self-approval, malformed input) asserting on exit codes; new hook behavior needs cases of that kind.
 - Comments explain *why* at length (see the file headers); match that style when editing.
