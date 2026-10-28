@@ -100,6 +100,27 @@ Every rule below comes from something that went wrong, or nearly did, in them.
 - **The version lives in `plugin.json` only**, not also in `marketplace.json`:
   one place cannot disagree with itself.
 
+## `paperclip <issue> [description]`, and a paperclip run stays one (2026-10-28)
+
+- **The gap.** The first version of §0d took `paperclip <n>` and said nothing
+  about the description: §2 derives a run's slug from a description and §2a
+  finds the idea by that slug, so with only a number the run had no way to find
+  its own input. Caught by reading the flow end to end before its first real use.
+- **Description optional, the issue title as fallback.** The maintainer's flow is
+  PO creates the board item, the idea is refined from it and names `#<n>`, then
+  `/task-flow paperclip <n>`. So the text after the number is the description,
+  the issue's title stands in when there is none, and an idea file naming `#<n>`
+  beats a fuzzy slug match. The title is fetched by the script, not by prose
+  calling `gh`, so the same validation of the committed owner/repo applies, and
+  it comes back as one line with control and bidi characters removed: it is text
+  a third party typed, and the orchestrator reads it.
+- **`paperclipIssue` in `state.json`.** A run's mode lived only in what the user
+  typed. A paperclip run that stopped for a question in its spec and was resumed
+  with a bare `/task-flow` would have carried on into `build` here — the exact
+  duplication §0d exists to prevent. Recording the issue on the run makes the
+  mode survive any resume, makes the issue number (not a re-derived slug) the
+  key that finds the run again, and lets the script refuse a typo'd issue.
+
 ## `/task-flow paperclip <issue>`, handing build onward to a separate agent org (2026-10-25)
 
 - **Why it exists.** The maintainer wanted to keep writing specs and plans with

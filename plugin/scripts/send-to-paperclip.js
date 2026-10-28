@@ -157,6 +157,34 @@ function findProjectItemId({ owner, repo, issueNumber, projectId }) {
   return hit ? hit.id : null;
 }
 
+// An issue title is typed by whoever opened the issue, and the orchestrator
+// reads it to pick a run's slug and match its idea file (SKILL.md §0d) - so it
+// comes back as one plain line: control characters (C0, DEL, C1) and Unicode
+// bidi marks, overrides and isolates, zero-width characters and Unicode tag
+// characters (the "ASCII smuggling" range) become spaces, so it cannot start a
+// new line that reads like an instruction, or carry text a person glancing at
+// it would not see; and it is capped, since a slug only needs a few words.
+// Visible text is left as typed - that is still data, never instructions.
+const UNSAFE_TITLE_CHARS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u061c\u200b-\u200f\u2060-\u2064\ufeff\u{E0000}-\u{E007F}]/gu;
+const TITLE_MAX = 200;
+
+function cleanTitle(title) {
+  return String(title).replace(UNSAFE_TITLE_CHARS, ' ').replace(/\s+/g, ' ').trim().slice(0, TITLE_MAX);
+}
+
+function issueTitle({ owner, repo, issueNumber }) {
+  if (!GITHUB_NAME.test(owner)) fail(`githubProject.owner is not a valid GitHub name: ${owner}`);
+  if (!GITHUB_NAME.test(repo)) fail(`githubProject.repo is not a valid GitHub name: ${repo}`);
+  if (!ISSUE_NUMBER.test(String(issueNumber))) fail(`issue number is not valid: ${issueNumber}`);
+  const out = execFileSync(
+    'gh',
+    ['issue', 'view', String(issueNumber), '--repo', `${owner}/${repo}`, '--json', 'title'],
+    { encoding: 'utf8' },
+  );
+  const data = JSON.parse(out);
+  return cleanTitle(data && typeof data.title === 'string' ? data.title : '');
+}
+
 function flipStatus({ projectId, itemId, fieldId, optionId }) {
   if (!GRAPHQL_ID.test(projectId)) fail(`githubProject.projectId is not a valid id: ${projectId}`);
   if (!GRAPHQL_ID.test(itemId)) fail(`project item id is not valid: ${itemId}`);
@@ -178,8 +206,12 @@ async function main() {
   const projectDir = readArg(argv, '--project-dir') || process.cwd();
   const slug = readArg(argv, '--slug');
   const githubIssue = readArg(argv, '--github-issue');
+  // `--issue-title --github-issue <n>` only prints the issue's title, for the
+  // orchestrator to derive a slug from when the user typed no description
+  // (SKILL.md §0d) - it needs no slug, no token and sends nothing anywhere.
+  const titleOnly = argv.includes('--issue-title');
 
-  if (!slug || !SAFE_SEGMENT.test(slug)) fail(`--slug is required and must be a safe name (got ${JSON.stringify(slug)})`);
+  if (!titleOnly && (!slug || !SAFE_SEGMENT.test(slug))) fail(`--slug is required and must be a safe name (got ${JSON.stringify(slug)})`);
   if (!githubIssue || !ISSUE_NUMBER.test(githubIssue)) fail(`--github-issue is required and must be a positive integer (got ${JSON.stringify(githubIssue)})`);
 
   const loaded = loadConfig(projectDir);
@@ -194,6 +226,11 @@ async function main() {
   const gh = raw.githubProject || {};
   for (const field of ['owner', 'repo', 'projectId', 'statusFieldId', 'readyOptionId']) {
     if (typeof gh[field] !== 'string' || !gh[field]) fail(`.claude/task-flow.json is missing githubProject.${field}`);
+  }
+
+  if (titleOnly) {
+    process.stdout.write(`${issueTitle({ owner: gh.owner, repo: gh.repo, issueNumber: githubIssue })}\n`);
+    return;
   }
 
   // Parsed once, here, with new URL() - never a raw string compare or a
@@ -237,6 +274,13 @@ async function main() {
   const state = readJson(statePath);
   if (state.phase !== 'plan') {
     fail(`run "${slug}" is at phase "${state.phase}", not "plan" — task-flow paperclip only hands off right after the plan`);
+  }
+
+  // A run started in this mode records its issue (SKILL.md §0d) so that a
+  // resume cannot hand it off under a different one by a typo. The recorded
+  // value is state.json content, so it is compared, never echoed.
+  if (state.paperclipIssue !== undefined && String(state.paperclipIssue) !== githubIssue) {
+    fail(`run "${slug}" was started for a different GitHub issue than --github-issue ${githubIssue}`);
   }
 
   const artifacts = state.artifacts || {};
@@ -309,4 +353,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { readArtifact, findProjectItemId, flipStatus };
+module.exports = { readArtifact, findProjectItemId, flipStatus, issueTitle, cleanTitle };
