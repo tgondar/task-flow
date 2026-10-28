@@ -5,6 +5,25 @@ Every change to `plugin/` raises the `version` in
 (`scripts/check-version.js` checks both in CI). Compare the version `/plugin`
 shows with the top entry to know whether your install is current.
 
+## 2.0.0 — 2026-10-28
+
+**Breaking:** `config.js check` now also requires `githubProject` in
+`.claude/task-flow.json`. Every configured repository is asked once, at its next
+`/task-flow`, which GitHub Project board its tasks live on — or none, in which case
+`/task-flow paperclip` is unavailable there. An `auto` run in a repository that has
+not answered stops at §0 until it does.
+
+- `config.js github-projects` lists the boards linked to the repository's
+  `origin` (with their Status options); `config.js github-project <number>|none
+  [--ready-option <name>]` writes the answer, reading every id from GitHub.
+- The hooks and the renderer do not require it: run pages and the Stop hook keep
+  working in a repository that has not answered yet.
+- `send-to-paperclip.js` now shares config.js's validation and text cleaning, and
+  stops with the fix when the repository answered "no board".
+- Security: on Windows, `git`/`gh` are never looked up in the repository folder
+  (a committed `git.exe` cannot run instead of the real one), and `init`/
+  `github-project` refuse to write through a linked `.claude` folder or file.
+
 ## 1.1.0 — 2026-10-28
 
 - `/task-flow paperclip <issue> [description]`: the text after the issue number

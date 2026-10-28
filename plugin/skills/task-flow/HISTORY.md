@@ -100,6 +100,26 @@ Every rule below comes from something that went wrong, or nearly did, in them.
 - **The version lives in `plugin.json` only**, not also in `marketplace.json`:
   one place cannot disagree with itself.
 
+## The GitHub Project is answered at configuration, "none" included (2026-10-28)
+
+- **Why.** `githubProject` used to be an optional object only `/task-flow
+  paperclip` needed. A repository found out it was missing at its first hand-off,
+  after the spec and the plan were already written. The maintainer asked for the
+  board to be chosen when the repository is configured, with "none" a valid
+  answer that simply leaves paperclip unavailable.
+- **An answer, not a default.** `null` is "no board"; a missing key is "never
+  asked", and `check` fails on it the same way it fails on a missing `docsDir`. So
+  every existing configuration is asked once, at its next run - which is why the
+  plugin went to 2.0.0.
+- **The gate only.** The requirement lives in `check` (`requireGithubProject`),
+  not in the `loadConfig` the hooks and renderer share: an unanswered question is
+  no reason for run pages to stop rendering.
+- **Ids from GitHub, not typed.** `github-projects` lists the boards linked to
+  `origin` and `github-project <number>` reads the project, Status field and option
+  ids itself, validated against the same closed patterns `send-to-paperclip.js`
+  re-checks before each `gh` call - now shared from `config.js`, together with the
+  one-visible-line text cleaner, instead of kept in two copies.
+
 ## `paperclip <issue> [description]`, and a paperclip run stays one (2026-10-28)
 
 - **The gap.** The first version of §0d took `paperclip <n>` and said nothing
