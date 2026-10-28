@@ -82,6 +82,24 @@ Every rule below comes from something that went wrong, or nearly did, in them.
   both already tolerate a run with no `artifacts.idea`/`spec`/`plan` starting at
   `phase: "tests"`. No change was needed in any of the three files.
 
+## A semver `version` in `plugin.json`, enforced by CI (2026-10-28)
+
+- **Why.** Until now `plugin.json` had no `version`, so Claude Code used the
+  commit SHA: every commit on `main` was an update, and no bump could be
+  forgotten. The cost was legibility — `/plugin` showed `0a878cb66827`, and
+  telling whether an install was current, or what had changed since, meant
+  comparing SHAs against `git log`. The maintainer asked for real versions.
+- **What it costs, and the anchor for it.** With a `version`, Claude Code keys its
+  plugin cache on that number: a commit that changes `plugin/` without raising it
+  does not reach installed users. That is exactly the kind of rule that drifts as
+  prose, so it got an anchor in code: `scripts/check-version.js`, run by
+  `.github/workflows/version.yml` on every pull request and push to `main`. It
+  fails when `plugin/` changed and the version did not go up, or when
+  `CHANGELOG.md` has no `## X.Y.Z` heading for it. Only `plugin/` counts — the
+  marketplace ships `./plugin` and nothing else.
+- **The version lives in `plugin.json` only**, not also in `marketplace.json`:
+  one place cannot disagree with itself.
+
 ## `/task-flow paperclip <issue>`, handing build onward to a separate agent org (2026-10-25)
 
 - **Why it exists.** The maintainer wanted to keep writing specs and plans with

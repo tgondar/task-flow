@@ -147,10 +147,13 @@ answers/<project key>/<run>/*.json       answers sent from the viewer, until tak
 
 ## How updates arrive
 
-`plugin.json` deliberately has **no `version`**. Claude Code then uses the commit
-SHA as the version, so every commit on `main` is an update; with auto-update on,
-sessions pick it up in the background (or run `/plugin marketplace update task-flow`
-to force it, and `/reload-plugins` inside a running session).
+`plugin.json` carries a semver `version`, and every change to the plugin raises it
+and adds an entry to [`CHANGELOG.md`](CHANGELOG.md) (CI refuses one that does not).
+To see whether you are current, compare the version `/plugin` shows with the top of
+the changelog. With auto-update on, sessions pick new versions up in the
+background; to force it, run `claude plugin marketplace update task-flow` and
+`claude plugin update task-flow@task-flow`, then `/reload-plugins` inside a running
+session.
 
 ## Trust model
 
@@ -158,8 +161,8 @@ Know what you are installing:
 
 - **The hooks run on every turn, in every repository**, as you. They act only where
   `.claude/task-flow.json` exists, but the code runs everywhere.
-- **Every commit on `main` reaches you** through auto-update, with no release step
-  in between. Installing task-flow means trusting this repository's `main` the way
+- **Every version bump on `main` reaches you** through auto-update, with no release
+  step in between. Installing task-flow means trusting this repository's `main` the way
   you trust any code you run. If you would rather review updates first, turn
   auto-update off for the marketplace (`autoUpdate` in `~/.claude/settings.json`)
   and update by hand with `/plugin marketplace update task-flow`.
