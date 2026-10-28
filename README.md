@@ -91,6 +91,15 @@ node <plugin>/scripts/config.js init --docs-dir docs/task-flow --language EN --t
 node <plugin>/scripts/config.js check
 ```
 
+A fourth answer is required as well: **`githubProject`**, the GitHub Project board the
+repository's tasks live on, or `null` for none (then `/task-flow paperclip` is
+unavailable). The first `/task-flow` asks for it; to set it yourself:
+
+```sh
+node <plugin>/scripts/config.js github-projects          # lists the boards linked to origin
+node <plugin>/scripts/config.js github-project 3         # or: github-project none
+```
+
 Optional fields: `stateDir` (where runs keep `state.json`, default
 `.claude/task-flow`), `versionFiles`, `defaultBump`, `branches` (`from`, `prefix`,
 `neverMerge`), `preflightSkill`, `commands`, `testProjects`, `backlogFile`.

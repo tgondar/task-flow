@@ -351,6 +351,13 @@ check('a committed paperclip.url pointing somewhere else than what was trusted i
   assert(/not trusted on this machine/.test(result.stderr), `expected a not-trusted complaint, got: ${result.stderr}`);
 });
 
+check('stops, naming the fix, when the repository answered "no GitHub Project" (githubProject: null)', () => {
+  const { project } = makeRun({ slug: 'demo', extraConfig: { ...VALID_PAPERCLIP, githubProject: null } });
+  const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { PAPERCLIP_TOKEN: 'x' });
+  assert(result.status !== 0, 'must exit non-zero before any request');
+  assert(/no GitHub Project/.test(result.stderr) && /github-project/.test(result.stderr), `got: ${result.stderr}`);
+});
+
 check('stops when the token env var is not set', () => {
   const { project } = makeRun({ slug: 'demo', extraConfig: VALID_PAPERCLIP });
   const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { PAPERCLIP_TOKEN: '' });

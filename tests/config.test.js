@@ -77,7 +77,8 @@ function makeProject(config, { createDocs = true, createTasks = true, trusted = 
   return { project, docs };
 }
 
-const valid = (docs) => ({ docsDir: docs, language: 'EN', tasksFile: 'tasks/index.md' });
+// githubProject: null - the repository answered "no board", which `check` requires.
+const valid = (docs) => ({ docsDir: docs, language: 'EN', tasksFile: 'tasks/index.md', githubProject: null });
 
 console.log('config.js');
 

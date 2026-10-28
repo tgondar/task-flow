@@ -25,19 +25,17 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const { execFileSync } = require('child_process');
-const { crossesLink, isPaperclipUrlTrusted, loadConfig, parsePaperclipOrigin } = require('./config.js');
+// GITHUB_NAME (owner/repo) and GRAPHQL_ID (project, field and option ids) are
+// the same closed patterns config.js validates githubProject with: re-checked
+// here right before each value becomes a `gh` argument, so a committed config
+// value cannot smuggle a `gh` flag or (on some `gh` versions) an `@file`-style
+// argument into the call. cleanText is config.js's one-visible-line cleaner.
+const {
+  GITHUB_NAME, GRAPHQL_ID, cleanText, crossesLink, isPaperclipUrlTrusted, loadConfig, parsePaperclipOrigin,
+} = require('./config.js');
 
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const ISSUE_NUMBER = /^[1-9][0-9]*$/;
-// GitHub owner/repo names: validated before they ever reach `gh`, so a
-// committed config value cannot smuggle a `gh` flag or (on some `gh`
-// versions) an `@file`-style argument into the call.
-const GITHUB_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,99})$/;
-// The opaque node ids GitHub's GraphQL API and REST API hand out
-// (ProjectV2 ids, field ids, single-select option ids): letters, digits,
-// underscore and hyphen only, observed and documented nowhere to contain
-// anything else.
-const GRAPHQL_ID = /^[A-Za-z0-9_-]{1,100}$/;
 
 function fail(message) {
   process.stderr.write(`send-to-paperclip: ${message}\n`);
@@ -159,20 +157,10 @@ function findProjectItemId({ owner, repo, issueNumber, projectId }) {
 
 // An issue title is typed by whoever opened the issue, and the orchestrator
 // reads it to pick a run's slug and match its idea file (SKILL.md §0d) - so it
-// comes back as one plain line of visible text. An allowlist, not a denylist:
-// after NFC (so "ção" typed as c + combining marks becomes plain letters), only
-// letters, digits, punctuation, symbols and ordinary spaces survive; every
-// format, control, private-use, unassigned and combining character - zero-width,
-// bidi, tag characters, variation selectors - becomes a space. A denylist kept
-// missing one more invisible range. Hangul fillers are letters by category but
-// render as nothing, so they go too. It is capped, since a slug only needs a few
-// words. Visible text is left as typed - that is still data, never instructions.
-const NOT_VISIBLE_TEXT = /[^\p{L}\p{N}\p{P}\p{S}\p{Zs}]|[ᅟᅠㅤﾠ]/gu;
-const TITLE_MAX = 200;
-
-function cleanTitle(title) {
-  return String(title).normalize('NFC').replace(NOT_VISIBLE_TEXT, ' ').replace(/\s+/g, ' ').trim().slice(0, TITLE_MAX);
-}
+// comes back through config.js's cleanText: one line of visible text, nothing
+// invisible, capped. Visible text is left as typed - still data, never
+// instructions.
+const cleanTitle = cleanText;
 
 function issueTitle({ owner, repo, issueNumber }) {
   if (!GITHUB_NAME.test(owner)) fail(`githubProject.owner is not a valid GitHub name: ${owner}`);
@@ -224,6 +212,10 @@ async function main() {
   const pc = raw.paperclip || {};
   for (const field of ['url', 'companyId', 'agentId']) {
     if (typeof pc[field] !== 'string' || !pc[field]) fail(`.claude/task-flow.json is missing paperclip.${field}`);
+  }
+  if (raw.githubProject === null) {
+    fail('this repository has no GitHub Project (githubProject is null in .claude/task-flow.json); '
+      + '/task-flow paperclip needs one - choose it with config.js github-projects, then github-project <number>');
   }
   const gh = raw.githubProject || {};
   for (const field of ['owner', 'repo', 'projectId', 'statusFieldId', 'readyOptionId']) {
