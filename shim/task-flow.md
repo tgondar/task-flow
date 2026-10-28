@@ -1,6 +1,6 @@
 ---
-description: Run the task-flow pipeline (spec -> plan -> build -> tests -> harden -> review -> PR). Forwards to the task-flow plugin, where everything lives.
-argument-hint: [auto] [the refined idea, in your own words, or leave empty to resume] | review <PR number>
+description: Run the task-flow pipeline (spec -> plan -> build -> tests -> harden -> review -> PR); `review <PR>` hardens and reviews an open PR; `paperclip <issue>` writes spec and plan, then hands the build to paperclip. Forwards to the task-flow plugin, where everything lives.
+argument-hint: [auto] [the refined idea, in your own words, or leave empty to resume] | review <PR number> | paperclip <GitHub issue number>
 ---
 
 This file only forwards. It holds no rules, so it never needs updating: the
