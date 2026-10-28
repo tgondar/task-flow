@@ -159,17 +159,19 @@ function findProjectItemId({ owner, repo, issueNumber, projectId }) {
 
 // An issue title is typed by whoever opened the issue, and the orchestrator
 // reads it to pick a run's slug and match its idea file (SKILL.md §0d) - so it
-// comes back as one plain line: control characters (C0, DEL, C1) and Unicode
-// bidi marks, overrides and isolates, zero-width characters and Unicode tag
-// characters (the "ASCII smuggling" range) become spaces, so it cannot start a
-// new line that reads like an instruction, or carry text a person glancing at
-// it would not see; and it is capped, since a slug only needs a few words.
-// Visible text is left as typed - that is still data, never instructions.
-const UNSAFE_TITLE_CHARS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u061c\u200b-\u200f\u2060-\u2064\ufeff\u{E0000}-\u{E007F}]/gu;
+// comes back as one plain line of visible text. An allowlist, not a denylist:
+// after NFC (so "ção" typed as c + combining marks becomes plain letters), only
+// letters, digits, punctuation, symbols and ordinary spaces survive; every
+// format, control, private-use, unassigned and combining character - zero-width,
+// bidi, tag characters, variation selectors - becomes a space. A denylist kept
+// missing one more invisible range. Hangul fillers are letters by category but
+// render as nothing, so they go too. It is capped, since a slug only needs a few
+// words. Visible text is left as typed - that is still data, never instructions.
+const NOT_VISIBLE_TEXT = /[^\p{L}\p{N}\p{P}\p{S}\p{Zs}]|[ᅟᅠㅤﾠ]/gu;
 const TITLE_MAX = 200;
 
 function cleanTitle(title) {
-  return String(title).replace(UNSAFE_TITLE_CHARS, ' ').replace(/\s+/g, ' ').trim().slice(0, TITLE_MAX);
+  return String(title).normalize('NFC').replace(NOT_VISIBLE_TEXT, ' ').replace(/\s+/g, ' ').trim().slice(0, TITLE_MAX);
 }
 
 function issueTitle({ owner, repo, issueNumber }) {

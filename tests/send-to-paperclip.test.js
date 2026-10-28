@@ -438,6 +438,17 @@ check('cleanTitle removes invisible characters: zero-width, bidi marks, BOM and 
   assert(got === 'ok x', `got ${JSON.stringify(got)}`);
 });
 
+check('cleanTitle keeps only visible text: variation selectors, private use, Hangul fillers and stray combining marks go', () => {
+  const hidden = 'a' + '️' + String.fromCodePoint(0xE0100) + '' + 'ㅤ' + 'ᅟ' + '͸' + '­' + 'b';
+  const got = cleanTitle(hidden);
+  assert(got === 'a b', `got ${JSON.stringify(got)}`);
+});
+
+check('cleanTitle keeps Portuguese text, including accents typed as combining marks', () => {
+  const got = cleanTitle('Alterar tamanho do campo «descrição» (máx. 50 → 100) #42 & co' + ' á');
+  assert(got === 'Alterar tamanho do campo «descrição» (máx. 50 → 100) #42 & co á', `got ${JSON.stringify(got)}`);
+});
+
 check('cleanTitle caps a long title and copes with a non-string', () => {
   assert(cleanTitle('a'.repeat(5000)).length === 200, 'a title longer than 200 chars must be cut');
   assert(cleanTitle(undefined) === 'undefined' && cleanTitle(42) === '42', 'a non-string must not throw');
