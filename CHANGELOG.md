@@ -5,6 +5,16 @@ Every change to `plugin/` raises the `version` in
 (`scripts/check-version.js` checks both in CI). Compare the version `/plugin`
 shows with the top entry to know whether your install is current.
 
+## 1.1.0 — 2026-10-28
+
+- `/task-flow paperclip <issue> [description]`: the text after the issue number
+  is the description; with none, the slug comes from the issue's title
+  (`send-to-paperclip.js --issue-title`, one cleaned line, read as data).
+- The idea file that names `#<issue>` is preferred as the run's input.
+- A paperclip run records `paperclipIssue` in `state.json`: it is found again by
+  issue number, stays a paperclip run on any resume (never builds here), and
+  `send-to-paperclip.js` refuses a different `--github-issue` than the recorded one.
+
 ## 1.0.1 — 2026-10-28
 
 - The `/task-flow` description and argument hint now mention
