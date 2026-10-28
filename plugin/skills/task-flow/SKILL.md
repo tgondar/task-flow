@@ -1,7 +1,7 @@
 ---
 name: task-flow
-description: Take an already-refined idea to a PR — spec, plan, build, tests, harden, review — a fresh subagent per phase, with a planned stop before security-harden/review. Put `auto` in front of the description to run unattended and read every decision in the PR instead. `review <PR number>` runs security-harden and review against an already-open PR instead. Only when the user types /task-flow; never on your own initiative.
-argument-hint: [auto] [the refined idea, in your own words, or leave empty to resume] | review <PR number>
+description: Take an already-refined idea to a PR — spec, plan, build, tests, harden, review — a fresh subagent per phase, with a planned stop before security-harden/review. Put `auto` in front of the description to run unattended and read every decision in the PR instead. `review <PR number>` runs security-harden and review against an already-open PR instead. `paperclip <GitHub issue number>` writes only the spec and plan, then hands the task to a paperclip agent org to build. Only when the user types /task-flow; never on your own initiative.
+argument-hint: [auto] [the refined idea, in your own words, or leave empty to resume] | review <PR number> | paperclip <GitHub issue number>
 ---
 
 # task-flow — one refined idea, one command, one invocation

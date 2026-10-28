@@ -37,6 +37,7 @@ node tests/metrics.test.js
 node tests/metrics.tokens.security.test.js
 node tests/metrics.tokens.test.js
 node tests/check-version.test.js
+node tests/shim.test.js
 node tests/viewer.smoke.js     # headless Edge/Chrome over CDP; skipped without one
 claude plugin validate .
 ```
@@ -71,7 +72,7 @@ Code pieces, all sharing one config reader:
 
 The Stop hook is inert in any repo without `.claude/task-flow.json` (the opt-in). `TASK_FLOW_GATE=off` disables it — the escape hatch is checked first.
 
-Installation pieces: `install.ps1` (marketplace add, install at user scope, auto-update via `scripts/enable-autoupdate.js`, copies `shim/task-flow.md` to `~/.claude/commands/`). The shim only forwards to `task-flow:task-flow` and must hold no rules.
+Installation pieces: `install.ps1` (marketplace add, install at user scope, auto-update via `scripts/enable-autoupdate.js`, copies `shim/task-flow.md` to `~/.claude/commands/`). The shim only forwards to `task-flow:task-flow` and must hold no rules, but its `description`/`argument-hint` are what `/task-flow` shows: when a mode is added to the skill's frontmatter, add it to the shim too (`tests/shim.test.js` checks it in CI) and re-copy it to `~/.claude/commands/`.
 
 ## Conventions
 

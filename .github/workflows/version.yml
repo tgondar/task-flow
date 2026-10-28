@@ -24,6 +24,7 @@ jobs:
         with:
           fetch-depth: 0
       - run: node tests/check-version.test.js
+      - run: node tests/shim.test.js
       # The SHA goes through env, never ${{ }} inside the script text.
       - run: node scripts/check-version.js --base "$BASE"
         env:

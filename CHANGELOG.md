@@ -5,6 +5,12 @@ Every change to `plugin/` raises the `version` in
 (`scripts/check-version.js` checks both in CI). Compare the version `/plugin`
 shows with the top entry to know whether your install is current.
 
+## 1.0.1 — 2026-10-28
+
+- The `/task-flow` description and argument hint now mention
+  `paperclip <GitHub issue number>` (it was missing from both the skill and the
+  `~/.claude/commands/task-flow.md` forwarder).
+
 ## 1.0.0 — 2026-10-28
 
 First versioned release. Until now the commit SHA was the version; the last
