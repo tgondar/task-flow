@@ -5,6 +5,14 @@ Every change to `plugin/` raises the `version` in
 (`scripts/check-version.js` checks both in CI). Compare the version `/plugin`
 shows with the top entry to know whether your install is current.
 
+## 2.1.0 — 2026-10-30
+
+- `paperclip.projectId` (optional) in `.claude/task-flow.json`: the paperclip
+  project the hand-off issue is filed under. Its workspace is what tells
+  paperclip's agents which repository to clone; without it the issue arrived
+  with no repository. `send-to-paperclip.js` refuses a value that is not a UUID,
+  before any request, without echoing it.
+
 ## 2.0.0 — 2026-10-28
 
 **Breaking:** `config.js check` now also requires `githubProject` in
