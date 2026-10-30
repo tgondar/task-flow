@@ -120,6 +120,23 @@ Every rule below comes from something that went wrong, or nearly did, in them.
   re-checks before each `gh` call - now shared from `config.js`, together with the
   one-visible-line text cleaner, instead of kept in two copies.
 
+## The hand-off names the paperclip project (2026-10-30)
+
+- **The gap.** `send-to-paperclip.js` created the issue with a title, a
+  description and an assignee, and nothing else. In paperclip it is the project
+  that carries the repository (its workspace), so the issue reached the agent
+  with no repository to work in. It only came to light when a second repository
+  (motivo360) was configured next to the first one.
+- **Optional, not required.** `paperclip.projectId` goes into the issue only when
+  set, so an existing configuration keeps working unchanged - hence a minor
+  version, not a major one. Making it required would have been a second
+  `githubProject`-style breaking change for a value paperclip itself treats as
+  optional.
+- **A closed shape, never echoed.** It is committed config that ends up in a
+  request carrying the board token, so it is checked as a UUID (paperclip's own
+  id shape) before anything is sent, and the error names the field, not the
+  value.
+
 ## `paperclip <issue> [description]`, and a paperclip run stays one (2026-10-28)
 
 - **The gap.** The first version of §0d took `paperclip <n>` and said nothing

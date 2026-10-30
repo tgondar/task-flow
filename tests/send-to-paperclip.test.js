@@ -21,7 +21,7 @@ process.env.HOME = TEST_HOME;
 process.env.USERPROFILE = TEST_HOME;
 
 const MODULE = path.join(__dirname, '..', 'plugin', 'scripts', 'send-to-paperclip.js');
-const { readArtifact, findProjectItemId, flipStatus, issueTitle, cleanTitle } = require(MODULE);
+const { readArtifact, findProjectItemId, flipStatus, issueTitle, cleanTitle, issueBody } = require(MODULE);
 const CONFIG_MODULE = path.join(__dirname, '..', 'plugin', 'scripts', 'config.js');
 const { trustPaperclipUrl, isPaperclipUrlTrusted, parsePaperclipOrigin } = require(CONFIG_MODULE);
 
@@ -503,6 +503,50 @@ check('the mismatch message never echoes the value recorded in state.json', () =
   const result = run(project, ['--slug', 'demo', '--github-issue', '8'], { PAPERCLIP_TOKEN: 'x' });
   assert(result.status !== 0, 'must exit non-zero');
   assert(!result.stderr.includes('INJECTED-TEXT'), 'state.json content must not reach the message');
+});
+
+// --- paperclip.projectId: which paperclip project (and so which repository) --
+
+const PROJECT_ID = '1e4375e9-905c-4778-8800-81cc893afd85';
+const withProjectId = (projectId) => ({ ...VALID_PAPERCLIP, paperclip: { ...VALID_PAPERCLIP.paperclip, projectId } });
+
+check('issueBody carries projectId when one is configured', () => {
+  const body = JSON.parse(issueBody({ title: 't', description: 'd', assigneeAgentId: 'a1', projectId: PROJECT_ID }));
+  assert(body.projectId === PROJECT_ID, `expected the project id in the body, got: ${JSON.stringify(body)}`);
+});
+
+check('issueBody has no projectId key at all when none is configured', () => {
+  const body = JSON.parse(issueBody({ title: 't', description: 'd', assigneeAgentId: 'a1' }));
+  assert(!('projectId' in body), 'an unconfigured project must not be sent as null/undefined');
+});
+
+check('a malformed paperclip.projectId stops the hand-off before any request, without echoing it', () => {
+  // Each one shaped to do something if it were trusted: break out of the
+  // JSON body, smuggle a path, or look like a shell command in a message.
+  for (const bad of ['x', `${PROJECT_ID}"}`, '../../../etc/passwd', '$(touch PWNED)', `${PROJECT_ID} extra`]) {
+    const { project } = makeRun({ slug: 'demo', extraConfig: withProjectId(bad) });
+    const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { PAPERCLIP_TOKEN: 'x' });
+    assert(result.status !== 0, `must exit non-zero for ${JSON.stringify(bad)}`);
+    assert(/paperclip\.projectId/.test(result.stderr), `expected a projectId complaint, got: ${result.stderr}`);
+    assert(!/paperclip request failed|paperclip responded/.test(result.stderr), 'must stop before any request is made');
+    assert(!result.stderr.includes(bad) && !result.stdout.includes(bad), 'the committed value must never be echoed');
+  }
+});
+
+check('a paperclip.projectId that is not a string is refused', () => {
+  for (const bad of [42, { id: PROJECT_ID }, [PROJECT_ID], null, '']) {
+    const { project } = makeRun({ slug: 'demo', extraConfig: withProjectId(bad) });
+    const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { PAPERCLIP_TOKEN: 'x' });
+    assert(result.status !== 0 && /paperclip\.projectId/.test(result.stderr), `${JSON.stringify(bad)} must be refused, got: ${result.stderr}`);
+  }
+});
+
+check('a valid paperclip.projectId passes the check (the run goes on to the request)', () => {
+  const { project } = makeRun({ slug: 'demo', extraConfig: withProjectId(PROJECT_ID) });
+  const result = run(project, ['--slug', 'demo', '--github-issue', '1'], { PAPERCLIP_TOKEN: 'x' });
+  // 127.0.0.1:1 refuses the connection: reaching that failure proves the id was accepted.
+  assert(!/paperclip\.projectId/.test(result.stderr), `a valid id must not be refused, got: ${result.stderr}`);
+  assert(/paperclip request failed/.test(result.stderr), `expected to reach the request, got: ${result.stderr}`);
 });
 
 // --- summary -----------------------------------------------------------------
