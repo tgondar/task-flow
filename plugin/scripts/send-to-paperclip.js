@@ -36,6 +36,9 @@ const {
 
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const ISSUE_NUMBER = /^[1-9][0-9]*$/;
+// paperclip's own id shape (its API validates projectId as a GUID). Hex groups
+// only, so a committed value can name a project and nothing else.
+const PAPERCLIP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function fail(message) {
   process.stderr.write(`send-to-paperclip: ${message}\n`);
@@ -76,9 +79,15 @@ function readArtifact(docsDir, label, relativeOrAbsolute) {
 
 // --- the paperclip call -----------------------------------------------------
 
-function postIssue({ baseUrl, token, companyId, title, description, assigneeAgentId }) {
+/** The issue's JSON body. projectId only when configured: without one paperclip
+ *  files the issue under no project, as before it existed. */
+function issueBody({ title, description, assigneeAgentId, projectId }) {
+  return JSON.stringify({ title, description, assigneeAgentId, ...(projectId ? { projectId } : {}) });
+}
+
+function postIssue({ baseUrl, token, companyId, title, description, assigneeAgentId, projectId }) {
   const url = new URL(`/api/companies/${encodeURIComponent(companyId)}/issues`, baseUrl);
-  const body = JSON.stringify({ title, description, assigneeAgentId });
+  const body = issueBody({ title, description, assigneeAgentId, projectId });
   const client = url.protocol === 'https:' ? https : http;
   return new Promise((resolve, reject) => {
     const req = client.request(
@@ -213,6 +222,14 @@ async function main() {
   for (const field of ['url', 'companyId', 'agentId']) {
     if (typeof pc[field] !== 'string' || !pc[field]) fail(`.claude/task-flow.json is missing paperclip.${field}`);
   }
+  // Optional: the paperclip project the issue is filed under. Its workspace is
+  // what tells paperclip's agents which repository to clone - without it the
+  // issue arrives with no workspace, and the agent is left to guess the
+  // repository from the plan's text. Committed config, so it is checked against
+  // a closed shape and never echoed.
+  if (pc.projectId !== undefined && (typeof pc.projectId !== 'string' || !PAPERCLIP_ID.test(pc.projectId))) {
+    fail('paperclip.projectId in .claude/task-flow.json is not a paperclip id (a UUID)');
+  }
   if (raw.githubProject === null) {
     fail('this repository has no GitHub Project (githubProject is null in .claude/task-flow.json); '
       + '/task-flow paperclip needs one - choose it with config.js github-projects, then github-project <number>');
@@ -300,6 +317,7 @@ async function main() {
     title: slug,
     description,
     assigneeAgentId: pc.agentId,
+    projectId: pc.projectId,
   });
 
   let statusFlipped = false;
@@ -347,4 +365,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { readArtifact, findProjectItemId, flipStatus, issueTitle, cleanTitle };
+module.exports = { readArtifact, findProjectItemId, flipStatus, issueTitle, cleanTitle, issueBody };

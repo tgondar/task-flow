@@ -320,10 +320,15 @@ require it:
 
 ```json
 {
-  "paperclip": { "url": "...", "companyId": "...", "agentId": "..." },
+  "paperclip": { "url": "...", "companyId": "...", "agentId": "...", "projectId": "..." },
   "githubProject": { "owner": "...", "repo": "...", "projectId": "PVT_...", "statusFieldId": "PVTSSF_...", "readyOptionId": "..." }
 }
 ```
+
+`projectId` is optional but needed in practice: it is the paperclip project the
+issue is filed under, and that project's workspace is what tells paperclip's
+agents which repository to clone. Without it the issue arrives with no
+workspace. The script refuses a value that is not a paperclip id (a UUID).
 
 The token itself never lives in this file: it comes only from the
 `PAPERCLIP_TOKEN` environment variable, a fixed name config has no say over —

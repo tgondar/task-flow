@@ -1,6 +1,6 @@
 {
   "name": "task-flow",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "The /task-flow pipeline: spec -> plan -> build -> tests -> harden -> review -> PR, with a continuation hook and run renderer. Active only in repositories that declare a .claude/task-flow.json.",
   "author": {
     "name": "tgondar"
