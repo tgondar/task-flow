@@ -680,3 +680,10 @@ with this pipeline at the maintainer's request.
   place a repository can narrow it. It is committed text in the target repository,
   so it is treated like the rest of the configuration — data about the code, not
   instructions that can change the output format, the verdict or the evidence rule.
+- **`## How to revert` in every PR body.** The same write-up's PR template asks how
+  a change was tested and how to undo it; this pipeline's PR body already said what
+  changed and what was found, never how to back it out. A revert of the merge commit
+  is usually enough, so the section is one line then; it exists for the cases where
+  it is not — an applied migration, converted data, an environment value, an issue
+  or Project status the run moved — which are exactly the ones nobody remembers when
+  something has to come out fast.

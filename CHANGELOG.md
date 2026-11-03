@@ -15,6 +15,10 @@ shows with the top entry to know whether your install is current.
 - Review (§4d): when the target repository has a `REVIEW.md` at its root, every
   reviewer is told to read it first (what failure looks like there, paths to
   skip, what not to raise). It never lowers the evidence rule.
+- PR body and closing summary (§8b): a fourth heading, `## How to revert`
+  (`## Como reverter` in pt-PT) — by default "revert the merge commit", plus
+  everything a revert does not undo (applied migrations, converted data,
+  environment values, external state such as issues or Project statuses).
 
 ## 2.1.0 — 2026-10-30
 

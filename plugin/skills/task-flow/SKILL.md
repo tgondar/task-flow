@@ -159,7 +159,7 @@ language other than these two that heading stays `## Discovered tasks`.
 | plan: found mid-run | `## Discovered tasks` | `## Tarefas descobertas` |
 | questions file | `### Decisions taken — to review` / `### Open questions` | `### Decisões tomadas — para rever` / `### Perguntas em aberto` |
 | urgency marker | `**URGENT**` | `**URGENTE**` |
-| PR body | `## Needs you` / `## Changed` / `## Found` / `## Red tests` | `## Precisa de ti` / `## Mudou` / `## Encontrei` / `## Testes vermelhos` |
+| PR body | `## Needs you` / `## Changed` / `## Found` / `## How to revert` / `## Red tests` | `## Precisa de ti` / `## Mudou` / `## Encontrei` / `## Como reverter` / `## Testes vermelhos` |
 | a new task-list entry | `IN PROGRESS — /task-flow` | `EM CURSO — /task-flow` |
 | decision markers | ⚠️ would-have-asked · ⚠️→asked · 🔹 routine | ⚠️ would-have-asked · ⚠️→perguntado · 🔹 routine |
 
@@ -1485,7 +1485,7 @@ text; but it does name the run and the model, so ignore it if the repository is 
 and those names should not be.
 
 **The closing summary and the PR body both start with what the user has to do.**
-Three headings, in this order, in `language`, in both modes:
+Four headings, in this order, in `language`, in both modes:
 
 1. **`## Needs you`** — everything waiting on the user, in this order: the one
    thing to look at first; anything **URGENT**; every ⚠️ decision they may want to
@@ -1502,6 +1502,14 @@ Three headings, in this order, in `language`, in both modes:
 3. **`## Found`** — what the run learned that is not a change: deferred
    Optional/Nit findings, corner cases spotted but not tested (§4b), facts measured
    along the way, anything a subagent could not confirm and you could not either.
+4. **`## How to revert`** — what undoes this PR once it is merged, written for
+   the person who has to do it in a hurry: by default *"Revert the merge commit"*,
+   and then, by name, everything a revert does **not** undo — a database migration
+   already applied (and the command that rolls it back, or that there is none), data
+   written or converted, configuration or environment values that must change back,
+   external state the run touched (an issue, a Project status, a paperclip
+   hand-off), and anything that must be reverted together with it. If a revert
+   alone is enough, say so in one line; never leave the heading out.
 
 Then links: the questions file, the decision logs, the spec, the plan and the
 review. **Never merge.**
