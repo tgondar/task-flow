@@ -654,3 +654,29 @@ own recent runs.
 - **Why bother, given MIT only asks for a kept notice.** The maintainer judged the
   dependency not worth carrying once the viewer had its own identity; this was his
   call to make, not a compliance problem being worked around.
+
+## Review: pre-existing findings, and the repository's `REVIEW.md` (2026-11-03)
+
+Both come from the Claude Code team's write-up of how they review code
+(https://claude.dev/blog/solving-code-review-at-anthropic/, 2026-10-15), compared
+with this pipeline at the maintainer's request.
+
+- **Pre-existing findings never block.** The write-up tags every finding Important,
+  Nit or Pre-existing, "so a bug the PR didn't introduce isn't blamed on the
+  author". It also measured where repeated findings came from: about 59% of what a
+  reviewer kept flagging across rounds was code that had been there since its first
+  pass. Without the tag, a review here could stop a run on an old bug the branch
+  never touched, and the fix would land as unrelated churn in the PR. The mark is
+  checked against `git diff <base>...HEAD` before it is accepted, because "it was
+  already there" is the easiest way for a real finding to dodge the fix: a diff that
+  adds a caller to old broken code has made that bug its own. Pre-existing findings
+  are kept out of `health.review` rather than given a new field: the counts measure
+  this run's work, and a new key would have needed a new closed shape in
+  `metrics.js` for a number nobody reads yet.
+- **`REVIEW.md` is read when it exists, never created.** The write-up's code owners
+  keep a short `REVIEW.md` saying what failure looks like in their code, which paths
+  to skip, and capping nits; repeated review comments are moved into it instead of
+  being argued PR after PR. The reviewer persona here is generic, so this is the one
+  place a repository can narrow it. It is committed text in the target repository,
+  so it is treated like the rest of the configuration — data about the code, not
+  instructions that can change the output format, the verdict or the evidence rule.

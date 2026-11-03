@@ -5,6 +5,17 @@ Every change to `plugin/` raises the `version` in
 (`scripts/check-version.js` checks both in CI). Compare the version `/plugin`
 shows with the top entry to know whether your install is current.
 
+## 2.2.0 — 2026-11-03
+
+- Review (§4d): a finding on code the branch neither touches nor makes
+  reachable is marked **Pre-existing**. It never blocks and is not fixed in the
+  branch; it goes to the PR body and the `backlogFile`, and a pre-existing
+  Critical is listed under `## Needs you`. The orchestrator checks the mark
+  against the branch diff before accepting it.
+- Review (§4d): when the target repository has a `REVIEW.md` at its root, every
+  reviewer is told to read it first (what failure looks like there, paths to
+  skip, what not to raise). It never lowers the evidence rule.
+
 ## 2.1.0 — 2026-10-30
 
 - `paperclip.projectId` (optional) in `.claude/task-flow.json`: the paperclip
