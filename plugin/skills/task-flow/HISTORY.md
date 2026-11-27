@@ -657,6 +657,51 @@ own recent runs.
   dependency not worth carrying once the viewer had its own identity; this was his
   call to make, not a compliance problem being worked around.
 
+## The orchestrator reads the standing answers first and promotes only the user's rules (2026-11-27)
+
+- **Why the page is the first source of the question loop.** The idea behind this
+  change found the same project rules asked again run after run: a rule the user
+  gave once lived only in an old run's questions file, which nobody re-read. The
+  page holds those rules, one line each, so §3 step 1 reads it before the task
+  list. An entry is a source the run did not write — the user's words, from an
+  earlier answer — so it closes a question like any other document: quoted in the
+  log with its id, never sent to the user, not counted. An entry this run promoted
+  is not a second source (the answered item is), and two entries that contradict
+  each other close nothing: an outdated rule is worse than a question.
+- **Why the orchestrator reads it with `read`, and the brief carries its path.**
+  The SubagentStart hook hands the entries to every subagent, but the orchestrator
+  is not a subagent: §2 runs the one reader at every start and resume, so the
+  agent that runs the question loop has the same entries as the ones it spawns.
+  The brief carries the page's path, not its text (pasting it is the drift the
+  hook exists to remove), and the settled-decisions line names the entries, so a
+  subagent does not reopen one. A missing or refused page is one line and the run
+  goes on: the page is help, never a gate.
+- **Why only an answer of the user becomes an entry, and only a rule (Q4 of that
+  run).** A page the run could write from its own choices would reinforce itself:
+  next run, the run's guess comes back as "the user's rule". So `promote` takes
+  only an item with a recorded `answer`, the words come from that answer (Q10), and
+  a mid-run overrule (§1c) is written into `questions.json` first, so it has one.
+  Not every answer is a rule — "go ahead" is not — and a page of one-run choices
+  would stop being read whole; the orchestrator judges, logs each promotion as ⚠️
+  and the PR lists it.
+- **Why new entries are used at once and listed in `## Needs you` (the idea log's
+  decision).** Asking the user to approve each new rule would be the stop this
+  change removes. Instead an entry is used from the next run on, and the PR that
+  wrote it lists it with how to undo it: delete the line. The id is never reused
+  and the item is never promoted again, so a deleted rule stays deleted.
+- **A refused promotion is said, not worked around.** The reader refuses `·`, `«`,
+  `»`, URLs and the rest; the writer refuses what the reader would. Rewording the
+  user's words to get past it would change what the page promises to keep, so the
+  orchestrator says the rule did not go in and puts it under `## Found`.
+- **Paperclip is unchanged (Q6 of that run).** The spec and the plan are written
+  here, with the page read; `send-to-paperclip.js` sends those, not the page.
+- **`README.md` said `TASK_FLOW_GATE=off` disables the Stop hook**; it disables
+  both hooks since the SubagentStart one shipped.
+- **Anchored in code by `tests/skill-rules.docs.test.js`**, which fails when §1b
+  stops carrying the page's path, §3 stops reading it first, §7 stops promoting
+  through the command, or §8b stops listing what the run promoted with how to
+  delete it.
+
 ## Standing answers reach every subagent through a SubagentStart hook (2026-11-27)
 
 - **Why a hook, not the brief.** A standing answer is a rule of the project the

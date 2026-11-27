@@ -230,7 +230,7 @@ claude plugin validate .
 
 ## Escape hatch
 
-`TASK_FLOW_GATE=off` disables the Stop hook for a session.
+`TASK_FLOW_GATE=off` disables both hooks (Stop and SubagentStart) for a session.
 
 ## Credits
 
