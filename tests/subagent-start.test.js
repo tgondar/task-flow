@@ -240,6 +240,15 @@ for (const value of ['off', 'OFF', 'Off']) {
   check('S28 no CLAUDE_PROJECT_DIR: the payload cwd is the project', runHook('', payloadFor(root)), expectedFor([GOOD_ENTRY]));
   check('S29 a device path to the same project is never followed',
     runHook('', payloadFor(`\\\\?\\${root}`)), SILENT);
+  // Defence in depth for the hook's own isNetworkOrDevicePath guard (S29 alone
+  // passes without it, because loadConfig refuses the path first). A device-path
+  // CLAUDE_PROJECT_DIR must count as absent, exactly like S28: the plain cwd is
+  // the project. Without the guard the device path is taken as the project and
+  // the hook goes silent, so this case fails if the guard is removed.
+  check('S29b a device-path CLAUDE_PROJECT_DIR is ignored, as if unset (hook guard)',
+    runHook(`\\\\?\\${root}`, payloadFor(root)), expectedFor([GOOD_ENTRY]));
+  check('S29c a UNC CLAUDE_PROJECT_DIR and a UNC cwd: silent, never examined',
+    runHook('\\\\203.0.113.9\\share\\repo', payloadFor('\\\\203.0.113.9\\share\\repo')), SILENT);
 }
 
 // --- which project: cwd only inside CLAUDE_PROJECT_DIR, never through a link ---
