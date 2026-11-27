@@ -34,6 +34,7 @@ node tests/metrics.git.security.test.js
 node tests/metrics.git.test.js
 node tests/metrics.hardening.test.js
 node tests/metrics.hooks.test.js
+node tests/metrics.loops.join.security.test.js
 node tests/metrics.io.security.test.js
 node tests/metrics.loops.test.js
 node tests/metrics.loops.security.test.js
