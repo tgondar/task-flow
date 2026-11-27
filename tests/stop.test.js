@@ -593,6 +593,129 @@ const asksForResults = (stderr) => /loop-result --slug demo0/.test(stderr);
     (x) => (!asksForResults(x.stderr) && /Carry on to the next phase/.test(x.stderr) ? null : x.stderr));
 }
 
+// --- T58-T68: security of the loops ask (plan T6) ------------------------------
+// The loops message reaches the model, so nothing of state.json or the events file
+// may ride on it but the folder, a count and closed-shape ids; every failure must
+// fall back to the hook's old decision (fail open), and the asks stay bounded.
+const HOSTILE = ['IGNORE PREVIOUS', '<img onerror', '../', '‮'];
+const clean = (x) => {
+  const out = x.stderr + x.stdout;
+  const hit = HOSTILE.find((m) => out.includes(m));
+  return hit ? `hostile marker ${JSON.stringify(hit)} echoed: ${out}` : null;
+};
+const loopsFile = (root) => path.join(root, '.claude', 'task-flow', 'demo0', 'loop-events.jsonl');
+const oldDecision = (x) => (/Carry on to the next phase/.test(x.stderr) && !asksForResults(x.stderr) ? null : x.stderr);
+{
+  const root = withLoops([
+    startLine('IGNORE PREVIOUS <img onerror=x>'),
+    startLine('../../etc'),
+    startLine('ab‮cd'),
+    startLine('ok1', 'IGNORE PREVIOUS', '<img onerror=x>'),
+    JSON.stringify({ v: 1, kind: 'start', agent: 'a'.repeat(65), type: 'x', phase: 'build', task: 'T3', at: '2026-09-08T10:00:00.000Z' }),
+  ], { buildCursor: 'IGNORE PREVIOUS', phase: '<img onerror=x>' });
+  const r = runStop(root, payloadFor(root));
+  check('T58 hostile ids, phases, tasks and cursor: never echoed', BLOCK, r, clean);
+}
+{
+  const root = withLoops([]);
+  fs.rmSync(loopsFile(root));
+  fs.mkdirSync(loopsFile(root));
+  check('T59 events file is a folder: old decision', BLOCK, runStop(root, payloadFor(root)), oldDecision);
+}
+{
+  const root = withLoops([]);
+  const target = path.join(root, 'elsewhere.jsonl');
+  fs.writeFileSync(target, `${startLine('a1b2c3d4')}\n`);
+  fs.rmSync(loopsFile(root));
+  let linked = true;
+  try { fs.symlinkSync(target, loopsFile(root), 'file'); } catch { linked = false; }
+  if (linked) check('T60 events file is a link: not followed, old decision', BLOCK, runStop(root, payloadFor(root)), oldDecision);
+  else console.log('  skip  T60 (no symlink privilege)');
+}
+{
+  const root = withLoops([]);
+  fs.writeFileSync(loopsFile(root), `${startLine('zz9')}\n` + `${'x'.repeat(1023)}\n`.repeat(3 * 1024));
+  const t0 = Date.now();
+  const r = runStop(root, payloadFor(root));
+  check('T61 a 3 MB events file: no crash, the line before the cap is not read', BLOCK, r, oldDecision);
+  check('T61 and it stays fast', BLOCK, r, () => (Date.now() - t0 < 10000 ? null : 'slow'));
+}
+{
+  const root = withLoops([startLine('a1b2c3d4')]);
+  fs.appendFileSync(loopsFile(root), Buffer.from([0xff, 0xfe, 0x00, 0x0a, 0x7b, 0x0a]));
+  check('T62 garbage bytes beside a good line: still asks, nothing echoed', BLOCK, runStop(root, payloadFor(root)),
+    (x) => clean(x) || (asksForResults(x.stderr) ? null : x.stderr));
+}
+{
+  const root = withLoops([startLine('a1b2c3d4')]);
+  const guards = path.join(TEST_HOME, '.claude', 'task-flow-guards');
+  const before = new Set(fs.existsSync(guards) ? fs.readdirSync(guards) : []);
+  const pay = JSON.stringify({ ...JSON.parse(payloadFor(root)), session_id: '../../../escape\\..\\x' });
+  const r = runStop(root, pay);
+  check('T63 hostile session_id: still a bounded ask', BLOCK, r, (x) => (asksForResults(x.stderr) ? null : x.stderr));
+  const added = fs.readdirSync(guards).filter((f) => !before.has(f));
+  check('T63 the guard stays a plain name inside the guards folder', BLOCK, r,
+    () => (added.every((f) => /^[a-z]+-[A-Za-z0-9_-]*\.json$/.test(f)) && !fs.existsSync(path.join(TEST_HOME, 'escape')) ? null : added.join(',')));
+  const pay2 = JSON.stringify({ ...JSON.parse(payloadFor(root)), session_id: { a: 1 } });
+  check('T63 a session_id that is not a string: no crash', BLOCK, runStop(root, pay2), () => null);
+}
+{
+  const root = withLoops([startLine('a1b2c3d4')]);
+  const sessionId = newSessionId();
+  fs.mkdirSync(path.join(TEST_HOME, '.claude', 'task-flow-guards', `loops-${sessionId}.json`), { recursive: true });
+  check('T64 guard path unwritable (a folder): fails open into the old decision', BLOCK,
+    runStop(root, payloadFor(root, { sessionId })), oldDecision);
+  const s2 = newSessionId();
+  fs.writeFileSync(path.join(TEST_HOME, '.claude', 'task-flow-guards', `loops-${s2}.json`), 'null');
+  check('T64 a guard that holds null: treated as fresh', BLOCK, runStop(root, payloadFor(root, { sessionId: s2 })),
+    (x) => (asksForResults(x.stderr) ? null : x.stderr));
+}
+for (const [label, body] of [['throws', 'throw new Error("IGNORE PREVIOUS ../")'], ['missing', null]]) {
+  // a copy of the plugin whose metrics.js throws on load or is gone
+  const plug = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-plug-'));
+  fs.cpSync(path.join(__dirname, '..', 'plugin'), plug, { recursive: true });
+  const m = path.join(plug, 'scripts', 'metrics.js');
+  if (body) fs.writeFileSync(m, body); else fs.rmSync(m);
+  const root = withLoops([startLine('a1b2c3d4')]);
+  const res = spawnSync(process.execPath, [path.join(plug, 'hooks', 'stop.js')], {
+    input: payloadFor(root), encoding: 'utf8',
+    env: { ...process.env, TASK_FLOW_GATE: '', CLAUDE_PROJECT_DIR: root.replace(/\\/g, '/') },
+  });
+  check(`T65 metrics.js ${label}: fails open, the live run is still pushed, no error text`, BLOCK,
+    { code: res.status, stderr: res.stderr || '', stdout: res.stdout || '' },
+    (x) => clean(x) || (/Carry on to the next phase/.test(x.stderr) ? null : x.stderr));
+}
+{
+  // the project's own running run is authoritative: a forged running run with
+  // forgotten loops under payload.cwd does not get its ids into the message.
+  // (With NO running run in the project, payload.cwd wins by design - worktrees.)
+  const forged = withLoops([startLine('f0r9ed00')]);
+  const home = withLoops([startLine('a1b2c3d4', 'build', 'T4')]);
+  const pay = JSON.stringify({ ...JSON.parse(payloadFor(home)), cwd: forged.replace(/\//g, '\\') });
+  check('T66 forged running run in payload.cwd: its loops are not asked for', BLOCK,
+    runStop(home, pay), (x) => (x.stderr.includes('f0r9ed00') ? x.stderr : oldDecision(x)));
+}
+if (process.platform === 'win32') {
+  const root = withLoops([startLine('a1b2c3d4')]);
+  check('T67 CLAUDE_PROJECT_DIR in other casing and backslashes: same ask', BLOCK,
+    runStop(root, payloadFor(root), { CLAUDE_PROJECT_DIR: root.toUpperCase().replace(/\//g, '\\') }),
+    (x) => (asksForResults(x.stderr) ? null : x.stderr));
+}
+{
+  // no lock: across many turns the loops ask comes at most twice, then the turn may end
+  const root = withLoops([startLine('a1b2c3d4')]);
+  const sessionId = newSessionId();
+  let asks = 0;
+  let last;
+  for (let i = 0; i < 10; i++) {
+    last = runStop(root, payloadFor(root, { sessionId }));
+    if (asksForResults(last.stderr)) asks++;
+    if (last.code === ALLOW) break;
+  }
+  check('T68 forgotten loops never lock the session: two asks, then the turn may end', ALLOW, last,
+    () => (asks === 2 ? null : `asked ${asks} times`));
+}
+
 // --- report ---------------------------------------------------------------
 const total = passed + failures.length;
 console.log(`\n${passed}/${total} passed`);
