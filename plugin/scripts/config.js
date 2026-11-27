@@ -570,6 +570,10 @@ function setGithubProject(projectDir, value) {
 // change if the answer differs: `required` must have a level, `optional` may.
 const BUMP_CLASSES = { feature: 'required', fix: 'required', breaking: 'optional', restructure: 'optional' };
 const BUMP_LEVELS = ['major', 'minor', 'patch'];
+const BUMP_CLASS_NAMES = Object.keys(BUMP_CLASSES).join(', ');
+const isBumpClass = (key) => Object.prototype.hasOwnProperty.call(BUMP_CLASSES, key);
+/** `feature=minor, fix=patch` - closed classes and levels only, never free text. */
+const describeBumpPolicy = (policy) => Object.entries(policy).map(([k, v]) => `${k}=${v}`).join(', ');
 
 const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isCalendar = (defaultBump) => typeof defaultBump === 'string' && defaultBump.trim().toLowerCase() === 'calendar';
@@ -584,7 +588,7 @@ function bumpPolicyErrors(value, defaultBump) {
       'keep defaultBump and remove bumpPolicy, or the other way round'];
   }
   if (!isPlainObject(value)) {
-    return [`bumpPolicy must be an object mapping ${Object.keys(BUMP_CLASSES).join(', ')} to ${BUMP_LEVELS.join(', ')}`];
+    return [`bumpPolicy must be an object mapping ${BUMP_CLASS_NAMES} to ${BUMP_LEVELS.join(', ')}`];
   }
   const errors = [];
   for (const [name, kind] of Object.entries(BUMP_CLASSES)) {
@@ -594,8 +598,8 @@ function bumpPolicyErrors(value, defaultBump) {
       errors.push(kind === 'required' ? `bumpPolicy.${name} is missing or malformed` : `bumpPolicy.${name} is malformed`);
     }
   }
-  if (Object.keys(value).some((key) => !Object.prototype.hasOwnProperty.call(BUMP_CLASSES, key))) {
-    errors.push(`bumpPolicy has a key that is not a class (${Object.keys(BUMP_CLASSES).join(', ')})`);
+  if (Object.keys(value).some((key) => !isBumpClass(key))) {
+    errors.push(`bumpPolicy has a key that is not a class (${BUMP_CLASS_NAMES})`);
   }
   return errors;
 }
@@ -608,8 +612,8 @@ function setBumpPolicy(projectDir, levels) {
   const pairs = Object.entries(levels);
   if (!pairs.length) throw new Error('give at least one --class and --level pair');
   for (const [name, level] of pairs) {
-    if (!Object.prototype.hasOwnProperty.call(BUMP_CLASSES, name)) {
-      throw new Error(`--class must be one of ${Object.keys(BUMP_CLASSES).join(', ')}`);
+    if (!isBumpClass(name)) {
+      throw new Error(`--class must be one of ${BUMP_CLASS_NAMES}`);
     }
     if (!BUMP_LEVELS.includes(level)) throw new Error(`--level must be one of ${BUMP_LEVELS.join(', ')}`);
   }
@@ -952,7 +956,7 @@ if (require.main === module) {
               : `  githubProject : ${config.githubProject.owner}/${config.githubProject.repo} (${config.githubProject.projectId})\n`) +
           // Closed classes and levels only (validated above), never free text.
           (config.bumpPolicy === undefined ? ''
-            : `  bumpPolicy : ${Object.entries(config.bumpPolicy).map(([k, v]) => `${k}=${v}`).join(', ')}\n`)
+            : `  bumpPolicy : ${describeBumpPolicy(config.bumpPolicy)}\n`)
       );
       return 0;
     }
@@ -1073,7 +1077,7 @@ if (require.main === module) {
     } else {
       try {
         const policy = setBumpPolicy(projectDir, Object.fromEntries(classes.map((name, index) => [name, levels[index]])));
-        process.stdout.write(`bumpPolicy set to ${Object.entries(policy).map(([k, v]) => `${k}=${v}`).join(', ')}.\n`);
+        process.stdout.write(`bumpPolicy set to ${describeBumpPolicy(policy)}.\n`);
       } catch (error) {
         process.stderr.write(`bump-policy failed: ${error.message}\n`);
         process.exitCode = 1;

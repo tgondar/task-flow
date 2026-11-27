@@ -68,7 +68,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { crossesLink, isNetworkOrDevicePath, loadConfig } = require('./config.js');
-const { CONTROL, QUESTION_ID, readQuestionsFile, validateQuestions } = require('./questions.js');
+const { CONTROL, QUESTION_ID, STANDING_ID, readQuestionsFile, validateQuestions } = require('./questions.js');
 const { SAFE_SEGMENT } = require('./render-run.js');
 
 /** Fixed, and not translated: a name that changed with `language` would leave
@@ -80,6 +80,8 @@ const PAGE_NAME = 'standing-answers.md';
  *  slow a hook down or flood a subagent's context. Over a field limit the line
  *  is rejected, never cut: a cut rule is a different rule. */
 const LIMITS = { pageBytes: 64 * 1024, entries: 100, fieldChars: 400 };
+
+const DOCS_REFUSED = 'docsDir is not accepted by .claude/task-flow.json (see: config.js check)';
 
 // - **R3** · <rule> · «<the person's words>» · <run slug> · 2026-11-20 [· substitui R1]
 const ENTRY_START = '- **R';
@@ -130,9 +132,7 @@ const refusedResult = (why) => ({ ...emptyResult(), refused: why });
  *  without touching the disk for anything else. */
 function pagePath(config) {
   const docsDir = config && config.docsDir;
-  if (typeof docsDir !== 'string' || !path.isAbsolute(docsDir)) {
-    throw new Error('docsDir is not accepted by .claude/task-flow.json (see: config.js check)');
-  }
+  if (typeof docsDir !== 'string' || !path.isAbsolute(docsDir)) throw new Error(DOCS_REFUSED);
   if (isNetworkOrDevicePath(docsDir)) throw new Error('docsDir is a network or device path, which is never followed');
   return path.join(docsDir, PAGE_NAME);
 }
@@ -270,16 +270,20 @@ function readPage(config) {
   return parsePage(page.text);
 }
 
+/** The configuration of the project at `projectDir` when config.js accepted
+ *  its docsDir, else null - decided before anything touches docsDir, for the
+ *  reader and the writer alike. config.js sets docsDir only once it is
+ *  accepted; its errors carry paths, so they are not repeated. */
+function acceptedConfig(projectDir) {
+  const loaded = loadConfig(path.resolve(projectDir));
+  return loaded.exists && loaded.config && loaded.config.docsDir ? loaded.config : null;
+}
+
 /** The page of the project at `projectDir`, through config.js. */
 function read({ projectDir }) {
   try {
-    const loaded = loadConfig(path.resolve(projectDir));
-    // config.js sets docsDir only once it is accepted; its errors carry paths,
-    // so they are not repeated here.
-    if (!loaded.exists || !loaded.config || !loaded.config.docsDir) {
-      return refusedResult('docsDir is not accepted by .claude/task-flow.json (see: config.js check)');
-    }
-    return readPage(loaded.config);
+    const config = acceptedConfig(projectDir);
+    return config ? readPage(config) : refusedResult(DOCS_REFUSED);
   } catch {
     return refusedResult('the configuration cannot be read');
   }
@@ -317,12 +321,10 @@ function reportLines(result) {
 
 // --- the writer ------------------------------------------------------------
 
-const STANDING_ID = /^R([1-9][0-9]{0,3})$/;
 const MAX_ID = 9999;
 const MARKER = /^<!-- task-flow: next R([1-9][0-9]{0,3}) -->\r?$/;
 const ID_AT_START = /^- \*\*R([1-9][0-9]{0,3})\*\*/;
 const WRITE_TRIES = 3;
-const DOCS_REFUSED = 'docsDir is not accepted by .claude/task-flow.json (see: config.js check)';
 
 /** What the writer puts on a page, in its page language (config.js
  *  pageLanguage); the reader accepts both words for a replacement. */
@@ -409,11 +411,8 @@ function promote({ projectDir, slug, item, rule, replaces }) {
     throw new Error('--replaces must be a standing answer id like R3');
   }
 
-  const loaded = loadConfig(path.resolve(projectDir));
-  const config = loaded.config;
-  // Decided before anything touches docsDir, as in `read`: only a docsDir
-  // config.js accepted, and its errors (which carry paths) are not repeated.
-  if (!loaded.exists || !config || !config.docsDir) throw new Error(DOCS_REFUSED);
+  const config = acceptedConfig(projectDir);
+  if (!config) throw new Error(DOCS_REFUSED);
   if (!config.stateDir) throw new Error('stateDir is not valid in .claude/task-flow.json (see: config.js check)');
 
   const questionsFile = path.join(config.stateDir, slug, 'questions.json');
@@ -513,8 +512,8 @@ if (require.main === module) {
     const index = argv.indexOf(flag);
     return index >= 0 ? argv[index + 1] : undefined;
   };
+  const projectDir = value('--project-dir') || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   if (argv[0] === 'read') {
-    const projectDir = value('--project-dir') || process.env.CLAUDE_PROJECT_DIR || process.cwd();
     const result = read({ projectDir });
     const out = [];
     // Exit 0 in every case: a missing or refused page is said in one line and
@@ -526,7 +525,6 @@ if (require.main === module) {
     out.push(...reportLines(result));
     process.stdout.write(`${out.join('\n')}\n`);
   } else if (argv[0] === 'promote') {
-    const projectDir = value('--project-dir') || process.env.CLAUDE_PROJECT_DIR || process.cwd();
     const item = value('--item');
     try {
       const result = promote({ projectDir, slug: value('--slug'), item, rule: value('--rule'), replaces: value('--replaces') });

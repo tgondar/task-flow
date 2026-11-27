@@ -40,7 +40,8 @@ const SUBMISSION_ID = /^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$/;
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
-/** The standing answer an item became (standing-answers.js promote). */
+/** The standing answer an item became (standing-answers.js promote, which
+ *  checks its --replaces with this same pattern). */
 const STANDING_ID = /^R[1-9][0-9]{0,3}$/;
 
 /** How long each kind of text may be. Over the limit is an error, not a silent
@@ -435,6 +436,7 @@ module.exports = {
   LIMITS,
   CONTROL,
   QUESTION_ID,
+  STANDING_ID,
   OPTION_ID,
   SUBMISSION_ID,
   ANSWER_STATUSES,
