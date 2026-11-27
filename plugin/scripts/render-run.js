@@ -736,7 +736,6 @@ function loopsSection(loops, t) {
     const DASH = '—';
     const word = (value) => (value === 'unknown' ? l.unknown : value);
     const number = (value) => (Number.isSafeInteger(value) && value >= 0 ? String(value) : DASH);
-    const duration = formatDuration;
     const fresh = (tokens) => tokens.input + tokens.cacheCreate + tokens.output;
     const tokensCell = (row) => (row.tokens !== null ? number(fresh(row.tokens))
       : row.reason !== null ? `${DASH} (${l.reasons[row.reason]})` : DASH);
@@ -763,7 +762,7 @@ function loopsSection(loops, t) {
         codeSpan(row.agentType) || DASH,
         (row.model !== null && codeSpan(row.model)) || DASH,
         row.effort === null ? DASH : word(row.effort),
-        duration(row.durationS),
+        formatDuration(row.durationS),
         tokensCell(row),
         result(row),
       ];
@@ -779,7 +778,7 @@ function loopsSection(loops, t) {
       const withTokens = inPhase.filter((row) => row.tokens !== null);
       const withTime = inPhase.filter((row) => row.durationS !== null);
       const tokens = withTokens.length ? number(withTokens.reduce((sum, row) => sum + fresh(row.tokens), 0)) : DASH;
-      const time = withTime.length ? duration(withTime.reduce((sum, row) => sum + row.durationS, 0)) : DASH;
+      const time = withTime.length ? formatDuration(withTime.reduce((sum, row) => sum + row.durationS, 0)) : DASH;
       out.push(`| ${word(phase)} | ${inPhase.length} | ${tokens} | ${time} |`);
     }
     out.push('');

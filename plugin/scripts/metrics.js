@@ -1414,6 +1414,21 @@ const LOOP_PHASES = [...PHASES, 'unknown'];
 const loopResult = (ok, code) => ({ ok, code });
 /** An own property or undefined: an inherited or polluted key never answers. */
 const ownValue = (object, key) => (hasOwn(object, key) ? object[key] : undefined);
+/** The switch, read from `env` (process.env, or a caller's). The one spelling for every writer
+ *  and command of these sections; closeRun keeps its own check, its first statement. */
+const metricsOff = (env) => String(env.TASK_FLOW_METRICS || '').toLowerCase() === 'off';
+/** The project's accepted configuration when it names a stateDir, else null: the first step of
+ *  every writer and command of these sections. */
+function stateConfig(projectDir) {
+  const loaded = loadConfig(projectDir);
+  return loaded.ok && loaded.config && typeof loaded.config.stateDir === 'string' ? loaded.config : null;
+}
+/** A deadline `ms` from now, which `given` (ms since the epoch: a caller's or a test's) can only
+ *  bring forward. */
+function deadlineWithin(given, ms) {
+  const limit = Date.now() + ms;
+  return typeof given === 'number' && Number.isFinite(given) ? Math.min(given, limit) : limit;
+}
 
 /** The phase a subagent started now works in: state.json's `phase` is the last stage
  *  COMPLETED (SKILL.md section 8), so the work in flight is the next one. Past the last
@@ -1421,6 +1436,13 @@ const ownValue = (object, key) => (hasOwn(object, key) ? object[key] : undefined
 function phaseInFlight(done) {
   const index = typeof done === 'string' ? PHASES.indexOf(done) : -1;
   return index >= 0 && index + 1 < PHASES.length ? PHASES[index + 1] : 'unknown';
+}
+
+/** Where a run's state.json says the work is now, as a start event records it: the phase in
+ *  flight and the cursor in SHAPE.taskId, else ''. Only its own `phase` and `buildCursor` are read. */
+function whereNow(state) {
+  const cursor = ownValue(state, 'buildCursor');
+  return { phase: phaseInFlight(ownValue(state, 'phase')), task: typeof cursor === 'string' && SHAPE.taskId.test(cursor) ? cursor : '' };
 }
 
 /**
@@ -1439,13 +1461,13 @@ function appendLoopEvent(options) {
   try {
     const opts = isObject(options) ? options : {};
     const env = isObject(opts.env) ? opts.env : process.env;
-    if (String(env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return loopResult(true, 'disabled');
+    if (metricsOff(env)) return loopResult(true, 'disabled');
     const { projectDir, payload } = opts;
     if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || !isObject(payload)) return loopResult(false, 'bad-input');
 
-    const loaded = loadConfig(projectDir);
-    if (!loaded.ok || !loaded.config || typeof loaded.config.stateDir !== 'string') return loopResult(false, 'bad-config');
-    const stateDir = loaded.config.stateDir;
+    const config = stateConfig(projectDir);
+    if (!config) return loopResult(false, 'bad-config');
+    const stateDir = config.stateDir;
 
     const runs = runningRuns(projectDir);
     if (runs.length !== 1 || !isSlug(runs[0])) return loopResult(false, 'no-single-run');
@@ -1459,16 +1481,8 @@ function appendLoopEvent(options) {
 
     const state = readSmallObject(projectDir, path.join(stateDir, run, 'state.json'));
     if (!state) return loopResult(false, 'bad-state');
-    const cursor = ownValue(state, 'buildCursor');
-    const event = {
-      v: 1,
-      kind: 'start',
-      agent,
-      type,
-      phase: phaseInFlight(ownValue(state, 'phase')),
-      task: typeof cursor === 'string' && SHAPE.taskId.test(cursor) ? cursor : '',
-      at: new Date().toISOString(),
-    };
+    const { phase, task } = whereNow(state);
+    const event = { v: 1, kind: 'start', agent, type, phase, task, at: new Date().toISOString() };
     const body = JSON.stringify(event);
     if (Buffer.byteLength(body, 'utf8') + 1 > CONSTANTS.LOOP_EVENT_MAX_BYTES) return loopResult(false, 'too-long');
     const file = path.join(stateDir, run, LOOP_EVENTS_FILE);
@@ -1537,9 +1551,9 @@ function readLoopEvents(projectDir, stateDir, slug) {
  * The agent ids of run `slug`'s loops still owed a result, sorted and each once (spec 6.2,
  * RF-024; plan T6) - what the Stop hook asks the orchestrator to record with loop-result.
  * A loop is owed one when it has a start event, no result event, AND the run has moved on
- * from where it started: the phase a start event would record now (phaseInFlight) or the
- * cursor (in SHAPE.taskId, else '') differ from the start's - derived exactly as
- * appendLoopEvent records them, so the comparison is like for like. A loop still running in
+ * from where it started: the phase or the task a start event would record now differ from the
+ * start's - both from whereNow, the function appendLoopEvent records them with, so the
+ * comparison is like for like. A loop still running in
  * the background while the run has not moved is not owed anything yet.
  *
  * `state` is the run's parsed state.json, untrusted: only its own `phase` and `buildCursor`
@@ -1551,9 +1565,7 @@ function loopsWithoutResult(projectDir, stateDir, slug, state) {
   try {
     if (!isObject(state)) return [];
     const events = readLoopEvents(projectDir, stateDir, slug);
-    const phase = phaseInFlight(ownValue(state, 'phase'));
-    const cursor = ownValue(state, 'buildCursor');
-    const task = typeof cursor === 'string' && SHAPE.taskId.test(cursor) ? cursor : '';
+    const { phase, task } = whereNow(state);
     const answered = new Set(events.results.map((r) => r.agent));
     const owed = new Set();
     for (const start of events.starts) {
@@ -1793,6 +1805,62 @@ function mostFrequent(values) {
   return best;
 }
 
+/** Counts one parsed transcript record into `requests` (requestId -> the max of each token field,
+ *  the first model in SHAPE.model, the first effort from the closed set): only an `assistant`
+ *  record with an API_ID requestId and a usage in the known shape, never a `<synthetic>` one.
+ *  False when the record is a new request and `requests` already holds MAX_REQUESTS: the
+ *  caller's overflow. Shared by the loop transcripts and the main ones (readMainTranscripts). */
+function addRequest(requests, line) {
+  if (ownValue(line, 'type') !== 'assistant') return true;
+  const id = ownValue(line, 'requestId');
+  const message = ownValue(line, 'message');
+  if (typeof id !== 'string' || !API_ID.test(id) || !isObject(message)) return true;
+  const model = ownValue(message, 'model');
+  if (model === '<synthetic>') return true;
+  const usage = readUsage(ownValue(message, 'usage'));
+  if (!usage) return true;
+  let request = requests.get(id);
+  if (!request) {
+    if (requests.size >= MAX_REQUESTS) return false;
+    request = { input: 0, cacheCreate: 0, cacheRead: 0, output: 0, model: null, effort: null };
+    requests.set(id, request);
+  }
+  // one request is written once per content block and only `output` grows: the max is final
+  for (const key of LOOP_TOKEN_KEYS) request[key] = Math.max(request[key], usage[key]);
+  if (request.model === null && typeof model === 'string' && SHAPE.model.test(model)) request.model = model;
+  const effort = ownValue(line, 'effort');
+  if (request.effort === null && TRANSCRIPT_EFFORTS.includes(effort)) request.effort = effort;
+  return true;
+}
+
+/** addRequest's map summed: `{ tokens, model, effort }`, the most frequent model and effort
+ *  counted once per request. `tokens` is null when a sum passes the count ceiling (sums of many
+ *  bounded counts can): that is not a measurement. */
+function sumRequests(requests) {
+  const tokens = { input: 0, cacheCreate: 0, cacheRead: 0, output: 0 };
+  for (const request of requests.values()) for (const key of LOOP_TOKEN_KEYS) tokens[key] += request[key];
+  const list = [...requests.values()];
+  return {
+    tokens: LOOP_TOKEN_KEYS.every((key) => isCount(tokens[key])) ? tokens : null,
+    model: mostFrequent(list.map((r) => r.model)),
+    effort: mostFrequent(list.map((r) => r.effort)),
+  };
+}
+
+/** The project's transcript folder `{ projectsRoot, base }`, or null when it is not a plain
+ *  folder inside ~/.claude/projects reached without a link. The folder readTokens reads: the
+ *  slug has only [A-Za-z0-9-], so whatever `projectDir` holds this is ONE folder name. */
+function transcriptFolder(projectDir) {
+  const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
+  const base = path.join(projectsRoot, projectDir.replace(/[^A-Za-z0-9]/g, '-'));
+  if (!isInside(projectsRoot, base) || crossesLink(projectsRoot, base)) return null;
+  try {
+    return fs.lstatSync(base).isDirectory() ? { projectsRoot, base } : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * What one loop's transcript says: `{ tokens, durationS, model, effort, reason: null }`, or
  * `{ reason }` (`timeout`, `unreadable-format`). `effort` is the most frequent closed value in the
@@ -1818,44 +1886,21 @@ function readLoopTranscript(file, deadline) {
         first = first === null ? ms : Math.min(first, ms);
         last = last === null ? ms : Math.max(last, ms);
       }
-      if (ownValue(line, 'type') !== 'assistant') return;
-      const id = ownValue(line, 'requestId');
-      const message = ownValue(line, 'message');
-      if (typeof id !== 'string' || !API_ID.test(id) || !isObject(message)) return;
-      const model = ownValue(message, 'model');
-      if (model === '<synthetic>') return;
-      const usage = readUsage(ownValue(message, 'usage'));
-      if (!usage) return;
-      let request = requests.get(id);
-      if (!request) {
-        if (requests.size >= MAX_REQUESTS) {
-          overflow = true;
-          return;
-        }
-        request = { input: 0, cacheCreate: 0, cacheRead: 0, output: 0, model: null, effort: null };
-        requests.set(id, request);
-      }
-      // one request is written once per content block and only `output` grows: the max is final
-      for (const key of LOOP_TOKEN_KEYS) request[key] = Math.max(request[key], usage[key]);
-      if (request.model === null && typeof model === 'string' && SHAPE.model.test(model)) request.model = model;
-      const effort = ownValue(line, 'effort');
-      if (request.effort === null && TRANSCRIPT_EFFORTS.includes(effort)) request.effort = effort;
+      if (!addRequest(requests, line)) overflow = true;
     };
     const scanned = scanFile(file, deadline, onLine, () => {});
     if (scanned === 'timeout' || overflow) return { reason: 'timeout' };
     if (scanned !== 'ok' || requests.size === 0) return { reason: 'unreadable-format' };
 
-    const tokens = { input: 0, cacheCreate: 0, cacheRead: 0, output: 0 };
-    for (const request of requests.values()) for (const key of LOOP_TOKEN_KEYS) tokens[key] += request[key];
+    const { tokens, model, effort } = sumRequests(requests);
     const durationS = first === null ? null : Math.round((last - first) / 1000);
-    // sums of many bounded counts can still pass the ceiling: that is not a measurement
-    if (!LOOP_TOKEN_KEYS.every((key) => isCount(tokens[key])) || !orNull(isCount)(durationS)) return { reason: 'unreadable-format' };
-    const list = [...requests.values()];
+    // a sum past the ceiling, or a duration that is not a count: not a measurement
+    if (tokens === null || !orNull(isCount)(durationS)) return { reason: 'unreadable-format' };
     return {
       tokens,
       durationS,
-      model: mostFrequent(list.map((r) => r.model)),
-      effort: mostFrequent(list.map((r) => r.effort)),
+      model,
+      effort,
       // the first record of any type: the backfill's run window (plan T13); joinLoops keeps the event's
       startedAt: first === null ? null : new Date(first).toISOString(),
       reason: null,
@@ -1882,8 +1927,7 @@ function joinLoops(options) {
     const { projectDir, slug } = opts;
     if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || projectDir.length > 1024 || !isSlug(slug)) return [];
     const given = isObject(opts.events) && Array.isArray(opts.events.starts) ? opts.events.starts : [];
-    const limit = Date.now() + CONSTANTS.BUDGET_MS;
-    const deadline = typeof opts.deadline === 'number' && Number.isFinite(opts.deadline) ? Math.min(opts.deadline, limit) : limit;
+    const deadline = deadlineWithin(opts.deadline, CONSTANTS.BUDGET_MS);
     const expired = () => Date.now() > deadline;
 
     const starts = [];
@@ -1924,15 +1968,9 @@ function joinLoops(options) {
     const finish = (rows) => rows.map(validateLoopRow).filter((r) => r.ok).map((r) => r.row);
     const all = (reason) => finish(starts.map((s) => row(s, { reason })));
 
-    // the same folder readTokens reads: the slug has only [A-Za-z0-9-], ONE folder name
-    const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
-    const base = path.join(projectsRoot, projectDir.replace(/[^A-Za-z0-9]/g, '-'));
-    if (!isInside(projectsRoot, base) || crossesLink(projectsRoot, base)) return all('no-transcript');
-    try {
-      if (!fs.lstatSync(base).isDirectory()) return all('no-transcript');
-    } catch {
-      return all('no-transcript');
-    }
+    const folder = transcriptFolder(projectDir);
+    if (!folder) return all('no-transcript');
+    const { projectsRoot, base } = folder;
     if (expired()) return all('timeout');
     const startMs = Math.min(...starts.map((s) => Date.parse(s.at))) - LOOP_MTIME_SLACK_MS;
     const limits = { maxFiles: CONSTANTS.MAX_TRANSCRIPT_FILES, maxTotalBytes: CONSTANTS.MAX_TRANSCRIPT_TOTAL_BYTES };
@@ -2079,9 +2117,9 @@ function appendLoopResult(projectDir, args) {
   try {
     const parsed = parseResultArgs(args);
     if (!parsed || typeof projectDir !== 'string' || !path.isAbsolute(projectDir)) return 'invalid';
-    const loaded = loadConfig(projectDir);
-    if (!loaded.ok || !loaded.config || typeof loaded.config.stateDir !== 'string') return 'bad-config';
-    const stateDir = loaded.config.stateDir;
+    const config = stateConfig(projectDir);
+    if (!config) return 'bad-config';
+    const stateDir = config.stateDir;
     const body = JSON.stringify(parsed.event);
     if (Buffer.byteLength(body, 'utf8') + 1 > CONSTANTS.LOOP_EVENT_MAX_BYTES) return 'too-long';
     const file = path.join(stateDir, parsed.slug, LOOP_EVENTS_FILE);
@@ -2113,7 +2151,7 @@ function runCommand(argv, projectDir) {
     if (args[0] === 'paperclip') return paperclipCommand(args.slice(1), projectDir, exit);
     if (args[0] === 'backfill') return backfillCommand(args.slice(1), projectDir, exit); // plan T13, below
     if (args[0] !== 'loop-result') return exit(2, process.stderr, CLI_USAGE);
-    if (String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return exit(0, process.stdout, 'metrics: disabled loop-result\n');
+    if (metricsOff(process.env)) return exit(0, process.stdout, 'metrics: disabled loop-result\n');
     const code = appendLoopResult(projectDir, args.slice(1));
     return code === 'written' ? exit(0, process.stdout, 'metrics: written loop-result\n') : exit(1, process.stderr, `metrics: ${code} loop-result\n`);
   } catch {
@@ -2220,20 +2258,12 @@ function readMainTranscripts(options) {
     if (!(startMs <= endMs)) return noMain('no-window');
     const { projectDir } = opts;
     if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || projectDir.length > 1024) return noMain('no-transcripts');
-    const limit = Date.now() + CONSTANTS.BUDGET_MS;
-    const deadline = typeof opts.deadline === 'number' && Number.isFinite(opts.deadline) ? Math.min(opts.deadline, limit) : limit;
+    const deadline = deadlineWithin(opts.deadline, CONSTANTS.BUDGET_MS);
     const expired = () => Date.now() > deadline;
 
-    // the same folder readTokens reads: the slug has only [A-Za-z0-9-], ONE folder name
-    const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
-    const base = path.join(projectsRoot, projectDir.replace(/[^A-Za-z0-9]/g, '-'));
-    if (!isInside(projectsRoot, base) || crossesLink(projectsRoot, base)) return noMain('no-transcripts');
-    try {
-      if (!fs.lstatSync(base).isDirectory()) return noMain('no-transcripts');
-    } catch {
-      return noMain('no-transcripts');
-    }
-    const listed = listMainTranscripts(projectsRoot, base, startMs, expired);
+    const folder = transcriptFolder(projectDir);
+    if (!folder) return noMain('no-transcripts');
+    const listed = listMainTranscripts(folder.projectsRoot, folder.base, startMs, expired);
     if (listed.reason) return noMain(listed.reason);
     const wantCwd = foldCwd(projectDir);
 
@@ -2267,44 +2297,15 @@ function readMainTranscripts(options) {
         const real = type === 'user' && ownValue(line, 'isMeta') !== true && sidechain === false && !hasOwn(line, 'toolUseResult');
         events.push({ ms, real });
 
-        if (type !== 'assistant' || sidechain === true) return;
-        const id = ownValue(line, 'requestId');
-        const message = ownValue(line, 'message');
-        if (typeof id !== 'string' || !API_ID.test(id) || !isObject(message)) return;
-        const model = ownValue(message, 'model');
-        if (model === '<synthetic>') return;
-        const usage = readUsage(ownValue(message, 'usage'));
-        if (!usage) return;
-        let request = requests.get(id);
-        if (!request) {
-          if (requests.size >= MAX_REQUESTS) {
-            overflow = true;
-            return;
-          }
-          request = { input: 0, cacheCreate: 0, cacheRead: 0, output: 0, model: null, effort: null };
-          requests.set(id, request);
-        }
-        for (const key of LOOP_TOKEN_KEYS) request[key] = Math.max(request[key], usage[key]);
-        if (request.model === null && typeof model === 'string' && SHAPE.model.test(model)) request.model = model;
-        const effort = ownValue(line, 'effort');
-        if (request.effort === null && TRANSCRIPT_EFFORTS.includes(effort)) request.effort = effort;
+        // the orchestrator's own requests only: a sidechain record is a subagent's
+        if (sidechain !== true && !addRequest(requests, line)) overflow = true;
       };
       if (scanFile(file, deadline, onLine, () => {}) === 'timeout' || overflow) return noMain('timeout');
       if (events.length > 0) sessions.push({ events });
     }
     if (sessions.length === 0) return noMain('no-transcripts');
-
-    const tokens = { input: 0, cacheCreate: 0, cacheRead: 0, output: 0 };
-    for (const request of requests.values()) for (const key of LOOP_TOKEN_KEYS) tokens[key] += request[key];
-    const list = [...requests.values()];
-    return {
-      reason: null,
-      sessions,
-      // sums of many bounded counts can still pass the ceiling: then no token count at all
-      tokens: LOOP_TOKEN_KEYS.every((key) => isCount(tokens[key])) ? tokens : null,
-      model: mostFrequent(list.map((r) => r.model)),
-      effort: mostFrequent(list.map((r) => r.effort)),
-    };
+    // a sum past the count ceiling is tokens null: no token count at all, the hours still stand
+    return { reason: null, sessions, ...sumRequests(requests) };
   } catch {
     return noMain('timeout');
   }
@@ -2349,9 +2350,9 @@ function runWindow(projectDir, stateDir, slug) {
 /** The time row, or `{ code }`. Never throws. */
 function timeRow(projectDir, slug) {
   try {
-    const loaded = loadConfig(projectDir);
-    if (!loaded.ok || !loaded.config || typeof loaded.config.stateDir !== 'string') return { code: 'bad-config' };
-    const window = runWindow(projectDir, loaded.config.stateDir, slug);
+    const config = stateConfig(projectDir);
+    if (!config) return { code: 'bad-config' };
+    const window = runWindow(projectDir, config.stateDir, slug);
     if (window.code) return { code: window.code };
     const read = readMainTranscripts({ projectDir, window });
     if (read.reason) return { code: read.reason };
@@ -2364,7 +2365,7 @@ function timeRow(projectDir, slug) {
       claudeMs += t.claudeMs;
       first = Math.min(first, t.firstMs);
     }
-    const phrase = TIME_PHRASE[loaded.config.pageLanguage] || TIME_PHRASE.en;
+    const phrase = TIME_PHRASE[config.pageLanguage] || TIME_PHRASE.en;
     const effort = TRANSCRIPT_EFFORTS.includes(read.effort) ? read.effort : 'unknown';
     const model = typeof read.model === 'string' && SHAPE.model.test(read.model) ? read.model : 'unknown';
     return { line: `| ${localDate(first)} | ${phrase} | ${hours(sessionMs)} | ${hours(claudeMs)} | ${effort} | ${model} |\n` };
@@ -2376,7 +2377,7 @@ function timeRow(projectDir, slug) {
 /** runCommand's `time`: TASK_FLOW_METRICS=off first (nothing read), then the arguments (all or
  *  nothing: the usage and 2), then the row on stdout or `metrics: <code> time`, exit 0 either way. */
 function timeCommand(args, projectDir, exit) {
-  if (String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return exit(0, process.stdout, 'metrics: disabled time\n');
+  if (metricsOff(process.env)) return exit(0, process.stdout, 'metrics: disabled time\n');
   const given = parseFlags(args, TIME_FLAGS);
   if (!given || !given.has('--slug') || typeof projectDir !== 'string' || !path.isAbsolute(projectDir)) return exit(2, process.stderr, CLI_USAGE);
   const row = timeRow(projectDir, given.get('--slug'));
@@ -2477,9 +2478,9 @@ function summaryBlock(rows, main, lang) {
 /** The summary text of run `slug`, or `{ code }`. Reads only; never throws. */
 function summaryText(projectDir, slug) {
   try {
-    const loaded = loadConfig(projectDir);
-    if (!loaded.ok || !loaded.config || typeof loaded.config.stateDir !== 'string') return { code: 'bad-config' };
-    const stateDir = loaded.config.stateDir;
+    const config = stateConfig(projectDir);
+    if (!config) return { code: 'bad-config' };
+    const stateDir = config.stateDir;
     const window = runWindow(projectDir, stateDir, slug);
     if (window.code) return { code: window.code };
     const deadline = Date.now() + CONSTANTS.BUDGET_MS;
@@ -2496,7 +2497,7 @@ function summaryText(projectDir, slug) {
     }
     if (byKey.size === 0) return { code: 'no-loops' };
     const main = readMainTranscripts({ projectDir, window, deadline });
-    return { text: summaryBlock([...byKey.values()], main, loaded.config.pageLanguage) };
+    return { text: summaryBlock([...byKey.values()], main, config.pageLanguage) };
   } catch {
     return { code: 'internal' };
   }
@@ -2505,7 +2506,7 @@ function summaryText(projectDir, slug) {
 /** runCommand's `summary`, the shape of timeCommand: TASK_FLOW_METRICS=off first (nothing read),
  *  then the arguments (all or nothing: the usage and 2), then the block or one fixed line, exit 0. */
 function summaryCommand(args, projectDir, exit) {
-  if (String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return exit(0, process.stdout, 'metrics: disabled summary\n');
+  if (metricsOff(process.env)) return exit(0, process.stdout, 'metrics: disabled summary\n');
   const given = parseFlags(args, TIME_FLAGS); // the same two flags as time
   if (!given || !given.has('--slug') || typeof projectDir !== 'string' || !path.isAbsolute(projectDir)) return exit(2, process.stderr, CLI_USAGE);
   const result = summaryText(projectDir, given.get('--slug'));
@@ -2575,8 +2576,7 @@ function paperclipGet(options) {
       const env = isObject(opts.env) ? opts.env : process.env;
       const token = hasOwn(env, 'PAPERCLIP_TOKEN') ? env.PAPERCLIP_TOKEN : undefined;
       if (typeof token !== 'string' || !HEADER_TOKEN.test(token)) return finish(paperclipFailure('no-token'));
-      const limit = Date.now() + CONSTANTS.PAPERCLIP_TIMEOUT_MS;
-      const deadline = typeof opts.deadline === 'number' && Number.isFinite(opts.deadline) ? Math.min(opts.deadline, limit) : limit;
+      const deadline = deadlineWithin(opts.deadline, CONSTANTS.PAPERCLIP_TIMEOUT_MS);
       timer = setTimeout(() => finish(paperclipFailure('timeout')), Math.max(0, deadline - Date.now()));
       const client = target.protocol === 'https:' ? https : http;
       req = client.request(target, {
@@ -2677,21 +2677,31 @@ const uuidOf = (value) => (typeof value === 'string' && PAPERCLIP_UUID.test(valu
 /** A paperclip issue reference (UUID lower-cased, or an identifier), or null. */
 const issueRefOf = (value) => uuidOf(value) || (typeof value === 'string' && PAPERCLIP_IDENTIFIER.test(value) ? value : null);
 
-/** The one run recorded for GitHub issue `issue`: `{ slug, state }`, or `{ code }` (no-run, many-runs). */
-function findPaperclipRun(projectDir, stateDir, issue) {
-  const found = [];
+/** Every run folder of `stateDir` (a slug, the first MAX_OTHER_RUNS) whose state.json reads as an
+ *  object: `[{ slug, state }]`. Read only (readSmallObject: lstat, no link, size first); no
+ *  folder is no run. Shared by the paperclip lookup and the backfill's windows. */
+function readRunStates(projectDir, stateDir) {
   let names = [];
   try {
     names = fs.readdirSync(stateDir).slice(0, MAX_OTHER_RUNS);
   } catch {
     // no folder: no run
   }
+  const runs = [];
   for (const name of names) {
     if (!isSlug(name)) continue;
     const state = readSmallObject(projectDir, path.join(stateDir, name, 'state.json'));
-    const recorded = state ? ownValue(state, 'paperclipIssue') : undefined;
-    if (Number.isSafeInteger(recorded) && String(recorded) === issue) found.push({ slug: name, state });
+    if (state) runs.push({ slug: name, state });
   }
+  return runs;
+}
+
+/** The one run recorded for GitHub issue `issue`: `{ slug, state }`, or `{ code }` (no-run, many-runs). */
+function findPaperclipRun(projectDir, stateDir, issue) {
+  const found = readRunStates(projectDir, stateDir).filter(({ state }) => {
+    const recorded = ownValue(state, 'paperclipIssue');
+    return Number.isSafeInteger(recorded) && String(recorded) === issue;
+  });
   if (found.length === 0) return { code: 'no-run' };
   return found.length === 1 ? found[0] : { code: 'many-runs' };
 }
@@ -2762,24 +2772,23 @@ async function collectPaperclip(options) {
     const flag = opts.paperclipIssue === undefined ? null : issueRefOf(opts.paperclipIssue);
     if (opts.paperclipIssue !== undefined && !flag) return done('invalid');
 
-    const loaded = loadConfig(projectDir);
-    if (!loaded.ok || !loaded.config || typeof loaded.config.stateDir !== 'string') return done('bad-config');
-    const stateDir = loaded.config.stateDir;
+    const config = stateConfig(projectDir);
+    if (!config) return done('bad-config');
+    const stateDir = config.stateDir;
     const found = findPaperclipRun(projectDir, stateDir, issue);
     if (found.code) return done(found.code);
     const recorded = issueRefOf(ownValue(found.state, 'paperclipIssueId'));
     if (recorded && flag && recorded !== flag) return done('id-mismatch');
     const ref = recorded || flag;
     if (!ref) return done('no-issue-id');
-    const raw = isObject(loaded.config.raw) ? ownValue(loaded.config.raw, 'paperclip') : undefined;
+    const raw = isObject(config.raw) ? ownValue(config.raw, 'paperclip') : undefined;
     const company = isObject(raw) ? uuidOf(ownValue(raw, 'companyId')) : null;
     if (!company) return done('bad-config');
     const history = readLoops(projectDir, stateDir);
     if (history.code) return done(history.code);
     const known = new Set(history.rows.map(loopKey));
 
-    const limit = Date.now() + PAPERCLIP_COMMAND_MS;
-    const deadline = typeof opts.deadline === 'number' && Number.isFinite(opts.deadline) ? Math.min(opts.deadline, limit) : limit;
+    const deadline = deadlineWithin(opts.deadline, PAPERCLIP_COMMAND_MS);
     const env = isObject(opts.env) ? opts.env : process.env;
     const get = (pathname) => (Date.now() >= deadline
       ? paperclipFailure('timeout')
@@ -2845,7 +2854,7 @@ async function collectPaperclip(options) {
  *  rejects (the CLI block does not wait on it). */
 async function paperclipCommand(args, projectDir, exit) {
   try {
-    if (String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return exit(0, process.stdout, 'metrics: disabled paperclip\n');
+    if (metricsOff(process.env)) return exit(0, process.stdout, 'metrics: disabled paperclip\n');
     const given = parseFlags(args, PAPERCLIP_FLAGS);
     if (!given || !given.has('--issue') || typeof projectDir !== 'string' || !path.isAbsolute(projectDir)) return exit(2, process.stderr, CLI_USAGE);
     const result = await collectPaperclip({
@@ -2895,21 +2904,12 @@ const BACKFILL_FLAGS = new Map([['--project-dir', () => true]]); // resolved by 
  *  no window. Read only; never throws. */
 function backfillWindows(projectDir, stateDir) {
   const windows = [];
-  let names = [];
-  try {
-    names = fs.readdirSync(stateDir).slice(0, MAX_OTHER_RUNS);
-  } catch {
-    // no folder: no window
-  }
-  for (const name of names) {
-    if (!isSlug(name)) continue;
-    const state = readSmallObject(projectDir, path.join(stateDir, name, 'state.json'));
-    if (!state) continue;
+  for (const { slug, state } of readRunStates(projectDir, stateDir)) {
     const { startedAt, phaseLog } = parseHealth(state);
     const end = ownValue(state, 'phaseChangedAt');
     if (!startedAt || !isInstant(end) || Date.parse(startedAt) > Date.parse(end)) continue;
     const log = phaseLog ? phaseLog.map((e) => ({ phase: e.phase, ms: Date.parse(e.at) })).sort((a, b) => a.ms - b.ms) : null;
-    windows.push({ slug: name, startMs: Date.parse(startedAt), endMs: Date.parse(end), log });
+    windows.push({ slug, startMs: Date.parse(startedAt), endMs: Date.parse(end), log });
   }
   return windows;
 }
@@ -2955,13 +2955,12 @@ function backfillLoops(options) {
     const opts = isObject(options) ? options : {};
     const { projectDir } = opts;
     if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || projectDir.length > 1024) return done('invalid');
-    const limit = Date.now() + BACKFILL_MS;
-    const deadline = typeof opts.deadline === 'number' && Number.isFinite(opts.deadline) ? Math.min(opts.deadline, limit) : limit;
+    const deadline = deadlineWithin(opts.deadline, BACKFILL_MS);
     const expired = () => Date.now() > deadline;
 
-    const loaded = loadConfig(projectDir);
-    if (!loaded.ok || !loaded.config || typeof loaded.config.stateDir !== 'string') return done('bad-config');
-    const stateDir = loaded.config.stateDir;
+    const config = stateConfig(projectDir);
+    if (!config) return done('bad-config');
+    const stateDir = config.stateDir;
     const history = readLoops(projectDir, stateDir);
     if (history.code) return done(history.code);
     // RF-052: any task-flow row of the loop, whatever its run; and the loops a live run's close owns
@@ -2970,15 +2969,10 @@ function backfillLoops(options) {
       if (isSlug(name)) for (const s of readLoopEvents(projectDir, stateDir, name).starts) skip.add(s.agent);
     }
 
-    // the same folder readTokens and joinLoops read: the slug has only [A-Za-z0-9-], ONE folder name
-    const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
-    const base = path.join(projectsRoot, projectDir.replace(/[^A-Za-z0-9]/g, '-'));
-    if (!isInside(projectsRoot, base) || crossesLink(projectsRoot, base)) return done('no-transcripts');
-    try {
-      if (!fs.lstatSync(base).isDirectory()) return done('no-transcripts');
-    } catch {
-      return done('no-transcripts');
-    }
+    // the same folder readTokens and joinLoops read
+    const folder = transcriptFolder(projectDir);
+    if (!folder) return done('no-transcripts');
+    const { projectsRoot, base } = folder;
     const limits = { maxFiles: CONSTANTS.MAX_TRANSCRIPT_FILES, maxTotalBytes: CONSTANTS.MAX_TRANSCRIPT_TOTAL_BYTES };
     const listed = listTranscripts(projectsRoot, base, 0, limits, expired);
     if (listed.reason) return done('timeout');
@@ -3011,7 +3005,7 @@ function backfillLoops(options) {
 /** runCommand's `backfill`: TASK_FLOW_METRICS=off first (nothing read), then the arguments (only
  *  --project-dir; anything else: the usage and 2), then one fixed line, exit 0. */
 function backfillCommand(args, projectDir, exit) {
-  if (String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return exit(0, process.stdout, 'metrics: disabled backfill\n');
+  if (metricsOff(process.env)) return exit(0, process.stdout, 'metrics: disabled backfill\n');
   const given = parseFlags(args, BACKFILL_FLAGS);
   if (!given || typeof projectDir !== 'string' || !path.isAbsolute(projectDir)) return exit(2, process.stderr, CLI_USAGE);
   return exit(0, process.stdout, `metrics: ${backfillLoops({ projectDir }).code} backfill\n`);
