@@ -519,6 +519,28 @@ check('a page created by someone else while this one was writing a new page is n
 
 // --- the CLI -----------------------------------------------------------------------
 
+check('SECURITY questions.json changed after the page write (answers.js consume) keeps that change: the write-back re-reads, no lost update', () => {
+  const p = project();
+  const original = fs.renameSync;
+  fs.renameSync = function consume(from, to, ...rest) {
+    const result = original.call(fs, from, to, ...rest);
+    if (path.resolve(String(to)) === path.resolve(p.pageFile)) {
+      const data = JSON.parse(fs.readFileSync(p.questionsFile, 'utf8'));
+      data.items.find((x) => x.id === 'Q4').answer = { status: 'ok', comment: 'answered meanwhile', via: 'panel', at: AT };
+      fs.writeFileSync(p.questionsFile, JSON.stringify(data, null, 2) + String.fromCharCode(10));
+    }
+    return result;
+  };
+  try {
+    promote(p, { item: 'Q1', rule: 'Prices are in EUR' });
+  } finally {
+    fs.renameSync = original;
+  }
+  assertEqual(itemOf(p, 'Q1').promotedAs, 'R1', 'promotedAs');
+  assertEqual((itemOf(p, 'Q4').answer || {}).comment, 'answered meanwhile', 'the other writer answer was lost');
+  assertEqual(itemOf(p, 'Q2').chosen, 'THE RUN CHOSE THIS TEXT', 'other fields kept');
+});
+
 check('CLI promote: exit 0, names the id and the item, says the page was created; never echoes the words', () => {
   const data = questions('demo-run');
   data.items[0].answer.comment = `Always euros ${MARK}`;
