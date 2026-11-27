@@ -251,9 +251,9 @@ check('D2 SECURITY a rejected line does not replace: R<m> stays', () => {
 });
 
 // The "substitui" clause is matched whole and literally, so a lookalike (no-break
-// space, a format character the INVISIBLE list does not name yet, a fullwidth
-// digit) can never drop R<m>: the line is rejected and R<m> stays (D3 widens the
-// character list; this holds whatever that list holds).
+// space, the format character U+FFF9 - rejected by INVISIBLE's \p{Cf} since D3 -,
+// a fullwidth digit) can never drop R<m>: the line is rejected and R<m> stays,
+// whatever the character list holds.
 check('D2 SECURITY a lookalike "substitui" clause does not replace: R<m> stays', () => {
   const tails = [' · substitui\u00A0R1', ' · substitui R\uFFF91', ' · substitui R\uFF11', ' · substitui  R1', ' · Substitui R1'];
   for (const tail of tails) {
@@ -376,13 +376,18 @@ const suspiciousTexts = {
   'a markdown link': `[click](${MARK})`,
   'a wiki link': `[[${MARK}]]`,
   // D3: compatibility forms the model reads as the ASCII ones. The patterns also
-  // run on the NFKC form of each field (never used for parsing).
+  // run on a check form of each field (NFKD, marks dropped; never used for parsing).
   'a fullwidth https URL': `see \uFF48\uFF54\uFF54\uFF50\uFF53\uFF1A\uFF0F\uFF0Fevil.example/${MARK}`,
   'a fullwidth www. address': `www\uFF0E${MARK}.example`,
-  // Security D3: a combining mark (\p{M}) is not Cf and NFKC keeps it, so one
+  // Security D3: a combining mark (\p{M}) is not Cf and normalising keeps it, so one
   // between ':' and '//' split the pattern while the model still reads a URL.
   'a combining mark inside ://': `see https:\u0301//evil.example/${MARK}`,
   'a combining mark inside a network path': `\\\u0301\\host\\${MARK}`,
+  // Security D4: NFKC composes, so a precomposed letter (U+1E81 \u1e81, U+00E0 \u00e0)
+  // keeps its mark and escaped the patterns. The check form is NFKD now.
+  'a precomposed letter in www.': `\u1e81ww.${MARK}.example`,
+  'a precomposed letter in mailto:': `m\u00e0ilto:${MARK}`,
+  'a precomposed letter in the delimiter name': `st\u00e0nding-answers ${MARK}`,
 };
 for (const [what, text] of Object.entries(suspiciousTexts)) {
   check(`SECURITY an entry with ${what} is suspicious: not used, reported by id, never echoed`, () => {

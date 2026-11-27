@@ -167,14 +167,17 @@ function parsePage(text) {
     if (seen.has(entry.id)) return result.rejected.push({ line: number, why: 'id is already used by an earlier line' });
     seen.add(entry.id);
     for (const [pattern, why] of SUSPICIOUS) {
-      // Also on the NFKC form, so a fullwidth "ｈｔｔｐｓ：／／" or "www．" is still
-      // a URL to the patterns, as it is to the model. Only for this check: the
-      // entry keeps its own text, and parsing never sees the normalised form (a
-      // fullwidth digit in "substitui R1" stays a rejected line, D2).
-      // Combining marks (\p{M}) are dropped from that form too: they are not Cf
-      // and NFKC keeps them, so "https:́//" split the pattern (Security D3).
+      // Also on a check form - NFKD, then every combining mark (\p{M}) dropped -
+      // so what the model reads as a URL is one to the patterns too: a fullwidth
+      // "ｈｔｔｐｓ：／／" or "www．" (the K in NFKD folds compatibility forms), a
+      // mark between ':' and '//' (marks are not Cf, Security D3), and a
+      // precomposed letter, "ẁww." or "màilto:" (NFKD splits it into letter and
+      // mark; NFKC composed it back and the mark stayed, Security D4). Only for
+      // this check: the entry keeps its own text, a line is never rejected just
+      // because the form differs, and parsing never sees it (a fullwidth digit
+      // in "substitui R1" stays a rejected line, D2).
       const field = ['rule', 'words'].find((name) => pattern.test(entry[name])
-        || pattern.test(entry[name].normalize('NFKC').replace(/\p{M}/gu, '')));
+        || pattern.test(entry[name].normalize('NFKD').replace(/\p{M}/gu, '')));
       if (field) return result.suspicious.push({ id: entry.id, why: `${field} ${why}` });
     }
     accepted.push(entry);
