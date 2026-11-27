@@ -1995,6 +1995,7 @@ const CLI_USAGE = [
   '       metrics.js loop-result --slug <run> --agent <id> --outcome ok|retry|failed|unknown',
   '         [--tests green|red] [--critical <n>] [--required <n>] [--round <1-99>]',
   `         [--phase ${PHASES.join('|')}] [--task <id>] [--project-dir <dir>]`,
+  '       metrics.js time --slug <run> [--project-dir <dir>]',
   '',
 ].join('\n');
 
@@ -2030,17 +2031,24 @@ const RESULT_FLAGS = new Map([
   ['--project-dir', () => true], // resolved and checked by the CLI block, as for close
 ]);
 
-/** loop-result's arguments (after the command) as `{ slug, event }`, or null. All or nothing. */
-function parseResultArgs(args) {
+/** `--flag value` pairs as a Map, or null: every flag in `flags` (a Map flag -> check), at most
+ *  once, with a string value its check accepts. All or nothing. Shared by the CLI commands. */
+function parseFlags(args, flags) {
   const given = new Map();
   for (let i = 0; i < args.length; i += 2) {
     const flag = args[i];
     const value = args[i + 1];
-    const check = typeof flag === 'string' ? RESULT_FLAGS.get(flag) : undefined;
+    const check = typeof flag === 'string' ? flags.get(flag) : undefined;
     if (!check || given.has(flag) || typeof value !== 'string' || !check(value)) return null;
     given.set(flag, value);
   }
-  if (!given.has('--slug') || !given.has('--agent') || !given.has('--outcome')) return null;
+  return given;
+}
+
+/** loop-result's arguments (after the command) as `{ slug, event }`, or null. All or nothing. */
+function parseResultArgs(args) {
+  const given = parseFlags(args, RESULT_FLAGS);
+  if (!given || !given.has('--slug') || !given.has('--agent') || !given.has('--outcome')) return null;
   const text = (flag) => (given.has(flag) ? given.get(flag) : null);
   const number = (flag) => (given.has(flag) ? Number(given.get(flag)) : null);
   const event = toResultEvent({
@@ -2073,9 +2081,9 @@ function appendLoopResult(projectDir, args) {
 /**
  * Every CLI command but `close` (which the CLI block runs itself). Writes its own output and
  * sets process.exitCode, which it also returns. An unknown command is the usage text and 2, as
- * before this existed. loop-result: 0 when written, or with TASK_FLOW_METRICS=off (checked
- * first: nothing parsed, nothing done); else 1; one fixed line either way. `projectDir` is the
- * CLI block's resolution (--project-dir, CLAUDE_PROJECT_DIR, the cwd), or null.
+ * before this existed. `time` goes to timeCommand (plan T8, below). loop-result: 0 when
+ * written, or with TASK_FLOW_METRICS=off (checked first: nothing parsed, nothing done); else 1;
+ * one fixed line either way. `projectDir` is the CLI block's resolution (--project-dir, CLAUDE_PROJECT_DIR, the cwd), or null.
  */
 function runCommand(argv, projectDir) {
   const exit = (code, stream, text) => {
@@ -2085,6 +2093,7 @@ function runCommand(argv, projectDir) {
   };
   try {
     const args = Array.isArray(argv) ? argv : [];
+    if (args[0] === 'time') return timeCommand(args.slice(1), projectDir, exit); // plan T8, below
     if (args[0] !== 'loop-result') return exit(2, process.stderr, CLI_USAGE);
     if (String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return exit(0, process.stdout, 'metrics: disabled loop-result\n');
     const code = appendLoopResult(projectDir, args.slice(1));
@@ -2095,6 +2104,268 @@ function runCommand(argv, projectDir) {
 }
 
 Object.assign(module.exports, { runCommand });
+
+// --- the main transcripts and the time CLI (spec 6.3, RF-035..RF-037; plan T8) -------------------
+//
+// The run's row of the plan's `## Registo de tempo` table, computed instead of measured by hand
+// with session-time.ps1 (decisions Q4, Q5: ONE row for the whole run window, in the plan's table):
+//
+//   node plugin/scripts/metrics.js time --slug <run> [--project-dir <dir>]
+//   -> | <local date> | run /task-flow (spec → PR) | <session h> | <Claude h> | <effort> | <model> |
+//
+// The hours are the ps1's rule, ported: per main transcript (one session), the session runs from
+// its first to its last event, and Claude works from each real user message to the last event
+// before the next one; the sessions add up. Only the orchestrator's <session>.jsonl files at the
+// top of ~/.claude/projects/<slug> are read - a subagent's transcript lives under
+// <session>/subagents/ and is never listed, so loops running in parallel can never add up to more
+// hours than the wall clock (pressuposto 5): their time is already inside the orchestrator's turn.
+//
+// Window: the run's startedAt to now while it is open, to phaseChangedAt once phase is `done`
+// (repeated after the close, it must not count later sessions). An event counts only inside the
+// window AND under the project's cwd; a record without a cwd does not count (as in readTokens).
+//
+// Trust. The main transcripts are the same untrusted, unversioned format as the subagents', so
+// the same rules (RF-037 -> RF-006): one bounded listing (lstat, no link, a closed file name,
+// mtime, file/total size ceilings), files read through scanFile, the time budget BUDGET_MS. A
+// "real user message" is decided by FIELDS only (type, isMeta, isSidechain, toolUseResult), never
+// by text: a message saying `"isMeta":true` is still the user's (the ps1 matched raw text; this
+// does not). Nothing of a message reaches the output: numbers, the local date, a fixed phrase per
+// language, an effort from a closed set and a model in SHAPE.model (which has no `|`), else
+// `unknown`. It writes nothing. Without data, one fixed line `metrics: <code> time`, exit 0;
+// arguments out of shape: the fixed usage, exit 2 - nothing the caller passed is printed back.
+
+/** A main transcript: `<session id>.jsonl` (a UUID today). `agent-*.jsonl` live one level down. */
+const MAIN_TRANSCRIPT_NAME = /^[A-Za-z0-9][A-Za-z0-9-]{0,127}\.jsonl$/;
+/** Events one call may remember (each in-window, in-cwd timestamped record is one). A ceiling. */
+const MAX_MAIN_EVENTS = 1000000;
+const TIME_PHRASE = Object.freeze({ 'pt-PT': 'run /task-flow (spec → PR)', en: '/task-flow run (spec → PR)' });
+const TIME_FLAGS = new Map([
+  ['--slug', isSlug],
+  ['--project-dir', () => true], // resolved and checked by the CLI block, as for close
+]);
+
+const noMain = (reason) => ({ reason, sessions: [], tokens: null, model: null, effort: null });
+
+/** The main transcripts of `base`, or `{ reason }`: lstat'ed, never a link, inside the root. */
+function listMainTranscripts(projectsRoot, base, startMs, expired) {
+  const files = [];
+  let total = 0;
+  let dir = null;
+  try {
+    dir = fs.opendirSync(base);
+    for (let seen = 0, entry; (entry = dir.readSync()) !== null; seen += 1) {
+      if (seen >= MAX_DIR_ENTRIES || expired()) return { reason: 'timeout' };
+      if (!MAIN_TRANSCRIPT_NAME.test(entry.name)) continue;
+      const file = path.join(base, entry.name);
+      let stats;
+      try {
+        stats = fs.lstatSync(file);
+      } catch {
+        continue;
+      }
+      if (!stats.isFile() || !isInside(projectsRoot, file) || crossesLink(projectsRoot, file)) continue;
+      // last written before the run began: it cannot hold an event of this run
+      if (stats.mtimeMs < startMs) continue;
+      // a limit hit, never read: skipping a session would print fewer hours as if measured
+      if (stats.size > CONSTANTS.MAX_TRANSCRIPT_FILE_BYTES) return { reason: 'timeout' };
+      total += stats.size;
+      if (files.length + 1 > CONSTANTS.MAX_TRANSCRIPT_FILES || total > CONSTANTS.MAX_TRANSCRIPT_TOTAL_BYTES) return { reason: 'timeout' };
+      files.push(file);
+    }
+    return { files };
+  } catch {
+    return { files };
+  } finally {
+    closeDirQuietly(dir);
+  }
+}
+
+/**
+ * `readMainTranscripts({ projectDir, window, deadline })` -> `{ reason: null, sessions, tokens,
+ * model, effort }` or `{ reason }` with sessions [] and the rest null. Never throws.
+ *
+ * `window` is `{ startedAt, closedAt }` (UTC instants with a Z). `sessions` has one
+ * `{ events: [{ ms, real }] }` per main transcript with at least one event in the window and the
+ * project's cwd, in file order (any timestamped record is an event, a sidechain one included, as
+ * in the ps1). `tokens` are the orchestrator's (`assistant`, not sidechain, a usage in shape),
+ * deduplicated by requestId with the max of each field; `model`/`effort` the most frequent of
+ * those requests, counted once per request (as joinLoops), or null. `deadline` (ms since the
+ * epoch) can only tighten BUDGET_MS from now. Reasons: `no-window`, `no-transcripts`, `timeout`.
+ */
+function readMainTranscripts(options) {
+  try {
+    const opts = isObject(options) ? options : {};
+    const window = isObject(opts.window) ? opts.window : {};
+    if (!isInstant(window.startedAt) || !isInstant(window.closedAt)) return noMain('no-window');
+    const startMs = Date.parse(window.startedAt);
+    const endMs = Date.parse(window.closedAt);
+    if (!(startMs <= endMs)) return noMain('no-window');
+    const { projectDir } = opts;
+    if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || projectDir.length > 1024) return noMain('no-transcripts');
+    const limit = Date.now() + CONSTANTS.BUDGET_MS;
+    const deadline = typeof opts.deadline === 'number' && Number.isFinite(opts.deadline) ? Math.min(opts.deadline, limit) : limit;
+    const expired = () => Date.now() > deadline;
+
+    // the same folder readTokens reads: the slug has only [A-Za-z0-9-], ONE folder name
+    const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
+    const base = path.join(projectsRoot, projectDir.replace(/[^A-Za-z0-9]/g, '-'));
+    if (!isInside(projectsRoot, base) || crossesLink(projectsRoot, base)) return noMain('no-transcripts');
+    try {
+      if (!fs.lstatSync(base).isDirectory()) return noMain('no-transcripts');
+    } catch {
+      return noMain('no-transcripts');
+    }
+    const listed = listMainTranscripts(projectsRoot, base, startMs, expired);
+    if (listed.reason) return noMain(listed.reason);
+    const wantCwd = foldCwd(projectDir);
+
+    const sessions = [];
+    const requests = new Map();
+    let eventCount = 0;
+    let overflow = false;
+    for (const file of listed.files) {
+      if (expired()) return noMain('timeout');
+      const events = [];
+      const onLine = (text) => {
+        let line;
+        try {
+          line = JSON.parse(text);
+        } catch {
+          return; // the parser's message quotes the input: dropped
+        }
+        if (!isObject(line)) return;
+        const timestamp = ownValue(line, 'timestamp');
+        if (!isInstant(timestamp)) return;
+        const ms = Date.parse(timestamp);
+        if (ms < startMs || ms > endMs || foldCwd(ownValue(line, 'cwd')) !== wantCwd) return;
+        if (eventCount >= MAX_MAIN_EVENTS) {
+          overflow = true;
+          return;
+        }
+        eventCount += 1;
+        const type = ownValue(line, 'type');
+        const sidechain = ownValue(line, 'isSidechain');
+        // RF-037: by fields, never by text - typed by the human: not meta, not a subagent's, not a tool result
+        const real = type === 'user' && ownValue(line, 'isMeta') !== true && sidechain === false && !hasOwn(line, 'toolUseResult');
+        events.push({ ms, real });
+
+        if (type !== 'assistant' || sidechain === true) return;
+        const id = ownValue(line, 'requestId');
+        const message = ownValue(line, 'message');
+        if (typeof id !== 'string' || !API_ID.test(id) || !isObject(message)) return;
+        const model = ownValue(message, 'model');
+        if (model === '<synthetic>') return;
+        const usage = readUsage(ownValue(message, 'usage'));
+        if (!usage) return;
+        let request = requests.get(id);
+        if (!request) {
+          if (requests.size >= MAX_REQUESTS) {
+            overflow = true;
+            return;
+          }
+          request = { input: 0, cacheCreate: 0, cacheRead: 0, output: 0, model: null, effort: null };
+          requests.set(id, request);
+        }
+        for (const key of LOOP_TOKEN_KEYS) request[key] = Math.max(request[key], usage[key]);
+        if (request.model === null && typeof model === 'string' && SHAPE.model.test(model)) request.model = model;
+        const effort = ownValue(line, 'effort');
+        if (request.effort === null && TRANSCRIPT_EFFORTS.includes(effort)) request.effort = effort;
+      };
+      if (scanFile(file, deadline, onLine, () => {}) === 'timeout' || overflow) return noMain('timeout');
+      if (events.length > 0) sessions.push({ events });
+    }
+    if (sessions.length === 0) return noMain('no-transcripts');
+
+    const tokens = { input: 0, cacheCreate: 0, cacheRead: 0, output: 0 };
+    for (const request of requests.values()) for (const key of LOOP_TOKEN_KEYS) tokens[key] += request[key];
+    const list = [...requests.values()];
+    return {
+      reason: null,
+      sessions,
+      // sums of many bounded counts can still pass the ceiling: then no token count at all
+      tokens: LOOP_TOKEN_KEYS.every((key) => isCount(tokens[key])) ? tokens : null,
+      model: mostFrequent(list.map((r) => r.model)),
+      effort: mostFrequent(list.map((r) => r.effort)),
+    };
+  } catch {
+    return noMain('timeout');
+  }
+}
+
+/** session-time.ps1's rule on one session's events (not empty): `{ firstMs, sessionMs, claudeMs }`. */
+function sessionTime(events) {
+  const sorted = events.slice().sort((a, b) => a.ms - b.ms); // stable: file order on a tie
+  const starts = [];
+  for (let i = 0; i < sorted.length; i += 1) if (sorted[i].real) starts.push(i);
+  let claudeMs = 0;
+  for (let k = 0; k < starts.length; k += 1) {
+    const end = k + 1 < starts.length ? starts[k + 1] - 1 : sorted.length - 1;
+    if (end > starts[k]) claudeMs += Math.max(0, sorted[end].ms - sorted[starts[k]].ms);
+  }
+  return { firstMs: sorted[0].ms, sessionMs: sorted[sorted.length - 1].ms - sorted[0].ms, claudeMs };
+}
+
+/** Hours as the ps1 prints them: rounded to 2 decimals, invariant (`2`, `0.5`, `1.23`).
+ *  ponytail: half-up rounding, .NET's Math.Round is half-even; differs only on an exact .xx5. */
+const hours = (ms) => String(Math.round(ms / 36000) / 100);
+
+/** The local date of an instant, `yyyy-MM-dd` (the ps1's `Data` column). */
+function localDate(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** The run's window `{ startedAt, closedAt }` from its state.json, or `{ code }` (`bad-state`,
+ *  `no-window`, `unsafe-path`). Open run: until now; phase `done`: until phaseChangedAt. */
+function runWindow(projectDir, stateDir, slug) {
+  const statePath = path.join(stateDir, slug, 'state.json');
+  if (!isInside(stateDir, statePath) || !isInside(projectDir, statePath) || crossesLink(projectDir, statePath)) return { code: 'unsafe-path' };
+  const state = readSmallObject(projectDir, statePath);
+  if (!state) return { code: 'bad-state' };
+  const startedAt = parseHealth(state).startedAt;
+  const closedAt = state.phase === 'done' ? ownValue(state, 'phaseChangedAt') : new Date().toISOString();
+  if (!startedAt || !isInstant(closedAt) || Date.parse(startedAt) > Date.parse(closedAt)) return { code: 'no-window' };
+  return { startedAt, closedAt };
+}
+
+/** The time row, or `{ code }`. Never throws. */
+function timeRow(projectDir, slug) {
+  try {
+    const loaded = loadConfig(projectDir);
+    if (!loaded.ok || !loaded.config || typeof loaded.config.stateDir !== 'string') return { code: 'bad-config' };
+    const window = runWindow(projectDir, loaded.config.stateDir, slug);
+    if (window.code) return { code: window.code };
+    const read = readMainTranscripts({ projectDir, window });
+    if (read.reason) return { code: read.reason };
+    let sessionMs = 0;
+    let claudeMs = 0;
+    let first = Infinity; // a loop, not Math.min(...): a million events would overflow the stack
+    for (const s of read.sessions) {
+      const t = sessionTime(s.events);
+      sessionMs += t.sessionMs;
+      claudeMs += t.claudeMs;
+      first = Math.min(first, t.firstMs);
+    }
+    const phrase = TIME_PHRASE[loaded.config.pageLanguage] || TIME_PHRASE.en;
+    const effort = TRANSCRIPT_EFFORTS.includes(read.effort) ? read.effort : 'unknown';
+    const model = typeof read.model === 'string' && SHAPE.model.test(read.model) ? read.model : 'unknown';
+    return { line: `| ${localDate(first)} | ${phrase} | ${hours(sessionMs)} | ${hours(claudeMs)} | ${effort} | ${model} |\n` };
+  } catch {
+    return { code: 'internal' };
+  }
+}
+
+/** runCommand's `time`: TASK_FLOW_METRICS=off first (nothing read), then the arguments (all or
+ *  nothing: the usage and 2), then the row on stdout or `metrics: <code> time`, exit 0 either way. */
+function timeCommand(args, projectDir, exit) {
+  if (String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return exit(0, process.stdout, 'metrics: disabled time\n');
+  const given = parseFlags(args, TIME_FLAGS);
+  if (!given || !given.has('--slug') || typeof projectDir !== 'string' || !path.isAbsolute(projectDir)) return exit(2, process.stderr, CLI_USAGE);
+  const row = timeRow(projectDir, given.get('--slug'));
+  return exit(0, process.stdout, row.line || `metrics: ${row.code} time\n`);
+}
+
+Object.assign(module.exports, { readMainTranscripts });
 
 
 // --- closeRun and the CLI (spec R3, R4, R9; plan T7) -----------------------------------------------

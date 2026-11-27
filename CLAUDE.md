@@ -47,6 +47,7 @@ node tests/metrics.security.test.js
 node tests/metrics.test.js
 node tests/metrics.tokens.security.test.js
 node tests/metrics.tokens.test.js
+node tests/metrics.time.test.js
 node tests/check-version.test.js
 node tests/shim.test.js
 node tests/skill-rules.docs.test.js
