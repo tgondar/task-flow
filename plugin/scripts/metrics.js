@@ -33,8 +33,12 @@
 // top: a top-level require in both directions would hand back partial exports.
 
 const fs = require('fs');
+const http = require('http');
+const https = require('https');
 const path = require('path');
-const { crossesLink, isInside, loadConfig, runningRuns } = require('./config.js');
+const {
+  crossesLink, isInside, isPaperclipUrlTrusted, loadConfig, parsePaperclipOrigin, runningRuns,
+} = require('./config.js');
 const { PHASES, SAFE_SEGMENT, STRINGS, formatDuration, readPlanTasks, readSkippedTasks, readPendingTasks } = require('./render-run.js');
 
 // --- constants ---------------------------------------------------------------
@@ -72,6 +76,11 @@ const CONSTANTS = Object.freeze({
   LOOP_EVENT_MAX_BYTES: 512,
   /** A loop-events.jsonl already past this gets no more lines (thousands of loops). */
   LOOP_EVENTS_MAX_FILE_BYTES: 1024 * 1024,
+
+  /** One request to paperclip's API (plan T11, RF-042): the whole exchange, connect to last byte. */
+  PAPERCLIP_TIMEOUT_MS: 10000,
+  /** A paperclip response body past this is refused, not parsed (the request is destroyed). */
+  PAPERCLIP_MAX_BODY_BYTES: 1024 * 1024,
 });
 
 // --- deviation table (spec R7) --------------------------------------------------
@@ -2496,6 +2505,107 @@ function summaryCommand(args, projectDir, exit) {
   return exit(0, process.stdout, result.text || `metrics: ${result.code} summary\n`);
 }
 
+
+// --- the one request to paperclip's API (spec 6.4, RF-042, RF-060; plan T11) ------------------------
+//
+// `paperclipGet({ projectDir, url, pathname, env, deadline })` -> a Promise that always resolves to
+// `{ ok, code, body }`: `{ ok: true, code: 'ok', body: <parsed JSON> }`, or `ok: false`, `body: null`
+// and one closed code - untrusted-url, no-token, timeout, http-status, too-large, bad-json, network.
+// It never rejects and never throws: the caller (metrics.js paperclip, plan T12) is information,
+// and a down or slow paperclip must cost it one fixed line, not a stack.
+//
+// Trust. The request carries the board token, so where it goes is decided the way
+// send-to-paperclip.js decides it: `url` (a project's committed `paperclip.url`) counts only once
+// config.js `parsePaperclipOrigin` reads it as a plain http(s) origin and `isPaperclipUrlTrusted`
+// finds that pair confirmed on this machine; only that ORIGIN is used, never the raw string. The
+// token comes only from PAPERCLIP_TOKEN (fixed name, never configurable) and a value that is not a
+// plain header token is treated as missing. Neither check passing means no request at all.
+// `pathname` is built by the caller from closed-shape ids (encodeURIComponent all the same); it
+// must start with /api/, hold only path/query characters, and survive `new URL` unchanged - so a
+// dot segment, %2e%2e (which the URL parser folds into ..), a scheme-relative //host or a fragment
+// is refused as untrusted-url before anything leaves the process.
+//
+// Response. Untrusted data: no redirect is followed (Node's http never does; a 3xx is http-status,
+// so the token never reaches a Location), only 2xx counts, the body is cut at
+// PAPERCLIP_MAX_BODY_BYTES by destroying the request, one timer covers the whole exchange
+// (PAPERCLIP_TIMEOUT_MS, or less when `deadline`, ms since the epoch, comes first - a slow drip
+// cannot keep a socket-idle timeout alive), and JSON.parse runs in a try. Nothing of a body, a
+// status line, an error message or the token is ever put in a code. `agent: false`: a fresh agent
+// per request, never a shared or environment-configured one (Node can be told to route the global
+// agent through a proxy, which would hand the bearer token to that proxy).
+
+const PAPERCLIP_CODES = ['untrusted-url', 'no-token', 'timeout', 'http-status', 'too-large', 'bad-json', 'network'];
+const PAPERCLIP_PATHNAME = /^\/api(?:\/[A-Za-z0-9._~%-]+)+(?:\?[A-Za-z0-9._~%=&-]*)?$/;
+const HEADER_TOKEN = /^[\x21-\x7e]{1,4096}$/;
+
+const paperclipFailure = (code) => ({ ok: false, code: PAPERCLIP_CODES.includes(code) ? code : 'network', body: null });
+
+/** The URL to request, or null: origin trusted for projectDir and a pathname of the closed shape. */
+function paperclipTarget(projectDir, url, pathname) {
+  if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || typeof pathname !== 'string' || !PAPERCLIP_PATHNAME.test(pathname)) return null;
+  const origin = parsePaperclipOrigin(url);
+  if (!origin || !isPaperclipUrlTrusted(projectDir, url)) return null;
+  const target = new URL(pathname, origin);
+  return target.origin === origin && target.pathname + target.search === pathname ? target : null;
+}
+
+function paperclipGet(options) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    let req = null;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (req) req.destroy();
+      resolve(result);
+    };
+    try {
+      const opts = isObject(options) ? options : {};
+      const target = paperclipTarget(opts.projectDir, opts.url, opts.pathname);
+      if (!target) return finish(paperclipFailure('untrusted-url'));
+      const env = isObject(opts.env) ? opts.env : process.env;
+      const token = hasOwn(env, 'PAPERCLIP_TOKEN') ? env.PAPERCLIP_TOKEN : undefined;
+      if (typeof token !== 'string' || !HEADER_TOKEN.test(token)) return finish(paperclipFailure('no-token'));
+      const limit = Date.now() + CONSTANTS.PAPERCLIP_TIMEOUT_MS;
+      const deadline = typeof opts.deadline === 'number' && Number.isFinite(opts.deadline) ? Math.min(opts.deadline, limit) : limit;
+      timer = setTimeout(() => finish(paperclipFailure('timeout')), Math.max(0, deadline - Date.now()));
+      const client = target.protocol === 'https:' ? https : http;
+      req = client.request(target, {
+        method: 'GET', agent: false, headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+      }, (res) => {
+        if (res.statusCode < 200 || res.statusCode > 299) return finish(paperclipFailure('http-status'));
+        const chunks = [];
+        let size = 0;
+        res.on('data', (chunk) => {
+          size += chunk.length;
+          if (size > CONSTANTS.PAPERCLIP_MAX_BODY_BYTES) return finish(paperclipFailure('too-large'));
+          chunks.push(chunk);
+          return undefined;
+        });
+        res.on('end', () => {
+          let body;
+          try {
+            body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          } catch {
+            return finish(paperclipFailure('bad-json'));
+          }
+          return finish({ ok: true, code: 'ok', body });
+        });
+        res.on('error', () => finish(paperclipFailure('network')));
+        return undefined;
+      });
+      req.on('error', () => finish(paperclipFailure('network')));
+      req.end();
+    } catch {
+      finish(paperclipFailure('network'));
+    }
+    return undefined;
+  });
+}
+
+Object.assign(module.exports, { paperclipGet });
 
 // --- closeRun and the CLI (spec R3, R4, R9; plan T7) -----------------------------------------------
 //
