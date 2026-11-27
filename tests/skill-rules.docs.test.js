@@ -158,6 +158,20 @@ check('section 8c: decisions written out from questions.json, not "every ⚠️ 
 check('HISTORY.md has the dated facts/one-list section',
   /\n## Three facts go to "Found"; each decision is listed in one place \(2026-11-27\)/.test(history));
 
+// T4 (FR-012, FR-013): the SubagentStart hook is what hands every subagent the
+// standing answers. Unregistered, it is dead code; undescribed, the next edit to
+// CLAUDE.md calls the Stop hook "the only hook" again and someone removes it.
+const hooksJson = JSON.parse(fs.readFileSync(path.join(ROOT, 'plugin', 'hooks', 'hooks.json'), 'utf8'));
+const subagentStart = (hooksJson.hooks && hooksJson.hooks.SubagentStart) || [];
+check('hooks.json registers SubagentStart', subagentStart.some((group) =>
+  (group.hooks || []).some((hook) => /hooks\/subagent-start\.js/.test(hook.command || ''))));
+check('hooks.json SubagentStart has no matcher (every agent type)', subagentStart.every((group) => !group.matcher));
+check('CLAUDE.md names the SubagentStart hook', /`plugin\/hooks\/subagent-start\.js`[^\n]*SubagentStart/.test(claudeMd));
+check('CLAUDE.md no longer calls the Stop hook the only hook', !/only hook this plugin ships/.test(claudeMd));
+check('section 5 names both hooks', /`stop\.js` \(Stop\)/.test(s5) && /`subagent-start\.js` \(SubagentStart\)/.test(s5));
+check('HISTORY.md has the dated SubagentStart section',
+  /\n## Standing answers reach every subagent through a SubagentStart hook \(2026-11-27\)/.test(history));
+
 console.log(`\n${passed}/${passed + failures.length} passed`);
 if (failures.length) {
   console.log(`${failures.length} failing:`);

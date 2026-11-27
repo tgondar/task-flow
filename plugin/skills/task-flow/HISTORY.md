@@ -657,6 +657,38 @@ own recent runs.
   dependency not worth carrying once the viewer had its own identity; this was his
   call to make, not a compliance problem being worked around.
 
+## Standing answers reach every subagent through a SubagentStart hook (2026-11-27)
+
+- **Why a hook, not the brief.** A standing answer is a rule of the project the
+  person already gave once. Written rules were ignored by subagents, and the brief
+  that was supposed to carry them drifted: the orchestrator writes a fresh brief
+  per subagent, and a rule it forgets to paste is a question asked again, or a
+  decision taken the other way. Like every rule here that drifted as prose, this
+  one gets an anchor in code: `plugin/hooks/subagent-start.js` hands the page's
+  accepted entries to every subagent itself, whatever the brief says. The plugin
+  ships two hooks again (Stop and SubagentStart), so `CLAUDE.md` no longer calls
+  the Stop hook the only one.
+- **It never reads the page itself.** It passes on only `standing-answers.js`'s
+  `formatBlock` - the one reader decides what of the page is used - and nothing
+  goes to stderr, so no text of a refused line can reach the model another way.
+- **It is silent unless a run is live.** Opt-in, a configuration `config.js`
+  accepts in full, a `running` run (`hasRunningRun`, moved from `stop.js` into
+  `config.js` so the two hooks cannot disagree on what "live" means) and at
+  least one accepted entry. Everything else - including every error - is no
+  output and exit 0: the event cannot block a subagent, and a stack trace would
+  carry paths.
+- **`payload.cwd` counts only inside `CLAUDE_PROJECT_DIR`, without a link.**
+  `stop.js` follows `payload.cwd` anywhere when the session's own project has
+  no running run (for worktrees). For a hook that injects text that rule would let
+  a session in one repository, whose cwd wandered into a clone with its own
+  `running` state.json, receive the clone's page. Worktrees live under the
+  project's `.claude/worktrees/`, so they still work. `stop.js` is unchanged.
+- **No matcher, a 5 s timeout.** Every agent type gets the page, the
+  second-opinion agents included. The timeout behaviour of this event is not
+  documented; `tests/subagent-start.e2e.sh` probes it.
+- **Anchored in code by `tests/skill-rules.docs.test.js`**, which fails when
+  `hooks.json` stops registering the hook, or `CLAUDE.md` stops naming it.
+
 ## Three facts go to "Found"; each decision is listed in one place (2026-11-27)
 
 - **The list to review was full of things that were not decisions.** The idea

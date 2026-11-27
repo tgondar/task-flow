@@ -732,6 +732,39 @@ function stateDirOf(projectDir) {
   return resolveStateDir(read.raw.stateDir, projectDir);
 }
 
+/** True when the project at `dir` opted in and one of its runs has status
+ *  "running" and is not done. Both hooks ask it: the Stop hook to know whether
+ *  to push, the SubagentStart hook whether to inject. Never throws - any failure
+ *  means "no running run", which is what both hooks fail open to. Moved here
+ *  from stop.js unchanged, so the two hooks cannot disagree on what "live" is. */
+function hasRunningRun(dir) {
+  if (!dir) return false;
+  let dirStateDir;
+  try {
+    dirStateDir = stateDirOf(dir);
+  } catch (error) {
+    return false;
+  }
+  if (!dirStateDir) return false;
+  try {
+    for (const task of fs.readdirSync(dirStateDir)) {
+      const statePath = path.join(dirStateDir, task, 'state.json');
+      let state;
+      try {
+        state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+      } catch (error) {
+        continue;
+      }
+      if (state && String(state.status || '').toLowerCase() === 'running' && String(state.phase || '') !== 'done') {
+        return true;
+      }
+    }
+  } catch (error) {
+    return false;
+  }
+  return false;
+}
+
 // --- writing (init) --------------------------------------------------------
 
 /**
@@ -781,6 +814,7 @@ module.exports = {
   cleanText,
   githubProjectErrors,
   GITHUB_NAME,
+  hasRunningRun,
   GRAPHQL_ID,
   listGithubProjects,
   parseGithubRemote,
