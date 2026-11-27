@@ -44,6 +44,7 @@ node tests/metrics.loops.render.security.test.js
 node tests/metrics.render.security.test.js
 node tests/metrics.render.test.js
 node tests/metrics.security.test.js
+node tests/metrics.summary.security.test.js
 node tests/metrics.test.js
 node tests/metrics.tokens.security.test.js
 node tests/metrics.tokens.test.js
