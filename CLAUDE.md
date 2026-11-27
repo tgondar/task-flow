@@ -39,6 +39,7 @@ node tests/metrics.io.security.test.js
 node tests/metrics.loops.test.js
 node tests/metrics.loops.security.test.js
 node tests/metrics.loops.result.security.test.js
+node tests/metrics.loops.render.test.js
 node tests/metrics.render.security.test.js
 node tests/metrics.render.test.js
 node tests/metrics.security.test.js
