@@ -250,6 +250,21 @@ check('D2 SECURITY a rejected line does not replace: R<m> stays', () => {
   assertEqual(r.rejected.map((x) => x.line), [2, 3], 'rejected');
 });
 
+// The "substitui" clause is matched whole and literally, so a lookalike (no-break
+// space, a format character the INVISIBLE list does not name yet, a fullwidth
+// digit) can never drop R<m>: the line is rejected and R<m> stays (D3 widens the
+// character list; this holds whatever that list holds).
+check('D2 SECURITY a lookalike "substitui" clause does not replace: R<m> stays', () => {
+  const tails = [' · substitui\u00A0R1', ' · substitui R\uFFF91', ' · substitui R\uFF11', ' · substitui  R1', ' · Substitui R1'];
+  for (const tail of tails) {
+    const p = project([entry(1), entry(2, 'x', 'w', tail), ''].join('\n'));
+    const r = sa.read({ projectDir: p.projectDir });
+    assertEqual(r.entries.map((e) => e.id), ['R1'], `entries for ${JSON.stringify(tail)}`);
+    assertEqual(r.replaced, [], 'replaced');
+    assertEqual(r.rejected.map((x) => x.line), [2], 'rejected');
+  }
+});
+
 check('D2 SECURITY a repeated id does not replace through its second line', () => {
   const p = project([entry(1), entry(3), entry(3, 'again', 'w', ' · substitui R1'), ''].join('\n'));
   const r = sa.read({ projectDir: p.projectDir });
