@@ -171,7 +171,10 @@ function parsePage(text) {
       // a URL to the patterns, as it is to the model. Only for this check: the
       // entry keeps its own text, and parsing never sees the normalised form (a
       // fullwidth digit in "substitui R1" stays a rejected line, D2).
-      const field = ['rule', 'words'].find((name) => pattern.test(entry[name]) || pattern.test(entry[name].normalize('NFKC')));
+      // Combining marks (\p{M}) are dropped from that form too: they are not Cf
+      // and NFKC keeps them, so "https:́//" split the pattern (Security D3).
+      const field = ['rule', 'words'].find((name) => pattern.test(entry[name])
+        || pattern.test(entry[name].normalize('NFKC').replace(/\p{M}/gu, '')));
       if (field) return result.suspicious.push({ id: entry.id, why: `${field} ${why}` });
     }
     accepted.push(entry);

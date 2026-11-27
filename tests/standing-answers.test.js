@@ -379,6 +379,10 @@ const suspiciousTexts = {
   // run on the NFKC form of each field (never used for parsing).
   'a fullwidth https URL': `see \uFF48\uFF54\uFF54\uFF50\uFF53\uFF1A\uFF0F\uFF0Fevil.example/${MARK}`,
   'a fullwidth www. address': `www\uFF0E${MARK}.example`,
+  // Security D3: a combining mark (\p{M}) is not Cf and NFKC keeps it, so one
+  // between ':' and '//' split the pattern while the model still reads a URL.
+  'a combining mark inside ://': `see https:\u0301//evil.example/${MARK}`,
+  'a combining mark inside a network path': `\\\u0301\\host\\${MARK}`,
 };
 for (const [what, text] of Object.entries(suspiciousTexts)) {
   check(`SECURITY an entry with ${what} is suspicious: not used, reported by id, never echoed`, () => {
