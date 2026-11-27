@@ -1470,16 +1470,19 @@ function appendLoopEvent(options) {
   }
 }
 
-/** One line of loop-events.jsonl as a fresh start event, or null. Length first (a long
- *  line is never parsed), then the closed shape of every field. */
-function parseStartEvent(line) {
+/** One line of loop-events.jsonl as parsed JSON, or null. Length first (a long line is never
+ *  parsed); the parser's message, which quotes the input, is dropped. */
+function parseEventLine(line) {
   if (line.length > CONSTANTS.LOOP_EVENT_MAX_BYTES || Buffer.byteLength(line, 'utf8') > CONSTANTS.LOOP_EVENT_MAX_BYTES) return null;
-  let value;
   try {
-    value = JSON.parse(line);
+    return JSON.parse(line);
   } catch {
-    return null; // the parser's message quotes the input: dropped
+    return null;
   }
+}
+
+/** A parsed event as a fresh start event, or null: the closed shape of every field. */
+function parseStartEvent(value) {
   if (!hasExactKeys(value, LOOP_EVENT_KEYS) || value.v !== 1 || value.kind !== 'start') return null;
   const { agent, type, phase, task, at } = value;
   if (typeof agent !== 'string' || !SHAPE.agentId.test(agent)) return null;
@@ -1491,9 +1494,9 @@ function parseStartEvent(line) {
 }
 
 /**
- * The events of run `slug`, oldest first: `{ starts, results, ignored }`. `results` stays
- * empty until the loop-result event exists (a later task); `ignored` counts the non-blank
- * lines that are not a valid event. Only the bounded tail is read (the writer's cap plus
+ * The events of run `slug`, oldest first: `{ starts, results, ignored }`. `results` are the
+ * loop-result events (plan T5, toResultEvent); `ignored` counts the non-blank lines that are
+ * not a valid event of either kind. Only the bounded tail is read (the writer's cap plus
  * one line, so a file the writer filled is read whole). A missing, refused or unreadable
  * file is simply no events. Never throws, never carries text from the file.
  */
@@ -1508,8 +1511,11 @@ function readLoopEvents(projectDir, stateDir, slug) {
     for (const raw of tail.text.split('\n')) {
       const line = raw.replace(/^﻿/, '');
       if (line.trim() === '') continue;
-      const start = parseStartEvent(line);
+      const value = parseEventLine(line);
+      const start = parseStartEvent(value);
+      const outcome = start ? null : toResultEvent(value);
       if (start) result.starts.push(start);
+      else if (outcome) result.results.push(outcome);
       else result.ignored += 1;
     }
     return result;
@@ -1818,8 +1824,12 @@ function readLoopTranscript(file, deadline) {
 /**
  * `joinLoops({ projectDir, slug, events, deadline })` -> the loop rows of run `slug`, in memory
  * (nothing is written): one per start event of `events` (readLoopEvents' result), the first start
- * of an agent id winning, in event order. `deadline` (ms since the epoch) can only tighten the
- * BUDGET_MS from now. Every row passes validateLoopRow; a start that would not is dropped.
+ * of an agent id winning, in event order. The LAST result event of an agent (plan T5: a later
+ * result is a correction) gives outcome, tests, critical, required and round, and its phase/task,
+ * when set, beat the start's (RF-022: a security pass started while buildCursor had already
+ * moved on is put right by its result); round comes only from a result (RF-023). A result with
+ * no start adds no row (RF-005: one row per start event). `deadline` (ms since the epoch) can
+ * only tighten the BUDGET_MS from now. Every row passes validateLoopRow; a start that would not is dropped.
  * Never throws.
  */
 function joinLoops(options) {
@@ -1840,18 +1850,29 @@ function joinLoops(options) {
       starts.push(s);
     }
     if (starts.length === 0) return [];
+    const results = new Map();
+    const givenResults = isObject(opts.events) && Array.isArray(opts.events.results) ? opts.events.results : [];
+    for (const r of givenResults.slice(-20000)) {
+      const checked = toResultEvent(r);
+      if (checked) results.set(checked.agent, checked);
+    }
 
     const row = (s, read) => {
       const found = read.reason === null;
+      const result = results.get(s.agent) || null;
+      const from = (key) => (result === null ? null : result[key]);
       const fallback = typeof s.type === 'string' && hasOwn(AGENT_EFFORT, s.type) ? AGENT_EFFORT[s.type] : 'unknown';
       return {
-        v: 1, source: 'taskflow', run: slug, id: s.agent, agentType: s.type, phase: s.phase, task: s.task, round: null,
+        v: 1, source: 'taskflow', run: slug, id: s.agent, agentType: s.type,
+        phase: from('phase') || s.phase,
+        task: from('task') || s.task,
+        round: from('round'),
         model: found ? read.model : null,
         effort: found ? read.effort || fallback : null,
         startedAt: s.at,
         durationS: found ? read.durationS : null,
         tokens: found ? read.tokens : null,
-        costCents: null, outcome: null, tests: null, critical: null, required: null,
+        costCents: null, outcome: from('outcome'), tests: from('tests'), critical: from('critical'), required: from('required'),
         reason: read.reason,
         backfill: false,
       };
@@ -1893,18 +1914,155 @@ function joinLoops(options) {
 }
 
 /** closeRun's loop step: the run's start events joined and appended to loops.jsonl. A run with
- *  no start event reads no transcript and creates no file. The result is information only. */
+ *  no start event reads no transcript and creates no file. The result is information only;
+ *  `orphans` counts the result events whose agent has no start (ignored, plan T5). */
 function recordLoops(projectDir, stateDir, slug, deadline) {
   try {
     const events = readLoopEvents(projectDir, stateDir, slug);
-    if (events.starts.length === 0) return { ok: true, code: null, written: 0, invalid: 0 };
-    return appendLoopRows(projectDir, stateDir, joinLoops({ projectDir, slug, events, deadline }));
+    const started = new Set(events.starts.map((s) => s.agent));
+    const orphans = events.results.filter((r) => !started.has(r.agent)).length;
+    if (events.starts.length === 0) return { ok: true, code: null, written: 0, invalid: 0, orphans };
+    return { ...appendLoopRows(projectDir, stateDir, joinLoops({ projectDir, slug, events, deadline })), orphans };
   } catch {
-    return { ok: false, code: 'internal', written: 0, invalid: 0 };
+    return { ok: false, code: 'internal', written: 0, invalid: 0, orphans: 0 };
   }
 }
 
 Object.assign(module.exports, { AGENT_EFFORT, joinLoops });
+
+// --- the loop result: the loop-result CLI and its event (spec 6.2, RF-020..RF-023; plan T5) -------
+//
+// Only the orchestrator knows how a loop ended (a transcript does not say whether a review
+// passed or a task must be redone), so after each loop it records it:
+//
+//   node plugin/scripts/metrics.js loop-result --slug <run> --agent <id> --outcome ok|retry|failed|unknown
+//     [--tests green|red] [--critical <n>] [--required <n>] [--round <1-99>] [--phase <phase>]
+//     [--task <id>] [--project-dir <dir>]
+//
+// It appends one `kind: "result"` event to the run's loop-events.jsonl, through the same writer
+// as the start events (appendLine: contained, no link, no folder created, capped at 1 MiB);
+// closeRun's join (above) puts the last one of each agent on that loop's row. A start event is
+// not required (the CLI would have to read the file first); the close ignores and counts it.
+//
+// Trust. Every argument is untrusted text: the parse is all-or-nothing - each flag known, at most
+// once, with a value in its closed shape - and anything else is exit 1 with ONE fixed message,
+// nothing written. Nothing the caller passed is ever printed back (RF-021), not even on success:
+// the output is `metrics: <closed code> loop-result`. A count is decimal digits with no leading
+// zero (`08`, `1e3`, `-1`, ` 1` are not counts), turned into a number only after the regex.
+//
+// Here, before closeRun, for the same reasons as the sections above: this reads
+// TASK_FLOW_METRICS (counted once from closeRun to the end of the file), and the CLI block only
+// hands it control through `runCommand(argv, projectDir)`, so that block stays as it was.
+
+const RESULT_KEYS = ['v', 'kind', 'agent', 'outcome', 'tests', 'critical', 'required', 'round', 'phase', 'task'];
+const COUNT_ARG = /^(?:0|[1-9][0-9]{0,11})$/;
+const ROUND_ARG = /^[1-9][0-9]?$/;
+const CLI_USAGE = [
+  'usage: metrics.js close --slug <slug> [--project-dir <dir>] [--quiet]',
+  '       metrics.js loop-result --slug <run> --agent <id> --outcome ok|retry|failed|unknown',
+  '         [--tests green|red] [--critical <n>] [--required <n>] [--round <1-99>]',
+  `         [--phase ${PHASES.join('|')}] [--task <id>] [--project-dir <dir>]`,
+  '',
+].join('\n');
+
+/** A result event (parsed JSON, or the CLI's) as a fresh object, or null: exactly RESULT_KEYS,
+ *  each value in its closed shape, every optional one null when absent. */
+function toResultEvent(value) {
+  if (!hasExactKeys(value, RESULT_KEYS) || value.v !== 1 || value.kind !== 'result') return null;
+  const { agent, outcome, tests, critical, required, round, phase, task } = value;
+  const ok =
+    isShape(SHAPE.agentId)(agent) &&
+    LOOP_OUTCOMES.includes(outcome) &&
+    (tests === null || LOOP_TESTS.includes(tests)) &&
+    orNull(isCount)(critical) &&
+    orNull(isCount)(required) &&
+    orNull(isRound)(round) &&
+    (phase === null || PHASES.includes(phase)) &&
+    orNull(isShape(SHAPE.taskId))(task);
+  return ok ? { v: 1, kind: 'result', agent, outcome, tests, critical, required, round, phase, task } : null;
+}
+
+/** The flags of loop-result and the closed shape of each value. A Map: a flag from argv is never
+ *  used as an object key (`__proto__`, `constructor` are simply unknown flags). */
+const RESULT_FLAGS = new Map([
+  ['--slug', isSlug],
+  ['--agent', isShape(SHAPE.agentId)],
+  ['--outcome', (v) => LOOP_OUTCOMES.includes(v)],
+  ['--tests', (v) => LOOP_TESTS.includes(v)],
+  ['--critical', (v) => COUNT_ARG.test(v)],
+  ['--required', (v) => COUNT_ARG.test(v)],
+  ['--round', (v) => ROUND_ARG.test(v)],
+  ['--phase', (v) => PHASES.includes(v)],
+  ['--task', isShape(SHAPE.taskId)],
+  ['--project-dir', () => true], // resolved and checked by the CLI block, as for close
+]);
+
+/** loop-result's arguments (after the command) as `{ slug, event }`, or null. All or nothing. */
+function parseResultArgs(args) {
+  const given = new Map();
+  for (let i = 0; i < args.length; i += 2) {
+    const flag = args[i];
+    const value = args[i + 1];
+    const check = typeof flag === 'string' ? RESULT_FLAGS.get(flag) : undefined;
+    if (!check || given.has(flag) || typeof value !== 'string' || !check(value)) return null;
+    given.set(flag, value);
+  }
+  if (!given.has('--slug') || !given.has('--agent') || !given.has('--outcome')) return null;
+  const text = (flag) => (given.has(flag) ? given.get(flag) : null);
+  const number = (flag) => (given.has(flag) ? Number(given.get(flag)) : null);
+  const event = toResultEvent({
+    v: 1, kind: 'result', agent: text('--agent'), outcome: text('--outcome'), tests: text('--tests'),
+    critical: number('--critical'), required: number('--required'), round: number('--round'),
+    phase: text('--phase'), task: text('--task'),
+  });
+  return event ? { slug: given.get('--slug'), event } : null;
+}
+
+/** loop-result's write: a closed code (`written`, `invalid`, `bad-config`, `too-long`,
+ *  appendLine's `unsafe-path` / `full` / `write-failed`, `internal`). Never throws. */
+function appendLoopResult(projectDir, args) {
+  try {
+    const parsed = parseResultArgs(args);
+    if (!parsed || typeof projectDir !== 'string' || !path.isAbsolute(projectDir)) return 'invalid';
+    const loaded = loadConfig(projectDir);
+    if (!loaded.ok || !loaded.config || typeof loaded.config.stateDir !== 'string') return 'bad-config';
+    const stateDir = loaded.config.stateDir;
+    const body = JSON.stringify(parsed.event);
+    if (Buffer.byteLength(body, 'utf8') + 1 > CONSTANTS.LOOP_EVENT_MAX_BYTES) return 'too-long';
+    const file = path.join(stateDir, parsed.slug, LOOP_EVENTS_FILE);
+    const written = appendLine(projectDir, stateDir, file, body, CONSTANTS.LOOP_EVENTS_MAX_FILE_BYTES);
+    return written.ok ? 'written' : written.code;
+  } catch {
+    return 'internal';
+  }
+}
+
+/**
+ * Every CLI command but `close` (which the CLI block runs itself). Writes its own output and
+ * sets process.exitCode, which it also returns. An unknown command is the usage text and 2, as
+ * before this existed. loop-result: 0 when written, or with TASK_FLOW_METRICS=off (checked
+ * first: nothing parsed, nothing done); else 1; one fixed line either way. `projectDir` is the
+ * CLI block's resolution (--project-dir, CLAUDE_PROJECT_DIR, the cwd), or null.
+ */
+function runCommand(argv, projectDir) {
+  const exit = (code, stream, text) => {
+    stream.write(text);
+    process.exitCode = code;
+    return code;
+  };
+  try {
+    const args = Array.isArray(argv) ? argv : [];
+    if (args[0] !== 'loop-result') return exit(2, process.stderr, CLI_USAGE);
+    if (String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return exit(0, process.stdout, 'metrics: disabled loop-result\n');
+    const code = appendLoopResult(projectDir, args.slice(1));
+    return code === 'written' ? exit(0, process.stdout, 'metrics: written loop-result\n') : exit(1, process.stderr, `metrics: ${code} loop-result\n`);
+  } catch {
+    return exit(1, process.stderr, 'metrics: internal loop-result\n');
+  }
+}
+
+Object.assign(module.exports, { runCommand });
+
 
 // --- closeRun and the CLI (spec R3, R4, R9; plan T7) -----------------------------------------------
 //
@@ -2027,15 +2185,15 @@ function closeRun(options) {
 }
 
 if (require.main === module) {
-  const USAGE = 'usage: metrics.js close --slug <slug> [--project-dir <dir>] [--quiet]\n';
   const argv = process.argv.slice(2);
   const value = (flag) => {
     const index = argv.indexOf(flag);
     return index >= 0 ? argv[index + 1] : undefined;
   };
-  // Usage errors are the only non-zero exit, and print only the fixed usage text: the
-  // offending argument is never echoed. Everything else exits 0 (spec R9): a run must
-  // not change its exit code because its measurement failed.
+  // For close, usage errors are the only non-zero exit, and print only the fixed usage text:
+  // the offending argument is never echoed. Everything else exits 0 (spec R9): a run must
+  // not change its exit code because its measurement failed. Every other command goes to
+  // runCommand (above closeRun), which owns its output and exit code.
   const slug = value('--slug');
   let projectDir = null;
   try {
@@ -2047,8 +2205,10 @@ if (require.main === module) {
   } catch {
     // stays null: reported as a usage error below
   }
-  if (argv[0] !== 'close' || !isSlug(slug) || projectDir === null) {
-    process.stderr.write(USAGE);
+  if (argv[0] !== 'close') {
+    runCommand(argv, projectDir); // every other command (plan T5): its own output and exit code
+  } else if (!isSlug(slug) || projectDir === null) {
+    process.stderr.write(CLI_USAGE);
     process.exitCode = 2;
   } else {
     const result = closeRun({ projectDir, slug });

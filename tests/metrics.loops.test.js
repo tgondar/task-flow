@@ -457,6 +457,111 @@ const byId = (rows, id) => rows.find((row) => row.id === id);
   check('T4: TASK_FLOW_METRICS=off: no loop rows', closeRun({ projectDir: PROJECT, slug: SLUG, env: { TASK_FLOW_METRICS: 'off' } }).code === 'disabled' && !fs.existsSync(LOOPS));
 }
 
+// --- T5: the loop-result CLI and the result in the final row (RF-020..RF-023) ----------------------
+{
+  const cp = require('child_process');
+  const METRICS = path.resolve(__dirname, '../plugin/scripts/metrics.js');
+  const env = { ...process.env, HOME: TEST_HOME, USERPROFILE: TEST_HOME, LOCALAPPDATA: TEST_HOME, XDG_STATE_HOME: TEST_HOME, CLAUDE_PROJECT_DIR: PROJECT };
+  delete env.TASK_FLOW_METRICS;
+  const cli = (args, extra = {}) => cp.spawnSync(process.execPath, [METRICS, ...args], { encoding: 'utf8', shell: false, timeout: 60000, env: { ...env, ...extra } });
+  const RESULT_KEYS = ['v', 'kind', 'agent', 'outcome', 'tests', 'critical', 'required', 'round', 'phase', 'task'];
+  const text = () => (fs.existsSync(EVENTS) ? fs.readFileSync(EVENTS, 'utf8') : '');
+  const ok = (r) => r.status === 0 && r.stdout === 'metrics: written loop-result\n' && r.stderr === '';
+  const invalid = (r) => r.status === 1 && r.stdout === '' && r.stderr === 'metrics: invalid loop-result\n';
+
+  // a valid result: one fixed line, one event with the closed keys, read back by the one reader
+  setup();
+  append();
+  const full = cli(['loop-result', '--slug', SLUG, '--agent', 'a1b2c3d4', '--outcome', 'retry', '--tests', 'red', '--critical', '2', '--required', '0', '--round', '3', '--phase', 'harden', '--task', 'T5']);
+  check('T5: a valid loop-result: exit 0, one fixed stdout line, no argument echoed', ok(full), JSON.stringify(full));
+  const written = lines().map((l) => JSON.parse(l));
+  const result = written[1] || {};
+  check('T5: the result is appended after the start, in the same loop-events.jsonl', written.length === 2 && written[0].kind === 'start' && result.kind === 'result', JSON.stringify(written));
+  check('T5: the result event has exactly the closed keys', Object.keys(result).sort().join() === [...RESULT_KEYS].sort().join(), Object.keys(result).join());
+  check('T5: the result event carries the validated values, numbers as numbers', result.v === 1 && result.agent === 'a1b2c3d4' && result.outcome === 'retry' && result.tests === 'red' && result.critical === 2 && result.required === 0 && result.round === 3 && result.phase === 'harden' && result.task === 'T5', JSON.stringify(result));
+  const read = readLoopEvents(PROJECT, STATE, SLUG);
+  check('T5: readLoopEvents hands the result back in results, the start in starts, nothing ignored', read.starts.length === 1 && read.results.length === 1 && read.ignored === 0 && JSON.stringify(read.results[0]) === JSON.stringify(result), JSON.stringify(read));
+
+  const bare = cli(['loop-result', '--agent', 'zz9', '--outcome', 'ok', '--slug', SLUG]);
+  const minimal = JSON.parse(lines()[2] || '{}');
+  check('T5: only the required flags, in any order: the optional fields are null', ok(bare) && minimal.outcome === 'ok' && ['tests', 'critical', 'required', 'round', 'phase', 'task'].every((k) => minimal[k] === null), JSON.stringify(minimal));
+  check('T5: no start event is required for a result', readLoopEvents(PROJECT, STATE, SLUG).results.length === 2);
+  const viaFlag = cli(['loop-result', '--slug', SLUG, '--agent', 'pd1', '--outcome', 'unknown', '--project-dir', PROJECT], { CLAUDE_PROJECT_DIR: '' });
+  check('T5: --project-dir is accepted like close does', ok(viaFlag) && lines().length === 4, JSON.stringify(viaFlag));
+
+  // closed shapes, all-or-nothing: exit 1, the fixed message, nothing written
+  const before = text();
+  const base = ['loop-result', '--slug', SLUG, '--agent', 'a1b2c3d4', '--outcome', 'ok'];
+  for (const [name, args] of [
+    ['missing --outcome', ['loop-result', '--slug', SLUG, '--agent', 'a1b2c3d4']],
+    ['missing --agent', ['loop-result', '--slug', SLUG, '--outcome', 'ok']],
+    ['missing --slug', ['loop-result', '--agent', 'a1b2c3d4', '--outcome', 'ok']],
+    ['an outcome outside the set', ['loop-result', '--slug', SLUG, '--agent', 'a1b2c3d4', '--outcome', 'done']],
+    ['tests outside the set', [...base, '--tests', 'yellow']],
+    ['a negative count', [...base, '--critical', '-1']],
+    ['a count with a leading zero', [...base, '--required', '07']],
+    ['round 0', [...base, '--round', '0']],
+    ['round 100', [...base, '--round', '100']],
+    ['a phase outside PHASES', [...base, '--phase', 'done']],
+    ['a task outside the shape', [...base, '--task', 'task 5']],
+    ['an unknown flag', [...base, '--note', 'x']],
+    ['a repeated flag', [...base, '--outcome', 'retry']],
+    ['a flag without a value', [...base, '--round']],
+    ['a stray positional argument', [...base, 'extra']],
+  ]) {
+    check(`T5: ${name}: exit 1, fixed message, nothing written`, invalid(cli(args)) && text() === before);
+  }
+  check('T5: a run folder that does not exist: exit 1, a fixed code, nothing created', (() => {
+    const r = cli(['loop-result', '--slug', 'no-such-run', '--agent', 'a1b2c3d4', '--outcome', 'ok']);
+    return r.status === 1 && r.stdout === '' && r.stderr === 'metrics: write-failed loop-result\n' && !fs.existsSync(path.join(STATE, 'no-such-run'));
+  })());
+  const off = cli([...base, '--outcome', 'nonsense'], { TASK_FLOW_METRICS: 'off' });
+  check('T5: TASK_FLOW_METRICS=off: exit 0, nothing done, even with bad arguments', off.status === 0 && off.stderr === '' && text() === before, JSON.stringify(off));
+
+  // the usage error is unchanged for every other command
+  for (const args of [['frobnicate'], [], ['LOOP-RESULT', '--slug', SLUG]]) {
+    const r = cli(args);
+    check(`T5: ${JSON.stringify(args[0] || '')} is still a usage error: exit 2, usage: metrics.js close...`, r.status === 2 && /^usage: metrics\.js close/.test(r.stderr) && r.stderr.includes('loop-result') && r.stdout === '', JSON.stringify(r.stderr));
+  }
+
+  // joinLoops: the LAST result per agent wins; its phase/task beat the start's; round only from it
+  setup();
+  fs.rmSync(path.join(TEST_HOME, '.claude'), { recursive: true, force: true });
+  const res = (agent, extra = {}) => ({ v: 1, kind: 'result', agent, outcome: 'ok', tests: null, critical: null, required: null, round: null, phase: null, task: null, ...extra });
+  const rows = joinLoops({
+    projectDir: PROJECT, slug: SLUG, deadline: Date.now() + 5000,
+    events: {
+      starts: [start('aaa1', 'task-flow:security-auditor', { phase: 'build', task: 'T6' }), start('bbb2', 'general-purpose'), start('ccc3', 'general-purpose')],
+      results: [res('aaa1', { outcome: 'failed' }), res('aaa1', { outcome: 'retry', tests: 'green', critical: 1, required: 4, round: 2, phase: 'harden', task: 'T5' }), res('bbb2'), res('orphan9', { outcome: 'failed' }), { ...res('ccc3'), outcome: 'DONE' }],
+      ignored: 0,
+    },
+  });
+  const a = byId(rows, 'aaa1');
+  const b = byId(rows, 'bbb2');
+  const c = byId(rows, 'ccc3');
+  check('T5: one row per start, a result without a start adds none', rows.length === 3 && !byId(rows, 'orphan9'), JSON.stringify(rows.map((r) => r.id)));
+  check('T5: the last result of an agent gives outcome, tests, critical, required, round', a && a.outcome === 'retry' && a.tests === 'green' && a.critical === 1 && a.required === 4 && a.round === 2, JSON.stringify(a));
+  check('T5: the result\'s phase and task beat the start\'s', a && a.phase === 'harden' && a.task === 'T5', a && `${a.phase} ${a.task}`);
+  check('T5: a result without --round, --phase, --task: round null, phase/task from the start', b && b.outcome === 'ok' && b.round === null && b.phase === 'build' && b.task === 'T4', JSON.stringify(b));
+  check('T5: a result outside the closed shape is not taken (the row stays without result)', c && c.outcome === null, JSON.stringify(c));
+  check('T5: the joined rows still pass validateLoopRow', rows.every((row) => validateLoopRow(row).ok));
+
+  // end to end: start event (hook) -> loop-result (CLI) -> close -> the loop row carries the result
+  const LOOPS = path.join(STATE, 'loops.jsonl');
+  setup();
+  append();
+  put(path.join(PROJECT, 'docs', 'plans', 'p.plan.md'), '# Plan\n\n## T1 · first\n- [x] **Done** — built\n');
+  check('T5: e2e loop-result written', ok(cli(['loop-result', '--slug', SLUG, '--agent', 'a1b2c3d4', '--outcome', 'ok', '--tests', 'green', '--phase', 'harden', '--task', 'T3'])));
+  put(path.join(STATE, SLUG, 'state.json'), {
+    task: SLUG, mode: 'auto', phase: 'done', status: 'done', approvedBy: 'x', created: '2026-01-01',
+    updated: '2026-01-01T13:00:00Z', phaseChangedAt: '2026-01-01T13:00:00Z', startedAt: '2026-01-01T09:00:00Z',
+    size: { points: 3 }, artifacts: { plan: 'plans/p.plan.md' },
+  });
+  const closed = closeRun({ projectDir: PROJECT, slug: SLUG, env: {} });
+  const final = fs.existsSync(LOOPS) ? fs.readFileSync(LOOPS, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+  check('T5: e2e: the final loop row has the result, the result\'s phase and no round', closed.code === 'closed' && final.length === 1 && final[0].outcome === 'ok' && final[0].tests === 'green' && final[0].phase === 'harden' && final[0].task === 'T3' && final[0].round === null, JSON.stringify(final));
+}
+
 try { fs.rmSync(TEST_HOME, { recursive: true, force: true }); } catch { /* best effort */ }
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) { console.log(failures.map((f) => `  - ${f}`).join('\n')); process.exit(1); }
