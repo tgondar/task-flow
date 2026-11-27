@@ -55,6 +55,7 @@ End-to-end probes start real `claude -p` sessions (slow, need the CLI on PATH, n
 ```sh
 bash tests/stop.e2e.sh
 bash tests/subagent-start.e2e.sh
+bash tests/loops.e2e.sh
 ```
 
 E2E rules from `tests/stop.e2e.sh`: always use `--permission-mode acceptEdits` (otherwise a refusal may come from the permission prompt, not the hook); keep scratch projects outside `~/.claude` (Claude Code refuses writes there before hooks run); assert on facts (file exists) never on reply wording.
