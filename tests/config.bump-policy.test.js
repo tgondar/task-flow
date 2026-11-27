@@ -282,5 +282,18 @@ check('B19 `bump-policy` refuses to write through a linked .claude, untouched', 
   assert(readConfig(project).bumpPolicy.fix === 'patch', 'the outside file changed');
 });
 
+// Security T8: the other Object-prototype name, a flag smuggled in as a level,
+// and a __proto__ key already in the file reaching the merge in setBumpPolicy.
+check('S1 `bump-policy` refuses `constructor` as a class, untouched', () =>
+  refuses(makeProject(POLICY), ['--class', 'constructor', '--level', 'minor'], /--class must be one of/));
+check('S2 `bump-policy` refuses a flag given as the level, untouched', () =>
+  refuses(makeProject(POLICY), ['--class', 'fix', '--level', '--project-dir'], /--level must be one of/));
+check('S3 `bump-policy` refuses a policy with a __proto__ key already in the file, untouched, no pollution', () => {
+  const project = makeProject({}, `{"docsDir":"docs","language":"EN","tasksFile":"tasks/index.md",` +
+    `"bumpPolicy":{"feature":"minor","fix":"patch","__proto__":{"${MARKER}":"major"}}}`);
+  refuses(project, ['--class', 'fix', '--level', 'minor'], /not a class/);
+  assert(({})[MARKER] === undefined, 'Object.prototype was polluted');
+});
+
 console.log(`\n${passed}/${passed + failures.length} passed`);
 if (failures.length) process.exit(1);
