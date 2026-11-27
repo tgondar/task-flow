@@ -36,6 +36,7 @@ node tests/metrics.hardening.test.js
 node tests/metrics.hooks.test.js
 node tests/metrics.io.security.test.js
 node tests/metrics.loops.test.js
+node tests/metrics.loops.security.test.js
 node tests/metrics.render.security.test.js
 node tests/metrics.render.test.js
 node tests/metrics.security.test.js
