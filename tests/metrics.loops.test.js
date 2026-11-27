@@ -592,6 +592,166 @@ const byId = (rows, id) => rows.find((row) => row.id === id);
   check('T6: no state: nothing owed', owed(null, [start('aaa1', 'build', 'T3')]).length === 0);
 }
 
+// --- T9: the summary CLI for the PR body (RF-033; decisions Q1, Q3, Q6) ------------------------------
+// Computed on demand, nothing written: the run's start events joined in memory (the PR opens before
+// the close), the rows loops.jsonl already holds for the run, and the orchestrator's own tokens from
+// the main transcript in the run window. Fresh tokens only (input + cache creation + output).
+{
+  const cp = require('child_process');
+  const METRICS = path.resolve(__dirname, '../plugin/scripts/metrics.js');
+  const env = { ...process.env, HOME: TEST_HOME, USERPROFILE: TEST_HOME, LOCALAPPDATA: TEST_HOME, XDG_STATE_HOME: TEST_HOME, CLAUDE_PROJECT_DIR: PROJECT };
+  delete env.TASK_FLOW_METRICS;
+  const cli = (args, extra = {}) => cp.spawnSync(process.execPath, [METRICS, ...args], { encoding: 'utf8', shell: false, timeout: 60000, env: { ...env, ...extra } });
+  const summary = (extra) => cli(['summary', '--slug', SLUG], extra);
+  const BASE = path.join(TEST_HOME, '.claude', 'projects', PROJECT.replace(/[^A-Za-z0-9]/g, '-'));
+  const MAIN = path.join(BASE, 'aaaaaaaa-0000-4000-8000-000000000009.jsonl');
+  const MIN = 60 * 1000;
+  const S = Date.now() - 2 * 60 * MIN; // the run started two hours ago
+  const at = (minutes, seconds = 0) => new Date(S + minutes * MIN + seconds * 1000).toISOString();
+  const startLine = (agent, type, phase, task, minutes) => ({ v: 1, kind: 'start', agent, type, phase, task, at: at(minutes) });
+  const resultLine = (agent, round) => ({ v: 1, kind: 'result', agent, outcome: 'ok', tests: null, critical: 0, required: 0, round, phase: null, task: null });
+  // a loop's transcript: its user turn at `minutes`, its last request `seconds` later
+  const loop = (id, minutes, seconds, ...requests) => writeTranscript(id, [user(at(minutes)),
+    ...requests.map(([req, u], i) => asst(at(minutes, i === requests.length - 1 ? seconds : 1), req, u))]);
+  const orch = (minutes, requestId, u) => ({ type: 'assistant', isSidechain: false, cwd: PROJECT, timestamp: at(minutes), requestId, message: { model: 'claude-opus-5-5', usage: u, content: [{ type: 'text', text: 'ok' }] } });
+  const snapshot = (dir) => {
+    const out = [];
+    const walk = (d) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const f = path.join(d, e.name);
+        if (e.isDirectory()) walk(f);
+        else { const s = fs.statSync(f); out.push(`${f}|${s.size}|${s.mtimeMs}|${fs.readFileSync(f, 'utf8')}`); }
+      }
+    };
+    walk(dir);
+    return out.sort().join('\n');
+  };
+
+  /** An open run with five loops: three in build (one with no transcript), two in review (rounds
+   *  `rounds`), and the orchestrator's main transcript. */
+  function fixture({ state = {}, config, rounds = [1, 2] } = {}) {
+    setup({ [SLUG]: { phase: 'build', startedAt: at(0), ...state } }, config);
+    fs.rmSync(path.join(TEST_HOME, '.claude'), { recursive: true, force: true });
+    put(EVENTS, `${[
+      startLine('b1', 'general-purpose', 'build', 'T1', 10),
+      startLine('b2', 'task-flow:security-auditor', 'build', 'T1', 20),
+      startLine('x1', 'general-purpose', 'build', 'T2', 30), // its transcript never appears
+      startLine('r1', 'task-flow:code-reviewer', 'review', '', 40),
+      startLine('r2', 'task-flow:code-reviewer', 'review', '', 50),
+      resultLine('r1', rounds[0]),
+      resultLine('r2', rounds[1]),
+    ].map((l) => JSON.stringify(l)).join('\n')}\n`);
+    loop('b1', 10, 60, ['q1', usage(100, 50, 20, 1000)]); // fresh 170, 60 s
+    loop('b2', 20, 120, ['q2', usage(10, 5)], ['q3', usage(30, 10, 5, 500)]); // fresh 60, 120 s
+    loop('r1', 40, 30, ['q4', usage(200, 100)]); // fresh 300, 30 s
+    loop('r2', 50, 45, ['q5', usage(1, 1, 1)]); // fresh 3, 45 s
+    put(MAIN, `${[
+      { type: 'user', isSidechain: false, cwd: PROJECT, timestamp: at(5), message: { role: 'user', content: 'go' } },
+      orch(6, 'o1', usage(10, 5, 2, 100)), // fresh 17
+      orch(7, 'o2', usage(20, 10)), // fresh 30
+      orch(-30, 'o0', usage(9999, 9999)), // before the run: not this run's
+    ].map((r) => JSON.stringify(r)).join('\n')}\n`);
+  }
+
+  const PT = [
+    '### Custo da run',
+    '',
+    'Tokens frescos = input + cache creation + output, sem cache reads.',
+    '',
+    '| Fase | Loops | Tokens frescos | Duração |',
+    '| --- | ---: | ---: | ---: |',
+    '| build | 3 | 230 | 3 min 00 s |',
+    '| review | 2 | 303 | 1 min 15 s |',
+    '| orquestrador | — | 47 | — |',
+    '| **Total** | 5 | 580 | 4 min 15 s |',
+    '',
+    'As durações sobrepõem-se: os loops correm em paralelo, por isso uma soma não é tempo de relógio.',
+    '',
+    'Loops sem tokens medidos: 1 (fora das somas).',
+    '',
+    'Rondas de review: 2.',
+    '',
+  ].join('\n');
+
+  fixture();
+  const before = snapshot(STATE);
+  const r = summary();
+  check('T9: open run: exit 0, nothing on stderr', r.status === 0 && r.stderr === '', JSON.stringify(r));
+  check('T9: open run: the block per phase, the orchestrator line and the total, in pt-PT', r.stdout === PT, `\n${r.stdout}`);
+  check('T9: nothing in the state folder is created or changed', snapshot(STATE) === before);
+  check('T9: no loops.jsonl is created by a summary', !fs.existsSync(path.join(STATE, 'loops.jsonl')));
+  check('T9: nothing of a transcript reaches the block', !/TRANSCRIPT TEXT|9999|claude-opus|general-purpose/.test(r.stdout));
+
+  fixture({ rounds: [null, null] });
+  const noRounds = summary();
+  check('T9: review loops without a round: their count, said as such',
+    noRounds.status === 0 && noRounds.stdout.endsWith('Rondas de review: 2 loops de review, sem ronda registada.\n'), noRounds.stdout);
+
+  fixture({ rounds: [1, null] });
+  check('T9: the highest round of the review loops', summary().stdout.endsWith('Rondas de review: 1.\n'));
+
+  fixture({ config: { docsDir: 'docs', language: 'en', tasksFile: 'tasks.md' } });
+  const en = summary();
+  check('T9: an English project gets the English block',
+    en.status === 0 && en.stdout.startsWith('### Run cost\n\nFresh tokens = input + cache creation + output, without cache reads.\n\n| Phase | Loops | Fresh tokens | Duration |')
+      && en.stdout.includes('| orchestrator | — | 47 | — |') && en.stdout.includes('Loops without measured tokens: 1 (not in the sums).')
+      && en.stdout.endsWith('Review rounds: 2.\n'), `\n${en.stdout}`);
+  fixture({ config: { docsDir: 'docs', language: 'fr', tasksFile: 'tasks.md' } });
+  check('T9: another language falls back to English', summary().stdout.startsWith('### Run cost\n'));
+
+  fixture();
+  fs.rmSync(MAIN);
+  const noMain = summary();
+  check('T9: no main transcript: the orchestrator line says so, the total is the loops\'',
+    noMain.status === 0 && noMain.stdout.includes('| orquestrador | — | — (sem transcript) | — |') && noMain.stdout.includes('| **Total** | 5 | 533 | 4 min 15 s |'), `\n${noMain.stdout}`);
+
+  // a closed run: the row loops.jsonl recorded at the close wins over a fresh join of the same loop,
+  // and a row of an older run that reused the folder name (started before startedAt) stays out
+  const recorded = (id, startedMin, tokens) => ({
+    v: 1, source: 'taskflow', run: SLUG, id, agentType: 'general-purpose', phase: 'build', task: 'T1', round: null, model: null, effort: 'unknown',
+    startedAt: at(startedMin), durationS: 60, tokens: { input: tokens, cacheCreate: 0, cacheRead: 0, output: 0 }, costCents: null, outcome: 'ok', tests: null,
+    critical: null, required: null, reason: null, backfill: false,
+  });
+  fixture({ state: { phase: 'done', status: 'done', phaseChangedAt: at(100) } });
+  put(path.join(STATE, 'loops.jsonl'), `${[recorded('b1', 10, 1000), recorded('old1', -60, 5000)].map((l) => JSON.stringify(l)).join('\n')}\n`);
+  const closed = summary();
+  check('T9: closed run: the recorded row wins over the join, the older run\'s row stays out',
+    closed.status === 0 && closed.stdout.includes('| build | 3 | 1060 | 3 min 00 s |') && closed.stdout.includes('| **Total** | 5 | 1410 | 4 min 15 s |'), `\n${closed.stdout}`);
+
+  // no start events at all (a paperclip run), only rows in loops.jsonl
+  fixture();
+  fs.rmSync(EVENTS);
+  put(path.join(STATE, 'loops.jsonl'), `${JSON.stringify(recorded('b1', 10, 1000))}\n`);
+  const historyOnly = summary();
+  check('T9: rows only in loops.jsonl still make a block', historyOnly.status === 0 && historyOnly.stdout.includes('| build | 1 | 1000 | 1 min 00 s |'), `\n${historyOnly.stdout}`);
+
+  fixture();
+  fs.rmSync(EVENTS);
+  const none = summary();
+  check('T9: no events and no rows: one fixed line, exit 0', none.status === 0 && none.stdout === 'metrics: no-loops summary\n' && none.stderr === '', JSON.stringify(none));
+  check('T9: ...and still nothing written', !fs.existsSync(path.join(STATE, 'loops.jsonl')) && !fs.existsSync(EVENTS));
+
+  fixture();
+  const off = summary({ TASK_FLOW_METRICS: 'off' });
+  check('T9: TASK_FLOW_METRICS=off: the fixed disabled line, exit 0', off.status === 0 && off.stdout === 'metrics: disabled summary\n', JSON.stringify(off));
+
+  fixture({ state: { startedAt: undefined } });
+  const noStart = summary();
+  check('T9: a run without startedAt has no window: a fixed line, exit 0', noStart.status === 0 && noStart.stdout === 'metrics: no-window summary\n', JSON.stringify(noStart));
+  const viaFlag = cli(['summary', '--slug', SLUG, '--project-dir', PROJECT], { CLAUDE_PROJECT_DIR: '' });
+  check('T9: --project-dir is accepted', viaFlag.status === 0 && viaFlag.stdout === 'metrics: no-window summary\n', JSON.stringify(viaFlag));
+
+  for (const [name, args] of [
+    ['missing --slug', ['summary']],
+    ['an unknown flag', ['summary', '--slug', SLUG, '--agent', 'b1']],
+    ['a slug out of shape', ['summary', '--slug', '../x']],
+    ['a repeated flag', ['summary', '--slug', SLUG, '--slug', SLUG]],
+  ]) {
+    const bad = cli(args);
+    check(`T9: ${name}: exit 2 with the usage, nothing on stdout`, bad.status === 2 && /^usage: metrics\.js close/.test(bad.stderr) && bad.stderr.includes('metrics.js summary --slug') && bad.stdout === '', JSON.stringify(bad));
+  }
+}
+
 try { fs.rmSync(TEST_HOME, { recursive: true, force: true }); } catch { /* best effort */ }
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) { console.log(failures.map((f) => `  - ${f}`).join('\n')); process.exit(1); }

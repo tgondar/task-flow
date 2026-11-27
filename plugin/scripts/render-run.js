@@ -266,6 +266,17 @@ const stringsFor = (lang) => STRINGS[lang] || STRINGS.en;
 
 // --- small helpers ---------------------------------------------------------
 
+/** A duration in seconds as the "Loops" section prints it: `N s`, `N min SS s`, `N h MM min`;
+ *  anything that is not a count is a dash. Shared with metrics.js's PR summary, so the page
+ *  and the PR body never print the same loop time two ways. */
+function formatDuration(s) {
+  if (!Number.isSafeInteger(s) || s < 0) return '—';
+  const pad = (n) => String(n).padStart(2, '0');
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ${pad(s % 60)} s`;
+  return `${Math.floor(s / 3600)} h ${pad(Math.floor(s / 60) % 60)} min`;
+}
+
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
 
 const exists = (file) => {
@@ -725,13 +736,7 @@ function loopsSection(loops, t) {
     const DASH = '—';
     const word = (value) => (value === 'unknown' ? l.unknown : value);
     const number = (value) => (Number.isSafeInteger(value) && value >= 0 ? String(value) : DASH);
-    const pad = (n) => String(n).padStart(2, '0');
-    const duration = (s) => {
-      if (!Number.isSafeInteger(s) || s < 0) return DASH;
-      if (s < 60) return `${s} s`;
-      if (s < 3600) return `${Math.floor(s / 60)} min ${pad(s % 60)} s`;
-      return `${Math.floor(s / 3600)} h ${pad(Math.floor(s / 60) % 60)} min`;
-    };
+    const duration = formatDuration;
     const fresh = (tokens) => tokens.input + tokens.cacheCreate + tokens.output;
     const tokensCell = (row) => (row.tokens !== null ? number(fresh(row.tokens))
       : row.reason !== null ? `${DASH} (${l.reasons[row.reason]})` : DASH);
@@ -1459,6 +1464,7 @@ module.exports = {
   readJson,
   readSkippedTasks,
   readPendingTasks,
+  formatDuration,
 };
 
 // --- CLI -------------------------------------------------------------------

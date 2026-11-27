@@ -35,7 +35,7 @@
 const fs = require('fs');
 const path = require('path');
 const { crossesLink, isInside, loadConfig, runningRuns } = require('./config.js');
-const { PHASES, SAFE_SEGMENT, readPlanTasks, readSkippedTasks, readPendingTasks } = require('./render-run.js');
+const { PHASES, SAFE_SEGMENT, STRINGS, formatDuration, readPlanTasks, readSkippedTasks, readPendingTasks } = require('./render-run.js');
 
 // --- constants ---------------------------------------------------------------
 // Named, at the top, not configurable: the spec (R7, section 9) fixes these
@@ -1996,6 +1996,7 @@ const CLI_USAGE = [
   '         [--tests green|red] [--critical <n>] [--required <n>] [--round <1-99>]',
   `         [--phase ${PHASES.join('|')}] [--task <id>] [--project-dir <dir>]`,
   '       metrics.js time --slug <run> [--project-dir <dir>]',
+  '       metrics.js summary --slug <run> [--project-dir <dir>]',
   '',
 ].join('\n');
 
@@ -2081,7 +2082,7 @@ function appendLoopResult(projectDir, args) {
 /**
  * Every CLI command but `close` (which the CLI block runs itself). Writes its own output and
  * sets process.exitCode, which it also returns. An unknown command is the usage text and 2, as
- * before this existed. `time` goes to timeCommand (plan T8, below). loop-result: 0 when
+ * before this existed. `time` goes to timeCommand (plan T8, below), `summary` to summaryCommand (plan T9). loop-result: 0 when
  * written, or with TASK_FLOW_METRICS=off (checked first: nothing parsed, nothing done); else 1;
  * one fixed line either way. `projectDir` is the CLI block's resolution (--project-dir, CLAUDE_PROJECT_DIR, the cwd), or null.
  */
@@ -2094,6 +2095,7 @@ function runCommand(argv, projectDir) {
   try {
     const args = Array.isArray(argv) ? argv : [];
     if (args[0] === 'time') return timeCommand(args.slice(1), projectDir, exit); // plan T8, below
+    if (args[0] === 'summary') return summaryCommand(args.slice(1), projectDir, exit); // plan T9, below
     if (args[0] !== 'loop-result') return exit(2, process.stderr, CLI_USAGE);
     if (String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return exit(0, process.stdout, 'metrics: disabled loop-result\n');
     const code = appendLoopResult(projectDir, args.slice(1));
@@ -2366,6 +2368,133 @@ function timeCommand(args, projectDir, exit) {
 }
 
 Object.assign(module.exports, { readMainTranscripts });
+
+// --- the PR summary CLI (spec 6.3, RF-033, RF-034; plan T9) ---------------------------------------
+//
+// The cost block of the PR body, put in its `## Changed` section when the PR is opened (Q3):
+//
+//   node plugin/scripts/metrics.js summary --slug <run> [--project-dir <dir>]
+//
+// Computed on demand, and NOTHING is written: the PR opens before `phase: "done"`, so the run's
+// loop rows are not in loops.jsonl yet (spec-log decision "Linhas finais no fecho"). The rows are
+// therefore the run's start events joined to their transcripts in memory (joinLoops, as the close
+// would), plus the rows loops.jsonl already holds for the run (a run summarised after its close,
+// or a paperclip run that has rows and no events) - a recorded row wins over a fresh join of the
+// same loop, so the PR body and the page agree. As on the page, a row counts only when it started
+// at or after the run's startedAt (a folder name can be reused). The orchestrator's own tokens
+// come from the main transcripts in the run window (readMainTranscripts, plan T8) on a line of
+// their own, not as a loop (spec-log decision "Tokens do orquestrador").
+//
+// Tokens only, never money (Q1: euros only ever come from paperclip). FRESH tokens - input +
+// cache creation + output - and the block says so (Q6, the definition the page uses). A loop with
+// no measured tokens is left out of the sums and counted on a line of its own, so a number that
+// is short is never printed as if complete. Review rounds: the highest `round` of the review
+// loops; without any, the count of those loops, said as such (RF-033).
+//
+// Trust: the block goes into a PR body on GitHub, read by people and by models. It holds only
+// numbers formatted here, phase names from PHASES and fixed phrases per language (render-run's
+// strings where the page has the same words) - nothing from a file, an exception or an argument,
+// not even the slug. Arguments: all or nothing, the usage and exit 2. Without data, one fixed
+// line `metrics: <code> summary`, exit 0. One budget, BUDGET_MS, for the join and the main read.
+
+const SUMMARY_STRINGS = Object.freeze({
+  en: {
+    heading: '### Run cost',
+    fresh: 'Fresh tokens = input + cache creation + output, without cache reads.',
+    orchestrator: 'orchestrator',
+    rounds: (n) => `Review rounds: ${n}.`,
+    noRounds: (n) => `Review rounds: ${n} review ${n === 1 ? 'loop' : 'loops'}, no round recorded.`,
+    unmeasured: (n) => `Loops without measured tokens: ${n} (not in the sums).`,
+  },
+  'pt-PT': {
+    heading: '### Custo da run',
+    fresh: 'Tokens frescos = input + cache creation + output, sem cache reads.',
+    orchestrator: 'orquestrador',
+    rounds: (n) => `Rondas de review: ${n}.`,
+    noRounds: (n) => `Rondas de review: ${n} ${n === 1 ? 'loop' : 'loops'} de review, sem ronda registada.`,
+    unmeasured: (n) => `Loops sem tokens medidos: ${n} (fora das somas).`,
+  },
+});
+/** readMainTranscripts' reasons in the words the page already has for a loop's missing tokens. */
+const MAIN_REASON = Object.freeze({ 'no-transcripts': 'no-transcript', timeout: 'timeout' });
+
+/** The block, from validated loop rows (not empty) and readMainTranscripts' result. */
+function summaryBlock(rows, main, lang) {
+  const page = (STRINGS[lang] || STRINGS.en).loops;
+  const s = SUMMARY_STRINGS[lang] || SUMMARY_STRINGS.en;
+  const DASH = '—';
+  const number = (value) => (Number.isSafeInteger(value) && value >= 0 ? String(value) : DASH);
+  const fresh = (tokens) => tokens.input + tokens.cacheCreate + tokens.output;
+  // [fresh tokens, seconds] of some rows, each null when no row has one
+  const sums = (list) => {
+    const measured = list.filter((row) => row.tokens !== null);
+    const timed = list.filter((row) => row.durationS !== null);
+    return [
+      measured.length ? measured.reduce((n, row) => n + fresh(row.tokens), 0) : null,
+      timed.length ? timed.reduce((n, row) => n + row.durationS, 0) : null,
+    ];
+  };
+
+  const out = [s.heading, '', s.fresh, '', `| ${page.byPhaseHeader.join(' | ')} |`, '| --- | ---: | ---: | ---: |'];
+  for (const phase of LOOP_PHASES) {
+    const inPhase = rows.filter((row) => row.phase === phase);
+    if (inPhase.length === 0) continue;
+    const [tokens, seconds] = sums(inPhase);
+    out.push(`| ${phase === 'unknown' ? page.unknown : phase} | ${inPhase.length} | ${tokens === null ? DASH : number(tokens)} | ${formatDuration(seconds)} |`);
+  }
+  const mainTokens = main.reason === null && main.tokens !== null ? fresh(main.tokens) : null;
+  const mainCell = mainTokens !== null ? number(mainTokens)
+    : hasOwn(MAIN_REASON, main.reason) ? `${DASH} (${page.reasons[MAIN_REASON[main.reason]]})` : DASH;
+  out.push(`| ${s.orchestrator} | ${DASH} | ${mainCell} | ${DASH} |`);
+  const [loopTokens, seconds] = sums(rows);
+  const total = loopTokens === null && mainTokens === null ? null : (loopTokens || 0) + (mainTokens || 0);
+  out.push(`| **Total** | ${rows.length} | ${total === null ? DASH : number(total)} | ${formatDuration(seconds)} |`, '', page.overlap);
+
+  const unmeasured = rows.filter((row) => row.tokens === null).length;
+  if (unmeasured > 0) out.push('', s.unmeasured(unmeasured));
+  const review = rows.filter((row) => row.phase === 'review');
+  const rounds = review.map((row) => row.round).filter(isRound);
+  out.push('', rounds.length ? s.rounds(Math.max(...rounds)) : s.noRounds(review.length), '');
+  return out.join('\n');
+}
+
+/** The summary text of run `slug`, or `{ code }`. Reads only; never throws. */
+function summaryText(projectDir, slug) {
+  try {
+    const loaded = loadConfig(projectDir);
+    if (!loaded.ok || !loaded.config || typeof loaded.config.stateDir !== 'string') return { code: 'bad-config' };
+    const stateDir = loaded.config.stateDir;
+    const window = runWindow(projectDir, stateDir, slug);
+    if (window.code) return { code: window.code };
+    const deadline = Date.now() + CONSTANTS.BUDGET_MS;
+    // a history that cannot be read could hold this run's rows: no block rather than a short one
+    const history = readLoops(projectDir, stateDir);
+    if (history.code) return { code: history.code };
+    const joined = joinLoops({ projectDir, slug, events: readLoopEvents(projectDir, stateDir, slug), deadline });
+
+    const sinceMs = Date.parse(window.startedAt);
+    const byKey = new Map();
+    for (const row of [...history.rows, ...joined]) { // recorded first: the first of a key wins
+      if (row.run !== slug || row.startedAt === null || Date.parse(row.startedAt) < sinceMs || byKey.has(loopKey(row))) continue;
+      byKey.set(loopKey(row), row);
+    }
+    if (byKey.size === 0) return { code: 'no-loops' };
+    const main = readMainTranscripts({ projectDir, window, deadline });
+    return { text: summaryBlock([...byKey.values()], main, loaded.config.pageLanguage) };
+  } catch {
+    return { code: 'internal' };
+  }
+}
+
+/** runCommand's `summary`, the shape of timeCommand: TASK_FLOW_METRICS=off first (nothing read),
+ *  then the arguments (all or nothing: the usage and 2), then the block or one fixed line, exit 0. */
+function summaryCommand(args, projectDir, exit) {
+  if (String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return exit(0, process.stdout, 'metrics: disabled summary\n');
+  const given = parseFlags(args, TIME_FLAGS); // the same two flags as time
+  if (!given || !given.has('--slug') || typeof projectDir !== 'string' || !path.isAbsolute(projectDir)) return exit(2, process.stderr, CLI_USAGE);
+  const result = summaryText(projectDir, given.get('--slug'));
+  return exit(0, process.stdout, result.text || `metrics: ${result.code} summary\n`);
+}
 
 
 // --- closeRun and the CLI (spec R3, R4, R9; plan T7) -----------------------------------------------
