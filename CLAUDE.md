@@ -45,6 +45,7 @@ node tests/metrics.paperclip.test.js
 node tests/metrics.paperclip.security.test.js
 node tests/metrics.paperclip-loops.security.test.js
 node tests/metrics.backfill.test.js
+node tests/metrics.backfill.security.test.js
 node tests/metrics.render.security.test.js
 node tests/metrics.render.test.js
 node tests/metrics.security.test.js
