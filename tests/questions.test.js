@@ -161,6 +161,22 @@ check('Q1 a complete file is valid', validateQuestions(sample()).ok, validateQue
   check('Q7 SECURITY error messages never repeat a value or an odd key from the file', !outcome.ok && !/IGNORE/.test(text), text);
 }
 
+{
+  // T5: standing-answers.js promote marks an item it wrote to the page.
+  const data = sample();
+  data.items[1].answer = { status: 'ok', comment: 'EUR always.', via: 'conversation', at: AT };
+  data.items[1].promotedAs = 'R12';
+  const outcome = validateQuestions(data);
+  check('Q7b an item with promotedAs R<n> is valid', outcome.ok, outcome.errors.join('; '));
+  const bad = ['R0', 'R01', 'Q1', 'R12345', 'R1 ', '../R1', 7, ''].map((value) => {
+    const d = sample();
+    d.items[1].promotedAs = value;
+    const o = validateQuestions(d);
+    return !o.ok && o.errors.some((e) => e.startsWith('items[1].promotedAs')) && !o.errors.join(' ').includes('../R1');
+  });
+  check('Q7c SECURITY promotedAs in any other shape is refused, naming the field, never the value', bad.every(Boolean), JSON.stringify(bad));
+}
+
 // --- the generated markdown ------------------------------------------------------
 
 {

@@ -46,14 +46,29 @@
 // own id or a later one is rejected by its line: no replacement order the writer
 // cannot produce is guessed at, and a cycle keeps its newest entry, never none.
 //
+// The one writer, `promote`, lives here too, so it shares the format instead of
+// restating it. It writes only from a recorded answer: an item of this run's
+// questions.json (read by questions.js, so a file of another run or an odd shape
+// is refused) that has an `answer` carrying the person's own words - the
+// comment, or the label of the option they chose. A bare "ok" only endorses the
+// run's own text, and a decision the run took alone has no answer at all: both
+// are refused (FR-029, Q10). The line it builds goes through `parsePage` before
+// a byte is written, field by field and then as the whole new page: what the
+// reader would refuse, flag, cut off past the entry limit or refuse for its size
+// is never written. Every other line stays byte for byte, the page is written
+// through a temp file and a rename, and the item is marked `promotedAs` so it is
+// never written twice, even after its line was deleted by hand (FR-034).
+//
 //   node standing-answers.js read [--project-dir <dir>]
+//   node standing-answers.js promote --slug <run> --item Q<n> --rule "<rule>" [--replaces R<m>] [--project-dir <dir>]
 
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { crossesLink, isNetworkOrDevicePath, loadConfig } = require('./config.js');
-const { CONTROL } = require('./questions.js');
+const { CONTROL, QUESTION_ID, readQuestionsFile, validateQuestions } = require('./questions.js');
 const { SAFE_SEGMENT } = require('./render-run.js');
 
 /** Fixed, and not translated: a name that changed with `language` would leave
@@ -197,43 +212,43 @@ function parsePage(text) {
   return result;
 }
 
-/** The page of a project whose configuration config.js accepted. Never throws:
- *  a page that cannot be used is a `refused` reason, and the run goes on as if
- *  there were no page (FR-038). */
-function readPage(config) {
+/** The page's raw text, the one safe way, for the reader and the writer alike:
+ *  `{ file, text, bytes }`, `{ file, missing: true }` or `{ refused }`. */
+function loadPageText(config) {
   let file;
   try {
     file = pagePath(config);
   } catch (error) {
-    return refusedResult(error.message);
+    return { refused: error.message };
   }
   let fd;
   try {
     // The page sits directly in docsDir, so the page itself is the only step
     // crossesLink has to look at; it never says where a link points.
-    if (crossesLink(config.docsDir, file)) return refusedResult('the page is a symbolic link or junction, which is never followed');
+    if (crossesLink(config.docsDir, file)) return { refused: 'the page is a symbolic link or junction, which is never followed' };
     let stats;
     try {
       stats = fs.lstatSync(file);
     } catch (error) {
-      if (error.code === 'ENOENT') return emptyResult();
-      return refusedResult('the page cannot be examined');
+      if (error.code === 'ENOENT') return { file, missing: true };
+      return { refused: 'the page cannot be examined' };
     }
-    if (stats.isSymbolicLink()) return refusedResult('the page is a symbolic link or junction, which is never followed');
-    if (!stats.isFile()) return refusedResult('the page is not a plain file (a folder, a pipe or a device)');
-    if (stats.size > LIMITS.pageBytes) return refusedResult(`the page is larger than ${LIMITS.pageBytes} bytes`);
+    if (stats.isSymbolicLink()) return { refused: 'the page is a symbolic link or junction, which is never followed' };
+    if (!stats.isFile()) return { refused: 'the page is not a plain file (a folder, a pipe or a device)' };
+    if (stats.size > LIMITS.pageBytes) return { refused: `the page is larger than ${LIMITS.pageBytes} bytes` };
     // Read through the descriptor that is checked again, at most one byte past
     // the limit: if the file was swapped or grew between lstat and open, the
     // second look catches it and the read is still bounded.
     fd = fs.openSync(file, 'r');
     const opened = fs.fstatSync(fd);
-    if (!opened.isFile()) return refusedResult('the page is not a plain file (a folder, a pipe or a device)');
+    if (!opened.isFile()) return { refused: 'the page is not a plain file (a folder, a pipe or a device)' };
     const buffer = Buffer.alloc(LIMITS.pageBytes + 1);
     const read = fs.readSync(fd, buffer, 0, buffer.length, 0);
-    if (read > LIMITS.pageBytes) return refusedResult(`the page is larger than ${LIMITS.pageBytes} bytes`);
-    return parsePage(buffer.toString('utf8', 0, read));
+    if (read > LIMITS.pageBytes) return { refused: `the page is larger than ${LIMITS.pageBytes} bytes` };
+    const bytes = buffer.subarray(0, read);
+    return { file, text: bytes.toString('utf8'), bytes };
   } catch {
-    return refusedResult('the page cannot be read');
+    return { refused: 'the page cannot be read' };
   } finally {
     if (fd !== undefined) {
       try {
@@ -243,6 +258,16 @@ function readPage(config) {
       }
     }
   }
+}
+
+/** The page of a project whose configuration config.js accepted. Never throws:
+ *  a page that cannot be used is a `refused` reason, and the run goes on as if
+ *  there were no page (FR-038). */
+function readPage(config) {
+  const page = loadPageText(config);
+  if (page.refused) return refusedResult(page.refused);
+  if (page.missing) return emptyResult();
+  return parsePage(page.text);
 }
 
 /** The page of the project at `projectDir`, through config.js. */
@@ -290,7 +315,195 @@ function reportLines(result) {
   return lines;
 }
 
-module.exports = { LIMITS, PAGE_NAME, pagePath, parsePage, readPage, read, formatBlock, reportLines };
+// --- the writer ------------------------------------------------------------
+
+const STANDING_ID = /^R([1-9][0-9]{0,3})$/;
+const MAX_ID = 9999;
+const MARKER = /^<!-- task-flow: next R([1-9][0-9]{0,3}) -->\r?$/;
+const ID_AT_START = /^- \*\*R([1-9][0-9]{0,3})\*\*/;
+const WRITE_TRIES = 3;
+const DOCS_REFUSED = 'docsDir is not accepted by .claude/task-flow.json (see: config.js check)';
+
+/** What the writer puts on a page, in its page language (config.js
+ *  pageLanguage); the reader accepts both words for a replacement. */
+const PAGE_STRINGS = {
+  en: {
+    title: '# Standing answers',
+    intro: 'Answers that hold for every run of this project, written by task-flow from answers you gave. Delete a line to drop a rule; its id is never used again.',
+    chose: 'chose',
+    replaces: 'replaces',
+  },
+  'pt-PT': {
+    title: '# Respostas permanentes',
+    intro: 'Respostas que valem para todas as runs deste projeto, escritas pelo task-flow a partir de respostas tuas. Apaga uma linha para tirar uma regra; o id dela nunca volta a ser usado.',
+    chose: 'escolheu',
+    replaces: 'substitui',
+  },
+};
+
+/** One line, as a markdown reader shows it anyway: an entry is one line (FR-015). */
+const oneLine = (value) => String(value).replace(/\s+/g, ' ').trim();
+
+const localDate = (now = new Date()) =>
+  `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+/** The page with the new entry: every other line as it was, the next-id marker
+ *  moved on (or added), R<m> taken off when it is replaced. */
+function nextPage(text, { rule, words, slug, date, replaces, strings }) {
+  const created = text === undefined;
+  let source = created ? `${strings.title}\n\n${strings.intro}\n\n` : text;
+  const bom = source.startsWith('﻿') ? '﻿' : '';
+  source = source.slice(bom.length);
+  const eol = source.includes('\r\n') ? '\r\n' : '\n';
+  const lines = source.split('\n');
+  let marker = 0;
+  let highest = 0;
+  for (const line of lines) {
+    const m = MARKER.exec(line);
+    if (m) marker = Math.max(marker, Number(m[1]));
+    const e = ID_AT_START.exec(line);
+    if (e) highest = Math.max(highest, Number(e[1]));
+  }
+  // The marker, and past every id on the page - a rejected line's included -, so
+  // an id is never given twice, also when the marker was lowered by hand.
+  const n = Math.max(marker, highest + 1);
+  if (n > MAX_ID) throw new Error(`the page has used every id up to R${MAX_ID}`);
+  if (replaces) {
+    if (!parsePage(source).entries.some((entry) => entry.id === replaces)) {
+      throw new Error(`--replaces ${replaces} is not a standing answer in use on the page`);
+    }
+    // The reader keeps the first line with an id, so that is the one to take off.
+    const index = lines.findIndex((line) => {
+      const parsed = parseLine(line.replace(/\r$/, ''));
+      return parsed && parsed.entry && parsed.entry.id === replaces;
+    });
+    lines.splice(index, 1);
+  }
+  const markerLine = `<!-- task-flow: next R${n + 1} -->`;
+  let body = lines.map((line) => (MARKER.test(line) ? line.replace(/R\d+/, `R${n + 1}`) : line)).join('\n');
+  if (body && !body.endsWith('\n')) body += eol;
+  if (!marker) body += markerLine + eol;
+  const tail = replaces ? `${SEPARATOR}${strings.replaces} ${replaces}` : '';
+  body += `- **R${n}** · ${rule} · «${words}» · ${slug} · ${date}${tail}${eol}`;
+  return { text: bom + body, id: `R${n}`, created, markerMissing: !created && !marker };
+}
+
+/** Writes the file whole through a temp file, so a crash leaves the old file or
+ *  the new one, never half of either (the pattern of answers.js). */
+function writeAtomic(file, text) {
+  const temp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temp, text, 'utf8');
+  fs.renameSync(temp, file);
+}
+
+/**
+ * Writes one standing answer from a recorded answer of this run. Returns
+ * `{ id, created, markerMissing, replaced }`. Throws, with nothing written, on
+ * every refusal; the message names the field or the rule, never the value.
+ */
+function promote({ projectDir, slug, item, rule, replaces }) {
+  if (typeof slug !== 'string' || !SAFE_SEGMENT.test(slug)) throw new Error('--slug must be a run folder name');
+  if (typeof item !== 'string' || !QUESTION_ID.test(item)) throw new Error('--item must be a question id like Q3');
+  if (typeof rule !== 'string') throw new Error('--rule is required');
+  if (replaces !== undefined && (typeof replaces !== 'string' || !STANDING_ID.test(replaces))) {
+    throw new Error('--replaces must be a standing answer id like R3');
+  }
+
+  const loaded = loadConfig(path.resolve(projectDir));
+  const config = loaded.config;
+  // Decided before anything touches docsDir, as in `read`: only a docsDir
+  // config.js accepted, and its errors (which carry paths) are not repeated.
+  if (!loaded.exists || !config || !config.docsDir) throw new Error(DOCS_REFUSED);
+  if (!config.stateDir) throw new Error('stateDir is not valid in .claude/task-flow.json (see: config.js check)');
+
+  const questionsFile = path.join(config.stateDir, slug, 'questions.json');
+  const takeItem = () => {
+    const run = readQuestionsFile(questionsFile, config.stateDir, slug);
+    if (!run.exists) throw new Error(`run ${slug} has no questions.json in stateDir`);
+    if (run.errors.length) throw new Error(run.errors.slice(0, 5).join('; '));
+    const found = run.data.items.find((x) => x.id === item);
+    if (!found) throw new Error(`${item} is not an item of run ${slug}`);
+    if (found.promotedAs) {
+      throw new Error(`${item} was already promoted as ${found.promotedAs}; an item is promoted once, also after its line was deleted by hand`);
+    }
+    return { data: run.data, found };
+  };
+  const { found } = takeItem();
+  if (!found.answer) throw new Error(`${item} has no answer: only an answer the person gave and this run recorded can be promoted`);
+
+  const strings = PAGE_STRINGS[config.pageLanguage] || PAGE_STRINGS.en;
+  // The person's words (Q10): their comment; without one, the label of the
+  // option they chose; never the decision's `chosen`, which is the run's text.
+  let words = oneLine(found.answer.comment || '');
+  if (!words && found.answer.choice) {
+    const option = (found.options || []).find((o) => o.id === found.answer.choice);
+    if (option) words = `${strings.chose}: ${oneLine(option.label)}`;
+  }
+  if (!words) throw new Error(`${item}'s answer has no comment and no chosen option: a bare status carries none of the person's own words`);
+  const cleanRule = oneLine(rule);
+  const date = localDate();
+
+  // Each field through the reader on its own, so the refusal can name it.
+  const probe = (r, w) => parsePage(`- **R1** · ${r} · «${w}» · ${slug} · ${date}`);
+  for (const [field, result] of [['The rule', probe(cleanRule, 'x')], [`The words from ${item}'s answer`, probe('x', words)]]) {
+    const bad = result.rejected[0] || result.suspicious[0];
+    if (bad) throw new Error(`${field} would not be accepted by the reader: ${bad.why}`);
+  }
+
+  // ponytail: optimistic check, no lock file - a lock left behind in a synced
+  // notes folder would block every later write. The window between the re-read
+  // and the rename stays; take a lock next to the page if two writers ever meet there.
+  for (let attempt = 1; attempt <= WRITE_TRIES; attempt += 1) {
+    const before = loadPageText(config);
+    if (before.refused) throw new Error(`the standing-answers page is refused: ${before.refused}`);
+    if (before.bytes && !Buffer.from(before.text, 'utf8').equals(before.bytes)) {
+      throw new Error('the standing-answers page is not valid UTF-8, so its lines could not be kept byte for byte');
+    }
+    const next = nextPage(before.text, { rule: cleanRule, words, slug, date, replaces, strings });
+    if (Buffer.byteLength(next.text, 'utf8') > LIMITS.pageBytes) {
+      throw new Error(`the new entry would make the page larger than ${LIMITS.pageBytes} bytes, and the reader would refuse it whole`);
+    }
+    const parsed = parsePage(next.text);
+    if (!parsed.entries.some((entry) => entry.id === next.id)) {
+      throw new Error(`the page already has ${LIMITS.entries} entries in use, the reader's limit: it would not use a new one`);
+    }
+
+    const temp = `${before.file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+    let renamed = false;
+    try {
+      fs.writeFileSync(temp, next.text, { encoding: 'utf8', flag: 'wx' });
+      const now = loadPageText(config);
+      const unchanged = before.missing ? now.missing === true : now.text === before.text;
+      if (!unchanged) continue;
+      fs.renameSync(temp, before.file);
+      renamed = true;
+    } finally {
+      if (!renamed) {
+        try {
+          fs.unlinkSync(temp);
+        } catch {
+          // never written, or already gone
+        }
+      }
+    }
+
+    // The page holds the entry now; the item says so, read again in case the
+    // file changed meanwhile (answers.js consume writes it too).
+    try {
+      const { data, found: again } = takeItem();
+      again.promotedAs = next.id;
+      const checked = validateQuestions(data);
+      if (!checked.ok) throw new Error(checked.errors.slice(0, 5).join('; '));
+      writeAtomic(questionsFile, JSON.stringify(data, null, 2) + '\n');
+    } catch (error) {
+      throw new Error(`${next.id} was written to the page, but ${item} could not be marked in questions.json (${error.message}); do not promote ${item} again`);
+    }
+    return { id: next.id, created: next.created, markerMissing: next.markerMissing, replaced: replaces || null };
+  }
+  throw new Error(`the standing-answers page changed while it was being written, ${WRITE_TRIES} times; nothing was written`);
+}
+
+module.exports = { LIMITS, PAGE_NAME, pagePath, parsePage, readPage, read, formatBlock, reportLines, promote };
 
 // --- CLI -------------------------------------------------------------------
 
@@ -312,8 +525,24 @@ if (require.main === module) {
     } else out.push(formatBlock(result));
     out.push(...reportLines(result));
     process.stdout.write(`${out.join('\n')}\n`);
+  } else if (argv[0] === 'promote') {
+    const projectDir = value('--project-dir') || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+    const item = value('--item');
+    try {
+      const result = promote({ projectDir, slug: value('--slug'), item, rule: value('--rule'), replaces: value('--replaces') });
+      // Ids only: the rule and the words are on the page, and in questions.json.
+      const out = [`Standing answer ${result.id} written to the standing-answers page, from ${item}.`];
+      if (result.created) out.push("Created the standing-answers page: add a line for it to the docsDir's index.md.");
+      if (result.markerMissing) out.push('The next-id marker was missing from the page: ids go on from the highest one on it, and the marker is back.');
+      if (result.replaced) out.push(`${result.replaced} was taken off the page: ${result.id} replaces it.`);
+      process.stdout.write(`${out.join('\n')}\n`);
+    } catch (error) {
+      process.stderr.write(`standing-answers promote: ${error.message}\n`);
+      process.exitCode = 1;
+    }
   } else {
-    process.stderr.write('usage: node standing-answers.js read [--project-dir <dir>]\n');
+    process.stderr.write('usage: node standing-answers.js read [--project-dir <dir>]\n' +
+      '       node standing-answers.js promote --slug <run> --item Q<n> --rule "<rule>" [--replaces R<m>] [--project-dir <dir>]\n');
     process.exitCode = 2;
   }
 }
