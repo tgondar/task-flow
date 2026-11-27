@@ -1856,6 +1856,8 @@ function readLoopTranscript(file, deadline) {
       durationS,
       model: mostFrequent(list.map((r) => r.model)),
       effort: mostFrequent(list.map((r) => r.effort)),
+      // the first record of any type: the backfill's run window (plan T13); joinLoops keeps the event's
+      startedAt: first === null ? null : new Date(first).toISOString(),
       reason: null,
     };
   } catch {
@@ -2007,6 +2009,7 @@ const CLI_USAGE = [
   '       metrics.js time --slug <run> [--project-dir <dir>]',
   '       metrics.js summary --slug <run> [--project-dir <dir>]',
   '       metrics.js paperclip --issue <n> [--paperclip-issue <id>] [--project-dir <dir>]',
+  '       metrics.js backfill [--project-dir <dir>]',
   '',
 ].join('\n');
 
@@ -2108,6 +2111,7 @@ function runCommand(argv, projectDir) {
     if (args[0] === 'summary') return summaryCommand(args.slice(1), projectDir, exit); // plan T9, below
     // plan T12, below: asynchronous (HTTP), so this one returns a promise; it never rejects
     if (args[0] === 'paperclip') return paperclipCommand(args.slice(1), projectDir, exit);
+    if (args[0] === 'backfill') return backfillCommand(args.slice(1), projectDir, exit); // plan T13, below
     if (args[0] !== 'loop-result') return exit(2, process.stderr, CLI_USAGE);
     if (String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return exit(0, process.stdout, 'metrics: disabled loop-result\n');
     const code = appendLoopResult(projectDir, args.slice(1));
@@ -2854,6 +2858,166 @@ async function paperclipCommand(args, projectDir, exit) {
 }
 
 Object.assign(module.exports, { collectPaperclip });
+
+// --- metrics.js backfill: the transcripts already there as loop rows (spec 6.5, RF-050..RF-052; plan T13)
+//
+//   node plugin/scripts/metrics.js backfill [--project-dir <dir>]
+//
+// Run by hand (spec-log decision «Backfill explícito»: never on a render), once or as often as
+// wanted: every subagent transcript `agent-<id>.jsonl` of the project that has no task-flow row in
+// loops.jsonl yet (under ANY run: a loop measured at a close, or backfilled as `unknown` before, is
+// never measured twice) becomes one row with `backfill: true`, read by the same readLoopTranscript
+// as the close (RF-006, RF-007), through the same bounded listing (listTranscripts, without its
+// mtime filter: old transcripts are the point). A loop whose start event sits in a run still
+// going is left alone - that run's close owns it, and a backfill row first would leave the loop
+// with two keys (backfill `unknown` + the close's).
+//
+// Attribution (RF-051), from data that has no link to the transcript but time: the run is the ONE
+// run whose window (state.json `startedAt`..`phaseChangedAt`, both validated instants) holds the
+// loop's first record, else `unknown`; the phase is phaseAt over that run's validated phaseLog
+// (no log, or past the last phase: `unknown`); task, round and result stay empty. The agent type
+// comes only from `agentType` of the `agent-<id>.meta.json` beside the transcript (readSmallObject:
+// lstat, no link, size first), in SHAPE.agentType, else `unknown` - no other key of it is used
+// (`description` is free text). Every state.json is only read (RF-052).
+//
+// Budget: BACKFILL_MS for the whole command (RF-050: not a hook, so more than the close's 5 s).
+// When it runs out, the rows already read are written and the rest is left for the next call (a
+// `timeout` row would stick: the first row of a key wins). Output: one fixed line
+// `metrics: <code> backfill`, exit 0 (usage errors: the usage text and 2); TASK_FLOW_METRICS=off
+// first, before anything is read. Nothing of a transcript, a meta.json or a state.json is printed.
+
+/** The whole backfill, listing and every transcript read. A ceiling, not measured. */
+const BACKFILL_MS = 60 * 1000;
+const BACKFILL_FLAGS = new Map([['--project-dir', () => true]]); // resolved by the CLI block
+
+/** The project's runs that have a window: `[{ slug, startMs, endMs, log }]`, `log` the validated
+ *  phaseLog sorted for phaseAt (or null). A run without both instants, or with them reversed, has
+ *  no window. Read only; never throws. */
+function backfillWindows(projectDir, stateDir) {
+  const windows = [];
+  let names = [];
+  try {
+    names = fs.readdirSync(stateDir).slice(0, MAX_OTHER_RUNS);
+  } catch {
+    // no folder: no window
+  }
+  for (const name of names) {
+    if (!isSlug(name)) continue;
+    const state = readSmallObject(projectDir, path.join(stateDir, name, 'state.json'));
+    if (!state) continue;
+    const { startedAt, phaseLog } = parseHealth(state);
+    const end = ownValue(state, 'phaseChangedAt');
+    if (!startedAt || !isInstant(end) || Date.parse(startedAt) > Date.parse(end)) continue;
+    const log = phaseLog ? phaseLog.map((e) => ({ phase: e.phase, ms: Date.parse(e.at) })).sort((a, b) => a.ms - b.ms) : null;
+    windows.push({ slug: name, startMs: Date.parse(startedAt), endMs: Date.parse(end), log });
+  }
+  return windows;
+}
+
+/** The `agentType` of the meta.json beside `transcript`, in its shape, else `unknown`. */
+function backfillAgentType(projectsRoot, transcript) {
+  const meta = readSmallObject(projectsRoot, transcript.replace(/\.jsonl$/, '.meta.json'));
+  const type = meta ? ownValue(meta, 'agentType') : undefined;
+  return isShape(SHAPE.agentType)(type) ? type : 'unknown';
+}
+
+/** One backfilled row from readLoopTranscript's `read` (RF-051). */
+function backfillRow(id, agentType, read, windows) {
+  const found = read.reason === null;
+  const firstMs = found && isInstant(read.startedAt) ? Date.parse(read.startedAt) : NaN;
+  const holding = windows.filter((w) => firstMs >= w.startMs && firstMs <= w.endMs);
+  const owner = holding.length === 1 ? holding[0] : null;
+  const phase = owner ? phaseAt(owner.log, firstMs) : 'other';
+  const fallback = hasOwn(AGENT_EFFORT, agentType) ? AGENT_EFFORT[agentType] : 'unknown';
+  return {
+    v: 1, source: 'taskflow', run: owner ? owner.slug : 'unknown', id, agentType,
+    phase: LOOP_PHASES.includes(phase) ? phase : 'unknown', task: '', round: null,
+    model: found ? read.model : null,
+    effort: found ? read.effort || fallback : null,
+    startedAt: found ? read.startedAt : null,
+    durationS: found ? read.durationS : null,
+    tokens: found ? read.tokens : null,
+    costCents: null, outcome: null, tests: null, critical: null, required: null,
+    reason: read.reason,
+    backfill: true,
+  };
+}
+
+/**
+ * The backfill's work: `{ code, written }`. Codes: written, up-to-date, timeout (the budget ran
+ * out: what was read is written), no-transcripts, invalid, bad-config, readLoops' and
+ * appendLoopRows' codes, internal. `deadline` (ms since the epoch) is a test seam: it can only
+ * tighten BACKFILL_MS. Never throws.
+ */
+function backfillLoops(options) {
+  const done = (code, written) => ({ code, written: written || 0 });
+  try {
+    const opts = isObject(options) ? options : {};
+    const { projectDir } = opts;
+    if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || projectDir.length > 1024) return done('invalid');
+    const limit = Date.now() + BACKFILL_MS;
+    const deadline = typeof opts.deadline === 'number' && Number.isFinite(opts.deadline) ? Math.min(opts.deadline, limit) : limit;
+    const expired = () => Date.now() > deadline;
+
+    const loaded = loadConfig(projectDir);
+    if (!loaded.ok || !loaded.config || typeof loaded.config.stateDir !== 'string') return done('bad-config');
+    const stateDir = loaded.config.stateDir;
+    const history = readLoops(projectDir, stateDir);
+    if (history.code) return done(history.code);
+    // RF-052: any task-flow row of the loop, whatever its run; and the loops a live run's close owns
+    const skip = new Set(history.rows.filter((row) => row.source === 'taskflow').map((row) => row.id));
+    for (const name of runningRuns(projectDir)) {
+      if (isSlug(name)) for (const s of readLoopEvents(projectDir, stateDir, name).starts) skip.add(s.agent);
+    }
+
+    // the same folder readTokens and joinLoops read: the slug has only [A-Za-z0-9-], ONE folder name
+    const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
+    const base = path.join(projectsRoot, projectDir.replace(/[^A-Za-z0-9]/g, '-'));
+    if (!isInside(projectsRoot, base) || crossesLink(projectsRoot, base)) return done('no-transcripts');
+    try {
+      if (!fs.lstatSync(base).isDirectory()) return done('no-transcripts');
+    } catch {
+      return done('no-transcripts');
+    }
+    const limits = { maxFiles: CONSTANTS.MAX_TRANSCRIPT_FILES, maxTotalBytes: CONSTANTS.MAX_TRANSCRIPT_TOTAL_BYTES };
+    const listed = listTranscripts(projectsRoot, base, 0, limits, expired);
+    if (listed.reason) return done('timeout');
+
+    const windows = backfillWindows(projectDir, stateDir);
+    const rows = [];
+    let timedOut = false;
+    for (const entry of listed.files) {
+      const name = entry.file === null ? entry.name : path.basename(entry.file);
+      const id = typeof name === 'string' ? name.slice('agent-'.length, -'.jsonl'.length) : '';
+      if (!SHAPE.agentId.test(id) || skip.has(id)) continue;
+      if (expired()) { timedOut = true; break; }
+      // over the size ceiling: listed by name only (no path, so no meta.json either)
+      const read = entry.file === null ? { reason: 'unreadable-format' } : readLoopTranscript(entry.file, deadline);
+      // out of time mid-file: left for the next call; a request-count overflow is a row, as in joinLoops
+      if (read.reason === 'timeout' && expired()) { timedOut = true; break; }
+      skip.add(id);
+      rows.push(backfillRow(id, entry.file === null ? 'unknown' : backfillAgentType(projectsRoot, entry.file), read, windows));
+    }
+
+    const appended = appendLoopRows(projectDir, stateDir, rows);
+    if (!appended.ok) return done(appended.code);
+    if (timedOut) return done('timeout', appended.written);
+    return done(appended.written > 0 ? 'written' : 'up-to-date', appended.written);
+  } catch {
+    return done('internal');
+  }
+}
+
+/** runCommand's `backfill`: TASK_FLOW_METRICS=off first (nothing read), then the arguments (only
+ *  --project-dir; anything else: the usage and 2), then one fixed line, exit 0. */
+function backfillCommand(args, projectDir, exit) {
+  if (String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return exit(0, process.stdout, 'metrics: disabled backfill\n');
+  const given = parseFlags(args, BACKFILL_FLAGS);
+  if (!given || typeof projectDir !== 'string' || !path.isAbsolute(projectDir)) return exit(2, process.stderr, CLI_USAGE);
+  return exit(0, process.stdout, `metrics: ${backfillLoops({ projectDir }).code} backfill\n`);
+}
+
+Object.assign(module.exports, { backfillLoops });
 
 // --- closeRun and the CLI (spec R3, R4, R9; plan T7) -----------------------------------------------
 //
