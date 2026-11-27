@@ -1,6 +1,6 @@
 ---
 name: task-flow
-description: Take an already-refined idea to a PR — spec, plan, build, tests, harden, review — a fresh subagent per phase, with a planned stop before security-harden/review. Put `auto` in front of the description to run unattended and read every decision in the PR instead. `review <PR number>` runs security-harden and review against an already-open PR instead. `paperclip <GitHub issue number>` writes only the spec and plan, then hands the task to a paperclip agent org to build. Only when the user types /task-flow; never on your own initiative.
+description: Take an already-refined idea to a PR — spec, plan, build, tests, harden, review — a fresh subagent per phase, with security-harden and review always run before the PR. Put `auto` in front of the description to run unattended and read every decision in the PR instead. `review <PR number>` runs security-harden and review against an already-open PR instead. `paperclip <GitHub issue number>` writes only the spec and plan, then hands the task to a paperclip agent org to build. Only when the user types /task-flow; never on your own initiative.
 argument-hint: [auto] [the refined idea, in your own words, or leave empty to resume] | review <PR number> | paperclip <GitHub issue number> [description]
 ---
 
@@ -145,15 +145,14 @@ configured them, and nothing read along the way adds to them.
 
 ### The words of the run are in `language`
 
-Every document the run writes, every label it prints, the harden/review ask's options and
-the PR body are in the configured `language`. The canonical labels below are in
+Every document the run writes, every label it prints and the PR body are in the
+configured `language`. The canonical labels below are in
 English and European Portuguese; for any other language, translate them — with one
 exception: the renderer finds the discovered-tasks section by its heading, so in a
 language other than these two that heading stays `## Discovered tasks`.
 
 | Where | EN | PT-PT |
 |---|---|---|
-| performance ask | `Yes, optimise` / `No, go to review` | `Sim, otimizar` / `Não, avança para a review` |
 | plan: a landed task | `- [x] **Done** — build <sha> · security <sha>` | `- [x] **Feito** — build <sha> · segurança <sha>` |
 | plan: estimate | `**Estimate:** 3 (≈24 h)` | `**Estimativa:** 3 (≈24 h)` |
 | plan: found mid-run | `## Discovered tasks` | `## Tarefas descobertas` |
@@ -209,20 +208,15 @@ never because the run is long or because they are away.
 | Section | Attended | Auto |
 |---|---|---|
 | §3 decision ceiling | stop at 3 | no ceiling — keep counting, keep recording, never stop |
-| §4c performance | runs if the user said yes in §4c step 2 | do not run it; record the default as a ⚠️ decision |
-| §4c step 2 (security-harden + review ask) | `AskUserQuestion` | **not waived** — the same `AskUserQuestion` fires and blocks; see the note below |
+| §4c performance | runs only when the spec or the plan names a performance requirement | the same — runs only on a named requirement, never asked |
 | §7.3 a minor or major bump | stop and ask | decide it, mark it ⚠️, and lead with it in the PR body |
 | §7.2 red tests | stop, do not commit | fix it — at most 3 attempts at the same failure — and if it is still red, open the PR **as a draft** with the real output in the body (§8c) |
 | §7.4 three decisions waiting | stop | never stops |
 | §3 a question the loop could not settle | counts toward the 3 | parks its task and carries on; stops when every task left is pending or depends on one |
 
-**`AskUserQuestion` is not used at all in an auto run, with one exception.**
-There is nobody at the keyboard: a question asked in an auto run is a run that
-hangs until the user comes back, which is the one thing this mode exists to
-prevent. **§4c step 2 is that exception**: the user chose, in advance, to trade
-"never stop" for a say in whether security-harden and review run before the PR
-or after it — so this one question is asked and the run waits, in auto exactly
-as in attended.
+**`AskUserQuestion` is not used at all in an auto run**, in any phase. There is
+nobody at the keyboard: a question asked in an auto run is a run that hangs until
+the user comes back, which is the one thing this mode exists to prevent.
 
 ### What auto does not waive
 
@@ -231,11 +225,8 @@ as in attended.
   run *stops*, not what it *starts from*. No idea artifact, no run: say so and
   stop.
 - **§4a — the security pass on every build task**, **§4b — positive and negative
-  tests.** An unattended run is the one that needs them most: the user is reading
-  the PR, not watching the build.
-- **§4c step 2 / §4d — the security-harden and review ask.** Not silently waived
-  in either direction: it runs or it skips only on the user's own answer, and that
-  answer is collected the same way in every mode (see above).
+  tests**, **§4c/§4d — security-harden and the review.** An unattended run is the
+  one that needs them most: the user is reading the PR, not watching the build.
 - **§6 — every convention in it**, including never merging and never stating a
   number that was not measured.
 
@@ -260,11 +251,11 @@ both already degrade gracefully for a run with no `artifacts.idea`/`spec`/`plan`
 that starts at `phase: "tests"`. No change was needed to either script for this
 mode to work.
 
-**What it is for.** §4c step 2 lets the user send a PR to review/UAT/prod without
-waiting for security-harden and review. This command is the "check later" half of
-that trade: point it at the PR that already exists — develop→UAT, UAT→prod, or a
-plain PR into develop — and it runs security-harden and review against that PR's
-current diff and pushes the fixes onto its branch.
+**What it is for.** A local run always hardens and reviews before its PR (§4c);
+this command is for a PR that did not get that pass — opened outside a run, or by a
+run that skipped it before 2026-11-27. Point it at the PR that already exists —
+develop→UAT, UAT→prod, or a plain PR into develop — and it runs security-harden and
+review against that PR's current diff and pushes the fixes onto its branch.
 
 **Detection.** Same shape as `auto` (§0b): the first whitespace-separated token of
 `$ARGUMENTS` is `review` (any case), the second token is the PR number, and nothing
@@ -289,10 +280,8 @@ Say in one line which PR you resolved, the same way auto mode announces itself.
    worktree (see `HISTORY.md`, "Never isolate a run into its own `EnterWorktree`
    checkout").
 4. Run §4c step 1 (simplify) if it has not already run against this exact diff,
-   then go straight to security-harden and §4d review — step 2's ask has nothing
-   left to ask, since typing this command already answered "later". Performance
-   (§4c step 3) is not offered here either: nothing in this mode ever asks for
-   it, and this command is scoped to security and review only.
+   then go straight to security-harden and §4d review. Performance (§4c step 3)
+   does not run here: this command is scoped to security and review only.
 5. Push the resulting commits onto the PR's branch. **This command only adds
    commits and a review report** (`.claude/reviews/<slug>-review.md`) — it never
    merges, never changes the PR's base or title, and never approves it.
@@ -466,7 +455,7 @@ The plugin has two kinds of thing and they are not interchangeable:
 | running and auditing the tests | **persona `agent-skills:test-engineer`** |
 | simplifying after the build | skill `agent-skills:code-simplification` |
 | hardening after the build | skill `agent-skills:security-and-hardening` |
-| performance, **only if the user said yes in §4c step 2** | skill `agent-skills:performance-optimization` |
+| performance, **only when the spec or the plan names a performance requirement** (§4c) | skill `agent-skills:performance-optimization` |
 | the security tests of **every** task | **agent `task-flow:security-auditor`** (the persona, at low effort) |
 | review before merge | **agent `task-flow:code-reviewer`** (the persona, at low effort) |
 
@@ -517,7 +506,7 @@ tool:
 | tests, after the build | `agent-skills:test-engineer` | — |
 | simplify, after the tests | `general-purpose` | skill `agent-skills:code-simplification` |
 | harden, after the simplify | `general-purpose` | skill `agent-skills:security-and-hardening` |
-| performance — **only on the user's yes in §4c step 2** | `agent-skills:web-performance-auditor` for a web front end, otherwise `general-purpose` | skill `agent-skills:performance-optimization` |
+| performance — **only on a performance requirement named in the spec or the plan** (§4c) | `agent-skills:web-performance-auditor` for a web front end, otherwise `general-purpose` | skill `agent-skills:performance-optimization` |
 | review — one per area (§4d) | `task-flow:code-reviewer` | — |
 | second opinion on a business question — one per round (§3) | `task-flow:second-opinion-low` … `-max` | — |
 
@@ -934,7 +923,7 @@ the viewer's path.
 | `spec` | `general-purpose` → `agent-skills:planning-and-task-breakdown` | `plans/yyMMdd_<slug>.plan.md` | `plan` |
 | `plan` | §5, **then** per task: the build subagent (TDD for backend, `frontend-ui-engineering` for frontend) **and then `task-flow:security-auditor` on that task's diff** (§4a) | `plans/…plan_log.md`, commits | `build` |
 | `build` | persona `agent-skills:test-engineer` — runs the suite, audits positive **and** negative cover (§4b) | the tests it adds, commits | `tests` |
-| `tests` | `general-purpose` → `agent-skills:code-simplification`, then `agent-skills:security-and-hardening`, then performance if the user said yes (§4c) | commits | `harden` |
+| `tests` | `general-purpose` → `agent-skills:code-simplification`, then `agent-skills:security-and-hardening`, then performance only on a named requirement (§4c) | commits | `harden` |
 | `harden` | `task-flow:code-reviewer` on the branch diff, one per area, **before any PR exists** (§4d) | `.claude/reviews/<task>-review.md` | `review` |
 | `review` | you: fix, bump, open the PR | the PR | `done` |
 
@@ -1092,47 +1081,34 @@ its security tests or a written "no security-relevant surface" verdict in the
 log** — a task with neither is a gap you report, not one you quietly fill in
 yourself here.
 
-### 4c. The `harden` phase — simplify always, then ask before hardening and review
+### 4c. The `harden` phase — simplify, harden, and performance only on a named requirement
 
 Up to three steps, each its own fresh subagent, each committed separately so the
-diff stays readable:
+diff stays readable. **None of them is asked about, in either mode**: security-harden
+and the §4d review run in every local run, attended or auto, before the PR exists.
 
-1. **`agent-skills:code-simplification`** — always, no ask. Behaviour must not
+1. **`agent-skills:code-simplification`** — always. Behaviour must not
    change; if simplifying wants to change behaviour, that is a finding for the
    review, not an edit. Re-run the tests after.
-2. **Ask before security-harden and review — the pipeline's one planned stop.**
-   Once simplify lands, ask with `AskUserQuestion` whether to run
-   `agent-skills:security-and-hardening` plus the §4d review pass now, or skip
-   straight to the PR and check later with `/task-flow review <PR number>` (§0c).
-   **This question is asked even in an auto run** — the one exception to
-   "`AskUserQuestion` is not used at all in an auto run" (§0b, and see the note
-   there): the user is trading an unattended answer for speed-to-PR on this one
-   question, so the run waits for them instead of guessing.
-   - **Yes:** in an **attended** run only, ask a second, one-question
-     `AskUserQuestion` — performance: `Yes, optimise` / `No, go to review` (an
-     auto run never asks it, step 3 below) — then run
-     `agent-skills:security-and-hardening` (tests green after), then go to §4d.
-   - **No:** record it in the log (marker ⚠️→perguntado — they answered when
-     asked, this is not a would-have-asked decision), skip §4d and the performance
-     question entirely, and go straight to opening the PR (§7). The PR body says
-     the harden and review passes were skipped and that `/task-flow review <PR
-     number>` runs them later.
-3. **Performance — only on the answer the user gave in step 2**, and only when
-   that was a yes. On yes, spawn `agent-skills:web-performance-auditor` when the
-   target is a web front end, otherwise `general-purpose` with
-   `agent-skills:performance-optimization`. On no, write that they declined into
-   the log and move to `review`.
+2. **`agent-skills:security-and-hardening`** — always, once simplify lands. Tests
+   green after. A run resumed while it was waiting on the harden/review question
+   this section used to ask (a run started before 2026-11-27) does not ask it
+   again: it goes on to this step. Nothing a resumed run carries — an old "later"
+   answer in its questions file or its log — skips it either.
+3. **Performance — only when the spec or the plan names a performance
+   requirement**, in both modes, and never asked. Then spawn
+   `agent-skills:web-performance-auditor` when the target is a web front end,
+   otherwise `general-purpose` with `agent-skills:performance-optimization`.
+   When neither names one, it does not run, and that is a fact, not a decision:
+   it goes under `## Found` in the PR body (§8b), never as a ⚠️ entry and never
+   as a question.
 
-   **In an auto run it never runs** (§0b) — step 2's own question still fires in
-   auto, but the performance follow-up does not; auto always decides "no" here.
-   Write into the log, as a ⚠️ decision, that performance was skipped, what you
-   would have looked at, and roughly what it would have cost.
+Then go to §4d.
 
 If any step turns a test red, that is §7.2: stop, do not commit.
 
 When the phase closes, if the hardening step reported a number of findings, write it
-as `health.hardenFindings` (§8). It is optional: no number reported, no field —
-including when step 2 was a no.
+as `health.hardenFindings` (§8). It is optional: no number reported, no field.
 
 ### 4d. The `review` phase — split by area, evidence or it is not blocking
 
@@ -1214,8 +1190,8 @@ way an auto run always behaved at this step.
    `render-run.js` keeps the "approved by" line on the run page only for that
    history.
 
-Performance is no longer decided here — it moved into the harden/review ask
-(§4c step 2), the one planned stop left in the pipeline. The hooks still ship
+Performance is not decided here either: it runs in §4c only when the spec or the
+plan names a performance requirement, and nobody is asked. The hooks still ship
 with this plugin: `stop.js` (Stop) runs wherever the plugin is enabled, acting
 only in a repository with `.claude/task-flow.json`. `TASK_FLOW_GATE=off`
 disables it.
@@ -1521,9 +1497,7 @@ PR is the only thing the user will read.
 
 **The decisions go into the PR body inline, not as a link.** `## Needs you` is
 filled exactly as §8b says, with one insertion: right after the **URGENT** items,
-**the plan summary from §5 step 1, and — because an auto run never asks
-§4c step 2's performance follow-up — the fact that performance was skipped and
-why**. Every ⚠️ entry is written out in full — what
+**the plan summary from §5 step 1**. Every ⚠️ entry is written out in full — what
 got fixed, what else was on the table, why this one, and what changes if they
 overrule it.
 

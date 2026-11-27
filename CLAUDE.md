@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repository is
 
-A Claude Code plugin (`/task-flow`) that takes one refined idea to one pull request: spec → plan → build → tests → harden → review, a fresh subagent per phase, with a single planned stop (whether to run security-harden and review now or later, SKILL.md §4c). The repository is its own marketplace (`.claude-plugin/marketplace.json` → `./plugin`). There is no build step and no npm dependencies: everything executable is plain Node (≥ 20) using only the standard library.
+A Claude Code plugin (`/task-flow`) that takes one refined idea to one pull request: spec → plan → build → tests → harden → review, a fresh subagent per phase, with security-harden and review always run before the PR, unasked (SKILL.md §4c). The repository is its own marketplace (`.claude-plugin/marketplace.json` → `./plugin`). There is no build step and no npm dependencies: everything executable is plain Node (≥ 20) using only the standard library.
 
 ## Commands
 
@@ -39,6 +39,7 @@ node tests/metrics.tokens.security.test.js
 node tests/metrics.tokens.test.js
 node tests/check-version.test.js
 node tests/shim.test.js
+node tests/skill-rules.docs.test.js
 node tests/viewer.smoke.js     # headless Edge/Chrome over CDP; skipped without one
 claude plugin validate .
 ```

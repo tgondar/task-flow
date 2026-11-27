@@ -59,7 +59,9 @@ Every rule below comes from something that went wrong, or nearly did, in them.
   the shape of an exception, never a target.
 - **The ceiling is three.** Three decisions waiting is when an attended run stops
   to ask — not five, and not rounded up because the run is going well.
-- **Security-harden and review are asked, not automatic (§4c step 2).** They used
+- **Security-harden and review are asked, not automatic (§4c step 2)** — reversed
+  on 2026-11-27, see "Security-harden and review always run; performance is not
+  asked" below. They used
   to always run before the PR. The user wanted to deploy faster and check later,
   so now there is a question — run them now, or skip to the PR and run
   `/task-flow review <PR number>` (§0c) afterward. This question is the one
@@ -654,6 +656,35 @@ own recent runs.
 - **Why bother, given MIT only asks for a kept notice.** The maintainer judged the
   dependency not worth carrying once the viewer had its own identity; this was his
   call to make, not a compliance problem being worked around.
+
+## Security-harden and review always run; performance is not asked (2026-11-27)
+
+- **The harden/review question of §4c step 2 is gone; both passes always run in a
+  local run, attended or auto.** The idea behind this change measured the question
+  on 2026-11-27: asked 20 times across three projects (Prumo 15 runs, FleetManager
+  4, task-flow 1), answered "later" 19 times and "run now" once. A question with
+  the same answer nineteen times out of twenty is not a decision, it is a stop; and
+  it was the one question that still held an auto run waiting. The user then
+  decided, the same day, that security-harden and review run every time, before
+  the PR. This reverses "Security-harden and review are asked, not automatic"
+  (above, in "The gate and the stops"), and with it the one exception to "no
+  `AskUserQuestion` in an auto run": an auto run now asks nothing, in any phase.
+- **Performance is not asked either (Q1 of that run).** It used to be a follow-up
+  of the same question, attended runs only. Keeping it once its parent was gone
+  would have turned it into a stop in every attended run, where it used to come
+  only after a "yes" (about 1 in 20). It now runs only when the spec or the plan
+  names a performance requirement, in both modes; when it does not run, that is a
+  fact for the PR body's `## Found`, not a decision to review.
+- **`/task-flow review <PR number>` stays as it is.** It no longer answers a
+  question nobody asks, but it still hardens and reviews a PR that did not come
+  through a local run's §4c — opened by hand, or by a run that skipped it before
+  this change. `paperclip` is untouched.
+- **A run that was waiting on the old question when this landed** resumes without
+  it and goes on to the harden; an old "later" in its questions file or log does
+  not skip it. There is no `state.json` migration: `phase` means what it meant.
+- **Anchored in code by `tests/skill-rules.docs.test.js`**, which fails when the
+  question, the auto exception or a "planned stop" comes back into `SKILL.md`,
+  `CLAUDE.md` or `README.md`, or when this section goes.
 
 ## Review: pre-existing findings, and the repository's `REVIEW.md` (2026-11-03)
 

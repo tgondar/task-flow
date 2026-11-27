@@ -15,10 +15,10 @@ shows where every run is.
 
 - **Starts from a refined idea**, never from nothing: a run needs an idea document
   in the docs folder before it begins.
-- **One planned stop** — whether to run security-harden and review now or check
-  later with `/task-flow review <PR number>`. Everything else is decided, written
-  into a decision log, and counted; after three decisions that only a person can
-  take, an attended run stops and asks.
+- **Security-harden and review always run** before the PR, in every mode, unasked;
+  `/task-flow review <PR number>` runs them against a PR opened some other way.
+  Everything else is decided, written into a decision log, and counted; after
+  three decisions that only a person can take, an attended run stops and asks.
 - **Auto mode** for long runs: nothing stops it, and the PR carries every decision
   it took without asking.
 - **Security tests on every task**, written by a security-auditor subagent on that
