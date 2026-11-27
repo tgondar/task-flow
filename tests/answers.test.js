@@ -134,6 +134,43 @@ function project() {
   check('A10 submissions are taken oldest first; a later answer to a closed question is not taken, the rest is', data.items.find((i) => i.id === 'Q2').answer.status === 'ok' && data.items.find((i) => i.id === 'Q1').answer.status === 'ok' && outcome.notTaken.some((n) => n.questionId === 'Q2' && /already/.test(n.why)) && data.consumedSubmissions.join() === [first, second].join(), JSON.stringify(outcome));
 }
 
+{
+  // T5: an item standing-answers.js promote marked with promotedAs does not stop
+  // a consume, and the mark survives the write-back.
+  const p = project();
+  const data = questions();
+  data.items[2].promotedAs = 'R4';
+  fs.writeFileSync(p.questionsPath, JSON.stringify(data));
+  p.submit([{ questionId: 'Q2', status: 'ok' }]);
+  let outcome = { taken: [] };
+  let error = '';
+  try {
+    outcome = consume({ projectDir: p.projectDir, slug: 'demo' });
+  } catch (e) {
+    error = e.message;
+  }
+  const after = p.readQuestions();
+  check('A10b a questions.json with promotedAs is consumed, and the mark is kept', !error && outcome.taken.length === 1 && after.items[1].answer && after.items[1].answer.status === 'ok' && after.items[2].promotedAs === 'R4', error || JSON.stringify(after.items));
+}
+
+{
+  // ...and one whose mark is not an id is refused like any invalid questions.json.
+  const p = project();
+  const data = questions();
+  data.items[2].promotedAs = 'R4; FORGEDMARK';
+  fs.writeFileSync(p.questionsPath, JSON.stringify(data));
+  const before = fs.readFileSync(p.questionsPath, 'utf8');
+  p.submit([{ questionId: 'Q2', status: 'ok' }]);
+  let message = '';
+  try {
+    consume({ projectDir: p.projectDir, slug: 'demo' });
+  } catch (error) {
+    message = error.message;
+  }
+  check('A10c SECURITY a promotedAs in another shape: nothing taken, the file untouched, the value never echoed',
+    /promotedAs/.test(message) && !message.includes('FORGEDMARK') && fs.readFileSync(p.questionsPath, 'utf8') === before, message);
+}
+
 // --- what is refused -------------------------------------------------------------
 
 function refused(label, answers, overrides, options) {

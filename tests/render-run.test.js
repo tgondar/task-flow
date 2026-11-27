@@ -1069,6 +1069,28 @@ const readFeed = (projectDir) => JSON.parse(fs.readFileSync(feedFile(projectDir)
 }
 
 {
+  // T5: standing-answers.js promote marks an item with promotedAs. The renderer
+  // must keep generating from that questions.json (and pass the mark on whole),
+  // and must still drop one whose mark is not an id.
+  const f = fixture({});
+  const runDir = path.join(f.projectDir, 'docs', 'pipeline', 'demo');
+  const withMark = (promotedAs) => JSON.stringify({
+    version: 1, slug: 'demo', items: [{ id: 'Q1', kind: 'question', title: 'Which currency?', options: [{ id: 'eur', label: 'EUR' }],
+      answer: { status: 'ok', comment: 'EUR always.', via: 'conversation', at: '2026-09-27T20:15:00Z' }, promotedAs }],
+  });
+  fs.writeFileSync(path.join(runDir, 'questions.json'), withMark('R3'));
+  renderAll({ projectDir: f.projectDir });
+  const marked = readFeed(f.projectDir).runs[0].questions;
+  check('F9b a questions.json with promotedAs R<n> still renders as data, the mark kept', marked.source === 'json' && marked.items[0].promotedAs === 'R3', JSON.stringify(marked));
+
+  fs.writeFileSync(path.join(runDir, 'questions.json'), withMark('R3; FORGEDMARK'));
+  renderAll({ projectDir: f.projectDir });
+  const forged = readFeed(f.projectDir).runs[0].questions;
+  check('F9c SECURITY a promotedAs in another shape makes the questions invalid, its value never in the feed',
+    forged.source === 'invalid' && !('items' in forged) && !fs.readFileSync(feedFile(f.projectDir), 'utf8').includes('FORGEDMARK'), JSON.stringify(forged));
+}
+
+{
   const f = fixture({ state: { status: 'weird<b>', mode: 'AUTO ', pr: 'javascript:alert(1)', branch: 'x\n## forged', updated: 'yesterday', buildCursor: '<T1>' } });
   renderAll({ projectDir: f.projectDir });
   const run = readFeed(f.projectDir).runs[0];
