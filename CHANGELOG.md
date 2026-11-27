@@ -5,6 +5,37 @@ Every change to `plugin/` raises the `version` in
 (`scripts/check-version.js` checks both in CI). Compare the version `/plugin`
 shows with the top entry to know whether your install is current.
 
+## 2.4.0 — 2026-11-27
+
+- **Each loop is measured** (one execution of one agent): the SubagentStart hook
+  writes a start event per subagent of a live run to
+  `<stateDir>/<run>/loop-events.jsonl`, and the close joins it with the loop's
+  transcript (`agent-<id>.jsonl`: tokens, duration, effort) into one closed-shape
+  row in `<stateDir>/loops.jsonl`, the same shape for task-flow and paperclip.
+- **`metrics.js loop-result`**: the orchestrator records each loop's result in
+  closed values after every subagent (§1b); the phase and task of the result win
+  over the start's. The **Stop hook asks** for the result of loops the run has
+  moved past, at most twice per set of ids, then gives up — information, not a
+  gate.
+- **"Loops" section** on the run page: one line per loop, and tokens and
+  durations per phase.
+- **`metrics.js time`** computes the run's time row from the orchestrator's own
+  transcripts (one row for the run window), and **`metrics.js summary`** prints
+  the cost block for the PR body, written when the PR opens. Tokens only on the
+  task-flow side; no price table.
+- **Paperclip**: `send-to-paperclip.js` keeps the hand-off issue's id as
+  `paperclipIssueId` in `state.json`. `metrics.js paperclip --issue N`, run by
+  hand, reads the paperclip API through a bounded, read-only request and records
+  its runs as loop rows (cost kept as US dollar cents, as the API reports it; no
+  model, since the API reports none). The API's shape was measured on
+  2026-11-27.
+- **`metrics.js backfill`**, run by hand only, turns earlier subagent transcripts
+  into loop rows (`backfill: true`, `unknown` where time alone cannot tell).
+- Every new file and response is untrusted input: closed shapes, nothing echoed,
+  every failure fails open. `TASK_FLOW_METRICS=off` switches all of it off. The
+  `.gitignore` note (§8b) now also covers `loops.jsonl` and
+  `*/loop-events.jsonl`; the script never edits a `.gitignore`.
+
 ## 2.3.0 — 2026-11-27
 
 - **Security-harden and review always run** before the PR, unasked, in both
