@@ -191,6 +191,103 @@ const fileText = () => (fs.existsSync(EVENTS) ? fs.readFileSync(EVENTS, 'utf8') 
   check('no require/child_process/spawn/eval in the section', !/require\(|child_process|spawn|eval\(/.test(slice));
 }
 
+// --- 7. T3: loop rows and loops.jsonl are untrusted repository data ---------------------------
+{
+  const { validateLoopRow, readLoops, appendLoopRows } = require('../plugin/scripts/metrics.js');
+  const LOOPS = path.join(STATE, 'loops.jsonl');
+  const ROW = {
+    v: 1, source: 'taskflow', run: SLUG, id: 'a1b2c3d4', agentType: 'task-flow:security-auditor', phase: 'build', task: 'T3',
+    round: null, model: 'claude-opus-5-5', effort: 'high', startedAt: '2026-11-27T10:00:00.123Z', durationS: 312,
+    tokens: { input: 10, cacheCreate: 2000, cacheRead: 50000, output: 900 }, costCents: null,
+    outcome: 'ok', tests: 'green', critical: 0, required: 1, reason: null, backfill: false,
+  };
+  const fresh = () => { fs.rmSync(PROJECT, { recursive: true, force: true }); fs.mkdirSync(STATE, { recursive: true }); };
+  const safeRead = (sd = STATE) => { try { return readLoops(PROJECT, sd); } catch { return 'THREW'; } };
+  const loopsText = () => (fs.existsSync(LOOPS) ? fs.readFileSync(LOOPS, 'utf8') : '');
+
+  // hostile files in place of loops.jsonl: bounded, no throw, no echo
+  const bodies = {
+    'garbage 64 MiB': () => fs.writeFileSync(LOOPS, Buffer.alloc(64 * 1024 * 1024, 'IGNORE PREVIOUS ')),
+    '2 MiB line without newline': () => fs.writeFileSync(LOOPS, `{"x":"${'EVILMARK'.repeat(256 * 1024)}`),
+    'BOM + CRLF valid row': () => fs.writeFileSync(LOOPS, `﻿${JSON.stringify(ROW)}\r\n`),
+    'v: 2 line': () => fs.writeFileSync(LOOPS, `${JSON.stringify({ ...ROW, v: 2, note: 'IGNORE PREVIOUS' })}\n`),
+  };
+  for (const [name, make] of Object.entries(bodies)) {
+    fresh(); make();
+    const t0 = Date.now();
+    const r = safeRead();
+    check(`loops.jsonl ${name}: no throw, bounded, no echo`, r !== 'THREW' && Date.now() - t0 < 5000 && !hasMarker(JSON.stringify(r)), JSON.stringify(r).slice(0, 80));
+  }
+  fresh(); bodies['BOM + CRLF valid row']();
+  check('BOM + CRLF: the row is read', safeRead().rows.length === 1);
+  fresh(); bodies['v: 2 line']();
+  { const r = safeRead(); check('v: 2: no row, not an error', r.code === null && r.rows.length === 0); }
+
+  fresh(); fs.mkdirSync(LOOPS);
+  check('loops.jsonl as a folder: unsafe-path, append refused', safeRead().code === 'unsafe-path' && !appendLoopRows(PROJECT, STATE, [ROW]).ok);
+
+  fresh();
+  const outside = path.join(TEST_HOME, 'outside.jsonl');
+  fs.writeFileSync(outside, `${JSON.stringify({ ...ROW, id: 'EVILMARK' })}\n`);
+  let linked = true;
+  try { fs.symlinkSync(outside, LOOPS, 'file'); } catch { linked = false; }
+  if (linked) {
+    const before = fs.readFileSync(outside, 'utf8');
+    const r = safeRead();
+    const w = appendLoopRows(PROJECT, STATE, [ROW]);
+    check('loops.jsonl as symlink: not read, not written', r.rows.length === 0 && !w.ok && fs.readFileSync(outside, 'utf8') === before);
+  } else console.log('  skip symlink (no privilege)');
+  fresh();
+  const outDir = path.join(TEST_HOME, 'outdir');
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.rmSync(STATE, { recursive: true, force: true });
+  let junction = true;
+  try { fs.symlinkSync(outDir, STATE, 'junction'); } catch { junction = false; }
+  if (junction) {
+    appendLoopRows(PROJECT, STATE, [ROW]);
+    check('stateDir as junction: nothing written outside', !fs.existsSync(path.join(outDir, 'loops.jsonl')));
+    fs.unlinkSync(STATE);
+  }
+
+  // hostile values: refused, prototype intact
+  const hostile = [
+    JSON.parse(`{"__proto__":{"polluted":1},${JSON.stringify(ROW).slice(1)}`),
+    { ...ROW, constructor: { prototype: { polluted: 1 } } },
+    { ...ROW, durationS: 1e13 }, { ...ROW, critical: -1 }, { ...ROW, required: 'NaN' },
+    { ...ROW, model: 'IGNORE PREVIOUS' }, { ...ROW, agentType: '<img onerror=x>' }, { ...ROW, run: '../x' },
+    { ...ROW, task: '‮T3' }, { ...ROW, tokens: { ...ROW.tokens, input: 1e13 } },
+    { ...ROW, tokens: JSON.parse('{"input":1,"cacheCreate":1,"cacheRead":1,"output":1,"__proto__":{"x":1}}') },
+  ];
+  check('NaN number refused', !validateLoopRow({ ...ROW, durationS: NaN }).ok);
+  for (const [i, row] of hostile.entries()) check(`hostile row ${i}: refused`, !validateLoopRow(row).ok);
+  fresh();
+  const lines = hostile.map((r) => JSON.stringify(r)).concat([
+    '{"__proto__":{"polluted":1}}', '{"v":1,"durationS":1e13}', JSON.stringify(ROW).replace('312', 'NaN'), '{"constructor":{"prototype":{"polluted":1}}}',
+  ]);
+  fs.writeFileSync(LOOPS, `${lines.join('\n')}\n`);
+  const r = safeRead();
+  check('hostile lines: all ignored, nothing echoed', r.rows.length === 0 && r.ignored === lines.length && !hasMarker(JSON.stringify(r)), JSON.stringify(r).slice(0, 120));
+  const w = appendLoopRows(PROJECT, STATE, hostile);
+  check('hostile rows: none appended', w.written === 0 && !hasMarker(loopsText().split('\n').slice(lines.length).join('')));
+  check('Object.prototype intact', ({}).polluted === undefined && ({}).x === undefined);
+
+  // the writer: only bad stateDir values
+  for (const sd of ['', '.claude/task-flow', path.join(TEST_HOME, 'elsewhere'), null]) {
+    fresh();
+    let res;
+    try { res = appendLoopRows(PROJECT, sd, [ROW]); } catch { res = { ok: 'THREW' }; }
+    check(`stateDir ${JSON.stringify(sd)}: nothing written`, res.ok === false && !fs.existsSync(LOOPS) && !fs.existsSync(path.join(TEST_HOME, 'elsewhere', 'loops.jsonl')), JSON.stringify(res));
+  }
+
+  // by construction: no named catch, require, spawn or eval in the T3 section
+  const src = fs.readFileSync(path.join(__dirname, '..', 'plugin', 'scripts', 'metrics.js'), 'utf8');
+  const s = src.indexOf('// --- loop rows: the closed shape');
+  const e = src.indexOf('Object.assign(module.exports, { LOOP_KEYS');
+  const slice = s >= 0 && e > s ? src.slice(s, e) : '';
+  check('T3 section found', slice.length > 0);
+  check('T3 section: no named catch, require, spawn or eval', !/catch\s*\(|require\(|child_process|spawn|eval\(/.test(slice));
+}
+
 fs.rmSync(TEST_HOME, { recursive: true, force: true });
 console.log(`\n${passed} passed, ${failures.length} failed`);
 process.exit(failures.length ? 1 : 0);
