@@ -21,7 +21,9 @@ process.env.HOME = TEST_HOME;
 process.env.USERPROFILE = TEST_HOME;
 
 const MODULE = path.join(__dirname, '..', 'plugin', 'scripts', 'send-to-paperclip.js');
-const { readArtifact, findProjectItemId, flipStatus, issueTitle, cleanTitle, issueBody } = require(MODULE);
+const {
+  readArtifact, findProjectItemId, flipStatus, issueTitle, cleanTitle, issueBody, paperclipIssueIdOf,
+} = require(MODULE);
 const CONFIG_MODULE = path.join(__dirname, '..', 'plugin', 'scripts', 'config.js');
 const { trustPaperclipUrl, isPaperclipUrlTrusted, parsePaperclipOrigin } = require(CONFIG_MODULE);
 
@@ -549,10 +551,101 @@ check('a valid paperclip.projectId passes the check (the run goes on to the requ
   assert(/paperclip request failed/.test(result.stderr), `expected to reach the request, got: ${result.stderr}`);
 });
 
-// --- summary -----------------------------------------------------------------
+// --- paperclipIssueId: the id the POST response gives back ------------------
 
-// readArtifact's own fail() sets process.exitCode as a side effect when called
-// directly (in-process, not spawned) above; it must not leak into this file's
-// own exit code once every check has actually passed.
-process.exitCode = failures.length ? 1 : 0;
-process.stdout.write(`\n${passed} passed, ${failures.length} failed\n`);
+const ISSUE_UUID = '0f8fad5b-d9cb-469f-a165-70867728950e';
+
+check('paperclipIssueIdOf takes the UUID id when it has that shape', () => {
+  assert(paperclipIssueIdOf({ id: ISSUE_UUID, identifier: 'GON-12' }) === ISSUE_UUID, 'a UUID id must win');
+});
+
+check('paperclipIssueIdOf falls back to a GON-12 identifier when the id is not a UUID', () => {
+  assert(paperclipIssueIdOf({ id: 'not-a-uuid', identifier: 'GON-12' }) === 'GON-12', 'identifier fallback');
+  assert(paperclipIssueIdOf({ identifier: 'GON-12' }) === 'GON-12', 'identifier fallback without an id');
+});
+
+check('paperclipIssueIdOf gives nothing when neither field has its shape', () => {
+  for (const issue of [{ id: 42, identifier: 'gon-1' }, { identifier: 'GON-0' }, {}, null, 'GON-12', []]) {
+    assert(paperclipIssueIdOf(issue) === undefined, `${JSON.stringify(issue)} must give nothing`);
+  }
+});
+
+// End to end against a local stand-in for paperclip: the script's own POST, its
+// own state.json write. `gh` is kept off PATH so the board flip fails at once
+// (a warning, as on a machine without gh) instead of calling GitHub.
+const { spawn } = require('child_process');
+const http = require('http');
+
+function handOffAgainst(responseBody) {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(201, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(responseBody));
+      });
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const url = `http://127.0.0.1:${server.address().port}`;
+      const { project, slug } = makeRun({
+        slug: 'demo',
+        state: { paperclipIssue: 7 },
+        extraConfig: { ...VALID_PAPERCLIP, paperclip: { ...VALID_PAPERCLIP.paperclip, url } },
+      });
+      const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PATH'));
+      Object.assign(env, { PATH: temp('nopath'), HOME: TEST_HOME, USERPROFILE: TEST_HOME, PAPERCLIP_TOKEN: 'test-token' });
+      const child = spawn(process.execPath, [MODULE, '--project-dir', project, '--slug', slug, '--github-issue', '7'], { env });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.on('error', (error) => { server.close(); reject(error); });
+      child.on('close', (status) => {
+        server.close();
+        const state = JSON.parse(fs.readFileSync(path.join(project, '.claude', 'task-flow', slug, 'state.json'), 'utf8'));
+        resolve({ status, stdout, stderr, state });
+      });
+    });
+  });
+}
+
+async function checkAsync(name, fn) {
+  try {
+    await fn();
+    passed += 1;
+    process.stdout.write(`  ok    ${name}\n`);
+  } catch (error) {
+    failures.push({ name, error });
+    process.stdout.write(`  FAIL  ${name}\n        ${error.message}\n`);
+  }
+}
+
+(async () => {
+  await checkAsync('the hand-off records the UUID id from the response as paperclipIssueId', async () => {
+    const result = await handOffAgainst({ id: ISSUE_UUID, identifier: 'GON-12' });
+    assert(result.status === 0, `hand-off must succeed, got ${result.status}: ${result.stderr}`);
+    assert(result.state.paperclipIssueId === ISSUE_UUID, `expected the UUID, got ${JSON.stringify(result.state.paperclipIssueId)}`);
+    assert(result.state.status === 'blocked' && result.state.outcome === 'handed-off', 'the transition still happens');
+  });
+
+  await checkAsync('the hand-off records a GON-12 identifier when the id is not a UUID', async () => {
+    const result = await handOffAgainst({ id: 'not-a-uuid', identifier: 'GON-12' });
+    assert(result.status === 0, `hand-off must succeed, got ${result.status}: ${result.stderr}`);
+    assert(result.state.paperclipIssueId === 'GON-12', `expected GON-12, got ${JSON.stringify(result.state.paperclipIssueId)}`);
+  });
+
+  await checkAsync('a response with no id of either shape hands off without the field', async () => {
+    const result = await handOffAgainst({ id: 42, identifier: 'gon-1' });
+    assert(result.status === 0, `hand-off must succeed, got ${result.status}: ${result.stderr}`);
+    assert(!('paperclipIssueId' in result.state), 'no paperclipIssueId key at all');
+    assert(result.state.status === 'blocked' && result.state.outcome === 'handed-off', 'the transition still happens');
+  });
+
+  // --- summary ---------------------------------------------------------------
+
+  // readArtifact's own fail() sets process.exitCode as a side effect when called
+  // directly (in-process, not spawned) above; it must not leak into this file's
+  // own exit code once every check has actually passed.
+  process.exitCode = failures.length ? 1 : 0;
+  process.stdout.write(`\n${passed} passed, ${failures.length} failed\n`);
+})();

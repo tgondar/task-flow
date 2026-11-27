@@ -51,6 +51,7 @@ node tests/metrics.tokens.test.js
 node tests/metrics.time.test.js
 node tests/metrics.time.security.test.js
 node tests/check-version.test.js
+node tests/send-to-paperclip.test.js
 node tests/shim.test.js
 node tests/skill-rules.docs.test.js
 node tests/viewer.smoke.js     # headless Edge/Chrome over CDP; skipped without one
