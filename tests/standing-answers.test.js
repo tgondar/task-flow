@@ -341,6 +341,14 @@ const controlLines = {
   'a word joiner splitting the delimiter name': `standing⁠-answers ${MARK}`,
   'a BOM in the middle of a line': `a﻿${MARK}`,
   'a soft hyphen': `ma­ilto:${MARK}`,
+  // D3: the rest of the format characters (category Cf) and the other invisible
+  // ones that are not Cf. Each splits a pattern the way the ones above do.
+  'a Unicode tag character splitting a URL': `https:\u{E0041}//evil.example/${MARK}`,
+  'an interlinear annotation anchor': `www\uFFF9.${MARK}.example`,
+  'a combining grapheme joiner': `mail\u034Fto:${MARK}`,
+  'a variation selector (VS16)': `https:\uFE0F//evil.example/${MARK}`,
+  'a variation selector from the supplementary range': `standing\u{E0100}-answers ${MARK}`,
+  'a Hangul filler': `www\u3164.${MARK}.example`,
 };
 for (const [what, text] of Object.entries(controlLines)) {
   check(`SECURITY a line with ${what} is rejected by line number, its text never echoed`, () => {
@@ -367,6 +375,10 @@ const suspiciousTexts = {
   'a checked checkbox': `- [x] ${MARK}`,
   'a markdown link': `[click](${MARK})`,
   'a wiki link': `[[${MARK}]]`,
+  // D3: compatibility forms the model reads as the ASCII ones. The patterns also
+  // run on the NFKC form of each field (never used for parsing).
+  'a fullwidth https URL': `see \uFF48\uFF54\uFF54\uFF50\uFF53\uFF1A\uFF0F\uFF0Fevil.example/${MARK}`,
+  'a fullwidth www. address': `www\uFF0E${MARK}.example`,
 };
 for (const [what, text] of Object.entries(suspiciousTexts)) {
   check(`SECURITY an entry with ${what} is suspicious: not used, reported by id, never echoed`, () => {
@@ -385,6 +397,15 @@ check('ordinary text with a single backslash, a colon or a slash is not suspicio
   const r = sa.read({ projectDir: p.projectDir });
   assertEqual(r.entries.map((e) => e.id), ['R1'], 'entries');
   assertEqual(r.suspicious, [], 'suspicious');
+});
+
+check('D3 a PT-PT rule with 1º, accents, € and an em dash is accepted as written', () => {
+  const rule = 'O 1º pagamento é sempre em € — nunca em dólares';
+  const p = project([entry(1, rule, 'pagamento à cabeça, ação já'), ''].join('\n'));
+  const r = sa.read({ projectDir: p.projectDir });
+  assertEqual(r.rejected, [], 'rejected');
+  assertEqual(r.suspicious, [], 'suspicious');
+  assertEqual(r.entries.map((e) => e.rule), [rule], 'rule kept as written, not normalised');
 });
 
 // --- limits ------------------------------------------------------------------------

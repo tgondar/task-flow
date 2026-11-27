@@ -74,13 +74,19 @@ const REPLACES = /^(?:substitui|replaces) R([1-9][0-9]{0,3})$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const RESERVED = /[·«»]/;
 
-/** Invisible format characters questions.js CONTROL lets through: soft hyphen,
- *  Arabic letter mark, zero-width space/joiners, LRM/RLM, word joiner and
- *  invisible operators, a BOM past the start. Here they matter more than in a
- *  questions file: one inside "https://" or "standing-answers" stops the
- *  SUSPICIOUS patterns from matching while the model still reads the URL. Kept
- *  local, not added to CONTROL, so the questions files' rules do not change. */
-const INVISIBLE = /[­؜᠎​-‏⁠-⁤﻿]/;
+/** Invisible characters questions.js CONTROL lets through. Here they matter
+ *  more than in a questions file: one inside "https://" or "standing-answers"
+ *  stops the SUSPICIOUS patterns from matching while the model still reads the
+ *  URL. \p{Cf} is every format character - soft hyphen, Arabic letter mark,
+ *  Mongolian vowel separator, zero-width space/joiners, LRM/RLM, word joiner and
+ *  invisible operators, a BOM past the start, the interlinear annotation marks,
+ *  the Unicode tag characters - so a name list cannot fall behind the next
+ *  Unicode version (D3). The rest are invisible but not Cf: the combining
+ *  grapheme joiner, the variation selectors (both ranges) and the Hangul
+ *  fillers, which render as blank letters. Kept local, not added to CONTROL, so
+ *  the questions files' rules do not change. No allowlist: a PT-PT rule with
+ *  symbols (1º, €, a dash) must still pass. */
+const INVISIBLE = /[\p{Cf}\u034F\u115F\u1160\u3164\uFFA0\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/u;
 
 /** What makes an otherwise well-formed entry suspicious, and the reason given.
  *  `\\` anywhere: a UNC path can sit mid-sentence, and a rule never needs two
@@ -161,7 +167,11 @@ function parsePage(text) {
     if (seen.has(entry.id)) return result.rejected.push({ line: number, why: 'id is already used by an earlier line' });
     seen.add(entry.id);
     for (const [pattern, why] of SUSPICIOUS) {
-      const field = ['rule', 'words'].find((name) => pattern.test(entry[name]));
+      // Also on the NFKC form, so a fullwidth "ｈｔｔｐｓ：／／" or "www．" is still
+      // a URL to the patterns, as it is to the model. Only for this check: the
+      // entry keeps its own text, and parsing never sees the normalised form (a
+      // fullwidth digit in "substitui R1" stays a rejected line, D2).
+      const field = ['rule', 'words'].find((name) => pattern.test(entry[name]) || pattern.test(entry[name].normalize('NFKC')));
       if (field) return result.suspicious.push({ id: entry.id, why: `${field} ${why}` });
     }
     accepted.push(entry);
