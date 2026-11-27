@@ -702,8 +702,9 @@ joint time. Say the estimate in one line.
   splitting sizes the work, it does not cut it — leaving 11.8.2 for later would be
   dropping approved scope (§7.3). The spec covers all the subtasks, and every plan
   task says which subtask it belongs to.
-- **Splitting needs no approval** in either mode, as in §4. Record it as 🔹 in the
-  run's log — the estimate, the subtasks and why — and in `state.json` as
+- **Splitting needs no approval** in either mode, as in §4. It is a fact, not a
+  decision (§6): record it in the run's log without a ⚠️ marker — the estimate,
+  the subtasks and why — and under `## Found`, and in `state.json` as
   `"size": { "points": ">8", "split": ["11.8.1", "11.8.2"] }` (or `{ "points": 5 }`
   when no split was needed), so a resumed run does not size it twice.
 
@@ -762,10 +763,17 @@ the task list, sees or gets, it is a business rule; otherwise it is code.
    | 4 | `task-flow:second-opinion-xhigh` | xhigh |
    | 5 | `task-flow:second-opinion-max` | max |
 
-**It ends with an answer** when a document answers the question explicitly
-(quote it), or when the second opinion returns `Verdict: agree`. Write it into the
-run's `questions.json` as a `decision` (*Decisions taken — to review*), with the
-round it ended in and the passages it rests on in `rounds`. **It does not count.**
+**It ends with an answer** in one of two ways, and they are not recorded the same.
+**Neither counts.**
+
+- **A document answers it explicitly.** Quote it. The answer goes into the
+  phase's `_log.md` with the round, the document and the quoted passage — and
+  nowhere else: not into `questions.json`, not into `## Needs you`. The quote is
+  what keeps it checkable: an answer "from a document" with no quoted passage in
+  the log is not closed this way — it is a decision, as below.
+- **The second opinion returns `Verdict: agree`**, with no document that says it.
+  Write it into the run's `questions.json` as a `decision` (*Decisions taken — to
+  review*), with the round it ended in and the passages it rests on in `rounds`.
 
 **After round 5 without one** — the documents are silent or contradict each
 other, and the second opinion still disagrees — it is the user's. Write it as a
@@ -859,6 +867,13 @@ Every counted decision is written there **by the orchestrator** — a subagent
 returns its ⚠️ list, you write it — and `pendingDecisions` in `state.json` is
 incremented to match. Both files stay in the repository's `stateDir`: they are
 state, not documents.
+
+**One list to review, and it is this one.** Every decision for the user to review
+is listed in `questions.json` — and so on its page and under `## Needs you`
+(§8b), both built from it — and nowhere else. The `_log.md` still keeps the
+decision's full entry (the template in §6) as the audit trail of how it was
+taken, and cites the item's id, `Q<n>`: it is the record, not a second list to
+review. A fact (§6) is in neither list.
 
 The decision logs do **not** move. They stay beside their artifact in the docs
 folder, as `<artifact>_log.md`.
@@ -1000,7 +1015,8 @@ work:
   independently verifiable: its own tests, its own commit, its own security pass.
 - **Splitting is yours.** It needs no approval and is not a question under §3,
   because it does not change scope: the subtasks together cover exactly what the
-  parent did. Log it in `_log.md` as 🔹, with the parent's estimate and the split.
+  parent did. It is a fact, not a decision (§6): log it in `_log.md` without a ⚠️
+  marker, with the parent's estimate and the split, and list it under `## Found`.
 - **Smaller is better.** A small task is one the user and you understand the same
   way, and one less likely to go wrong. Between two values, take the larger — and
   if that tips it over 8, split.
@@ -1010,7 +1026,8 @@ work:
 - **A task that turns out bigger mid-build** (what is left of it is clearly above
   8) is split the same way from where it stands: the landed part keeps the
   parent's id and is ticked, the rest becomes `<id>.1`, `<id>.2`, and `buildCursor`
-  moves to the first of them. Log it, with what made the estimate wrong.
+  moves to the first of them. Log it as a fact (§6), with what made the estimate
+  wrong.
 
 **Review findings do not loop back.** A run ends at `review`. Blocking findings
 seed a *new* run with the PR as its input — and that new run needs its own refined
@@ -1099,7 +1116,7 @@ and the §4d review run in every local run, attended or auto, before the PR exis
    requirement**, in both modes, and never asked. Then spawn
    `agent-skills:web-performance-auditor` when the target is a web front end,
    otherwise `general-purpose` with `agent-skills:performance-optimization`.
-   When neither names one, it does not run, and that is a fact, not a decision:
+   When neither names one, it does not run, and that is a fact, not a decision (§6):
    it goes under `## Found` in the PR body (§8b), never as a ⚠️ entry and never
    as a question.
 
@@ -1182,7 +1199,10 @@ way an auto run always behaved at this step.
 1. Summarise the plan: how many tasks, which layers, whether there is a database
    migration, what the version bump will be. Put the summary, whole, into the
    plan's `_log.md` and the PR body — the PR is where the user reads it, since
-   nobody is asked to approve it live.
+   nobody is asked to approve it live. When the plan's points add up to more than
+   the §2c pre-estimate, that difference is a fact (§6): it goes into the log
+   without a ⚠️ marker and under `## Found`, not into the summary and not into
+   `questions.json`.
 2. Write `approvedBy` and `approvedAt` into `state.json`, then continue into the
    build **in the same turn**. `approvedBy` is `"attended (/task-flow)"` or
    `"auto (/task-flow auto)"` depending on `mode` — a record of which mode the run
@@ -1253,6 +1273,15 @@ disables it.
   actually decided it), 🔹 routine (a mechanism of implementation). The ⚠️ entries
   are the user's audit index — inflating them empties them, and at a ceiling of
   three they cost a stop as well.
+- **Three warnings are facts, not decisions — exactly these three, in either
+  mode:** (1) performance did not run, because neither the spec nor the plan
+  names a performance requirement (§4c step 3); (2) the plan's points add up to
+  more than the run's pre-estimate (§2c), said at §5 step 1; (3) how the work was
+  split into tasks — the granularity of the breakdown, a split above 8 included
+  (§2c, §4 "Task size"). A fact goes into the log without a ⚠️ marker and under
+  `## Found` in the PR body (§8b). It never goes into `questions.json`, under
+  `## Needs you`, or into `pendingDecisions`: there is nothing in it for the user
+  to overrule. Anything else the run settles on its own is still a decision (§3).
 - **Version bump** per `defaultBump` across `versionFiles`, no BOM. If it looks
   like a minor or major, that is a blocker (§7).
 - **Branch** from `branches.from` with the `branches.prefix` before the first
@@ -1464,20 +1493,23 @@ and those names should not be.
 Four headings, in this order, in `language`, in both modes:
 
 1. **`## Needs you`** — everything waiting on the user, in this order: the one
-   thing to look at first; anything **URGENT**; every ⚠️ decision they may want to
-   overrule, in the order they were taken, each with what was chosen, what else was
-   on the table, why this one, and what changes if they overrule it; every Critical
-   or Required review finding you declined to fix, with why, and every
-   pre-existing Critical the review found (§4d); every `- [ ]`
-   still open in the questions file. If nothing, write *"Nothing."* — never leave
+   thing to look at first; anything **URGENT**; every decision in this run's
+   `questions.json` (§3) they may want to overrule — the one list to review; a
+   fact (§6) is not one — in the order they were taken, each with what was
+   chosen, what else was on the table, why this one, and what changes if they
+   overrule it; every Critical or Required review finding you declined to fix,
+   with why, and every pre-existing Critical the review found (§4d); every
+   `- [ ]` still open in the questions file. If nothing, write *"Nothing."* — never leave
    the heading out. (Red tests are not here: in the one mode that can open a PR
    with them, §8c puts them above this heading.)
 2. **`## Changed`** — which idea artifact the run started from, the artifacts
    written, the commits and the PR, the version bump, the review's verdict and the
    fixes it led to.
 3. **`## Found`** — what the run learned that is not a change: deferred
-   Optional/Nit findings, corner cases spotted but not tested (§4b), facts measured
-   along the way, anything a subagent could not confirm and you could not either.
+   Optional/Nit findings, corner cases spotted but not tested (§4b), the three facts
+   of §6 that apply (performance not run, the plan above its pre-estimate, how the
+   tasks were split), facts measured along the way, anything a subagent could not
+   confirm and you could not either.
 4. **`## How to revert`** — what undoes this PR once it is merged, written for
    the person who has to do it in a hurry: by default *"Revert the merge commit"*,
    and then, by name, everything a revert does **not** undo — a database migration
@@ -1497,9 +1529,9 @@ PR is the only thing the user will read.
 
 **The decisions go into the PR body inline, not as a link.** `## Needs you` is
 filled exactly as §8b says, with one insertion: right after the **URGENT** items,
-**the plan summary from §5 step 1**. Every ⚠️ entry is written out in full — what
-got fixed, what else was on the table, why this one, and what changes if they
-overrule it.
+**the plan summary from §5 step 1**. Every decision of `questions.json` is written
+out in full — what got fixed, what else was on the table, why this one, and
+what changes if they overrule it.
 
 The questions file and the `_log.md` files stay the record of the run — this is the
 copy they can read without leaving the PR. It is a copy, not a move: nothing is

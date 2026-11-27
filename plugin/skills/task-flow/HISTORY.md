@@ -657,6 +657,35 @@ own recent runs.
   dependency not worth carrying once the viewer had its own identity; this was his
   call to make, not a compliance problem being worked around.
 
+## Three facts go to "Found"; each decision is listed in one place (2026-11-27)
+
+- **The list to review was full of things that were not decisions.** The idea
+  behind this change measured it on 2026-11-27: 87 of 110 items still waiting in
+  the FleetManager's questions files, 14 of 16 in the Prumo's, and among them
+  about 24 "performance did not run" warnings and 11 "the plan came out above the
+  pre-estimate" ones. Nobody can overrule a fact, so listing it next to real
+  decisions only buried those. Exactly three warnings are now facts (§6): the
+  performance that did not run, the plan above the §2c pre-estimate, and how the
+  tasks were split. They go to the log without a ⚠️ marker and to the PR body's
+  `## Found`, never to `questions.json`, `## Needs you` or `pendingDecisions`.
+  The list is closed at three on purpose: a run that could call anything a fact
+  would have a way to hide a decision from the user.
+- **A question a document answered is not a decision to review.** The loop of §3
+  used to bank it in `questions.json` like one closed by the second opinion's
+  `agree`. When the spec or the task list already says it, there is nothing for
+  the user to overrule; the answer stays in the log with the quoted passage. The
+  quote is the point: without it in the log, "a document said so" would be a way
+  to close a question unseen, so an answer with no quote is still a decision.
+- **Each decision is listed to review in one place: `questions.json` (Q2 of that
+  run).** The same decision used to be a ⚠️ entry in the `_log.md` and an item in
+  the questions file, two lists to read. The log could not be the one to give it
+  up — the user's global rules require the full entry there for every decision
+  taken alone — so the log stays the audit trail and cites the item's `Q<n>`, and
+  `## Needs you` lists the decisions of `questions.json`.
+- **Anchored in code by `tests/skill-rules.docs.test.js`**, which fails when a
+  fact is dropped from the §6 list or a fourth one is added, when §8c talks about
+  performance again, or when §3 and §8b go back to listing decisions twice.
+
 ## Security-harden and review always run; performance is not asked (2026-11-27)
 
 - **The harden/review question of §4c step 2 is gone; both passes always run in a

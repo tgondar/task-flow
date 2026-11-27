@@ -82,6 +82,61 @@ for (const [name, text] of [['SKILL.md', skill], ['CLAUDE.md', claudeMd], ['READ
 check('HISTORY.md has the dated inversion section',
   /\n## Security-harden and review always run; performance is not asked \(2026-11-27\)/.test(history));
 
+// T2 (FR-009): three warnings are facts, not decisions, listed in ONE place.
+// Before 2026-11-27 they were logged as decisions and went to the list to
+// review, which is how the FleetManager ended up with 87 of 110 items waiting
+// there. The paragraph must name exactly these three, their destination (the
+// log without a warning marker, and the PR body's "Found") and the three
+// places a fact never goes; drop one and this fails.
+const s3 = section(skill, '##', '3. ');
+const s4size = section(skill, '###', 'Task size');
+const s5 = section(skill, '##', '5. ');
+const s8b = section(skill, '##', '8b. ');
+const s8c = section(skill, '##', '8c. ');
+const factsStart = skill.indexOf('**Three warnings are facts, not decisions');
+const facts = factsStart < 0 ? '' : skill.slice(factsStart, skill.indexOf('\n- **', factsStart + 1));
+check('section 3 exists', s3.length > 0);
+check('section 4 "Task size" exists', s4size.length > 0);
+check('section 5 exists', s5.length > 0);
+check('section 8b exists', s8b.length > 0);
+check('section 8c exists', s8c.length > 0);
+check('SKILL.md lists the three facts in one paragraph', facts.length > 0);
+check('SKILL.md lists the facts only once', skill.indexOf('**Three warnings are facts, not decisions', factsStart + 1) < 0);
+check('fact 1: performance not run (section 4c)', /\(1\)[^()]*performance[^]*§4c/.test(facts));
+check('fact 2: the plan above the section 2c pre-estimate', /\(2\)[^]*pre-estimate[^]*§2c/.test(facts));
+check('fact 3: how the tasks were split (Task size)', /\(3\)[^]*split[^]*"Task size"/.test(facts));
+check('the facts are exactly three', !/\(4\)/.test(facts));
+check('a fact goes to the log without a warning marker', /without a ⚠️ marker/.test(facts));
+check('a fact goes under ## Found', facts.includes('`## Found`'));
+check('a fact never goes to questions.json, ## Needs you or pendingDecisions',
+  /never[^.]*`questions\.json`[^.]*`## Needs you`[^.]*`pendingDecisions`/.test(facts));
+check('section 4 "Task size": a split is a fact, not a 🔹 entry', !/as 🔹/.test(s4size) && /fact/.test(s4size));
+check('section 2c: a split is a fact, not a 🔹 entry', !/Record it as 🔹/.test(section(skill, '###', '2c. ')));
+check('section 5: a plan above the pre-estimate is a fact', /pre-estimate[^.]*fact/.test(s5));
+check('section 8b: ## Found carries the three facts', /\*\*`## Found`\*\*[^]*three facts/.test(s8b));
+check('section 8c does not put performance under ## Needs you', !/performance/i.test(s8c));
+
+// T2 (FR-010): a question a document closed stays in the log with its quote;
+// only a question closed by the second opinion's agree is a decision to review.
+// The quote is what keeps the document path checkable instead of a shortcut.
+check('section 3: closed by a document goes to the log with the quote, not questions.json',
+  /A document answers it explicitly\.\*\*\s+Quote it[^]*`_log\.md`[^]*not into `questions\.json`/.test(s3));
+check('section 3: no quote in the log means it was not closed by a document', /no quoted passage[^.]*is not closed this way/.test(s3));
+check('section 3: closed by agree is still a decision in questions.json',
+  /`Verdict: agree`[^]*`questions\.json` as a `decision`/.test(s3));
+
+// T2 (FR-011, Q2): every decision to review is listed in one place, questions.json;
+// the _log.md keeps the full entry as the audit trail and cites Q<n>.
+check('section 3: questions.json is the one list to review', /One list to review/.test(s3));
+check('section 3: the log cites the item id Q<n>', /cites the item's id[^.]*`Q<n>`/.test(s3));
+check('section 8b: ## Needs you lists the decisions of questions.json', /every decision in this run's\s+`questions\.json`/.test(s8b));
+check('section 8b: ## Needs you no longer lists "every ⚠️ decision"', !/every ⚠️ decision/.test(s8b));
+check('section 8c: decisions written out from questions.json, not "every ⚠️ entry"', !/Every ⚠️ entry/.test(s8c));
+
+// FR-012: the reason for T2's rules has its own dated section
+check('HISTORY.md has the dated facts/one-list section',
+  /\n## Three facts go to "Found"; each decision is listed in one place \(2026-11-27\)/.test(history));
+
 console.log(`\n${passed}/${passed + failures.length} passed`);
 if (failures.length) {
   console.log(`${failures.length} failing:`);
