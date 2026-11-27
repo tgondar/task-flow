@@ -820,8 +820,11 @@ the task list, sees or gets, it is a business rule; otherwise it is code.
   `questions.json` as a `decision`, as below: the run writes those two itself,
   and could write its answer there and quote it. For a standing answer, cite its
   id with the user's words, its run and its date (`R3`, «…», `<run>`,
-  `yyyy-MM-dd`) — the question then goes nowhere but the log, does not count, and
-  never reaches the user. An entry this run promoted is not a second
+  `yyyy-MM-dd`). The question then also goes under `## Found` (§8b), the
+  entry's id and the question in one line: the page can come with a cloned
+  repository, and an entry the user never wrote must not decide in silence. It
+  does not count, is not a `decision` in `questions.json`, and never reaches the
+  user as a question. An entry this run promoted is not a second
   source: cite the answered item it came from instead. Two entries that
   contradict each other close nothing: the question goes on through the rounds
   as if neither existed. An answered item of this run's `questions.json` (a
@@ -1608,8 +1611,9 @@ Four headings, in this order, in `language`, in both modes:
 3. **`## Found`** — what the run learned that is not a change: deferred
    Optional/Nit findings, corner cases spotted but not tested (§4b), the three facts
    of §6 that apply (performance not run, the plan above its pre-estimate, how the
-   tasks were split), facts measured along the way, anything a subagent could not
-   confirm and you could not either.
+   tasks were split), every question a standing answer closed (§3), one line each
+   with the entry's `R<n>` and the question, facts measured along the way,
+   anything a subagent could not confirm and you could not either.
 4. **`## How to revert`** — what undoes this PR once it is merged, written for
    the person who has to do it in a hurry: by default *"Revert the merge commit"*,
    and then, by name, everything a revert does **not** undo — a database migration

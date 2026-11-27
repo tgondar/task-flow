@@ -238,6 +238,24 @@ check('README: TASK_FLOW_GATE=off disables both hooks',
 check('HISTORY.md has the dated step-2 prose section',
   /\n## The orchestrator reads the standing answers first and promotes only the user's rules \(2026-11-27\)/.test(history));
 
+// D5 security (the T6 audit): an entry closes a question without the user ever
+// seeing it, and the page can come with a cloned repository (a docsDir inside
+// the project needs no trust). So a planted entry of valid shape could decide a
+// business question in silence, with nothing but an id in a _log.md. Every
+// question an entry closed is therefore ALSO one line under ## Found (its id and
+// the question), still not counted, not a decision and not asked (FR-016). Drop
+// either sentence and the closure goes back to being invisible.
+const s8bFoundStart = s8b.indexOf('**`## Found`**');
+const s8bFound = s8bFoundStart < 0 ? '' : s8b.slice(s8bFoundStart, s8b.indexOf('\n4. ', s8bFoundStart));
+check('section 3 (security): a question closed by an entry is also listed under ## Found, with its id and the question',
+  /question\s+then\s+also\s+goes\s+under\s+`## Found`[^.]*entry's\s+id\s+and\s+the\s+question\s+in\s+one\s+line/.test(docPath));
+check('section 3: a question closed by an entry still does not count and is not a decision',
+  /does\s+not\s+count,\s+is\s+not\s+a\s+`decision`\s+in\s+`questions\.json`[^.]*never\s+reaches\s+the\s+user\s+as\s+a\s+question/.test(docPath));
+check('section 8b: ## Found lists every question a standing answer closed, by its id',
+  /every\s+question\s+a\s+standing\s+answer\s+closed[^.]*`R<n>`/.test(s8bFound));
+check('HISTORY.md says why a question closed by an entry is listed under ## Found',
+  /planted\s+entry[^]*`## Found`/.test(section(history, '##', "The orchestrator reads the standing answers first")));
+
 console.log(`\n${passed}/${passed + failures.length} passed`);
 if (failures.length) {
   console.log(`${failures.length} failing:`);

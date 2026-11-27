@@ -668,6 +668,15 @@ own recent runs.
   log with its id, never sent to the user, not counted. An entry this run promoted
   is not a second source (the answered item is), and two entries that contradict
   each other close nothing: an outdated rule is worse than a question.
+- **Why a question an entry closed is also listed under `## Found` (D5 of that
+  run, from the T6 security audit).** Closed only in the log, a planted entry
+  with a valid shape decided a business question in silence: a `docsDir` inside
+  the project needs no trust, so the page can come with a cloned repository, and
+  the user saw nothing but how many entries were read. One line per question in
+  `## Found` (the entry's id and the question) makes that auditable in the PR
+  without bringing the question back: it still does not count, is not a
+  `decision` and is not asked (FR-016), since `## Found` is not the list to
+  review.
 - **Why the orchestrator reads it with `read`, and the brief carries its path.**
   The SubagentStart hook hands the entries to every subagent, but the orchestrator
   is not a subagent: §2 runs the one reader at every start and resume, so the
