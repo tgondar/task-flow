@@ -56,6 +56,14 @@ check('section 4c does not ask about harden/review', !/ask before (security-)?ha
 check('section 4c runs security-and-hardening', s4c.includes('agent-skills:security-and-hardening'));
 check('section 4c goes on to the 4d review', s4c.includes('§4d'));
 
+// Security (T1): a resumed run cannot carry the old skip back in. A run
+// blocked on the removed ask, or an old "later" answer in its questions file
+// or log, must still go on to security-and-hardening; drop this sentence and
+// a resumed run has nothing telling it so.
+check('section 4c: a run resumed on the old ask does not ask it again', /does not ask it\s+again: it goes on to this step/.test(s4c));
+check('section 4c: an old "later" answer does not skip the harden', /Nothing a resumed run carries[^.]*old "later"\s+answer in its questions file or its log[^.]*skips it either/.test(s4c));
+check('SKILL.md has no "skip §4d" path left', !/skip §4d|passes were skipped/.test(skill));
+
 // Q1: performance is never asked, in either mode; it runs on a named requirement only
 check('SKILL.md has no performance ask', !/Yes, optimise|Sim, otimizar|performance ask/.test(skill));
 check('section 4c runs performance only on a named requirement', /performance\s+requirement/.test(s4c) && /spec\s+or\s+the\s+plan/.test(s4c));
