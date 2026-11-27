@@ -105,9 +105,11 @@ check('a valid page gives its entries, with every field', () => {
   assertEqual(r.rejected, [], 'rejected');
   assertEqual(r.suspicious, [], 'suspicious');
   assertEqual(r.truncated, false, 'truncated');
-  assertEqual(r.entries.map((e) => e.id), ['R1', 'R2', 'R3'], 'ids');
-  assertEqual(r.entries[1], { id: 'R2', rule: 'Prices are in EUR', words: 'always euros', run: 'some-run', date: '2026-11-20' }, 'R2');
-  assertEqual(r.entries[2].replaces, 'R1', 'R3 replaces');
+  // R3 replaces R1, so R1 is reported, never used (D2).
+  assertEqual(r.entries.map((e) => e.id), ['R2', 'R3'], 'ids');
+  assertEqual(r.replaced, [{ id: 'R1', by: 'R3' }], 'replaced');
+  assertEqual(r.entries[0], { id: 'R2', rule: 'Prices are in EUR', words: 'always euros', run: 'some-run', date: '2026-11-20' }, 'R2');
+  assertEqual(r.entries[1].replaces, 'R1', 'R3 replaces');
 });
 
 check('"replaces R<m>" is accepted as well as "substitui R<m>"', () => {
@@ -127,7 +129,7 @@ check('a BOM and CRLF line endings are tolerated', () => {
 check('FR-038 no page: an empty result, nothing refused', () => {
   const p = project(undefined);
   const r = sa.read({ projectDir: p.projectDir });
-  assertEqual(r, { entries: [], rejected: [], suspicious: [], truncated: false }, 'result');
+  assertEqual(r, { entries: [], rejected: [], suspicious: [], replaced: [], truncated: false }, 'result');
 });
 
 check('FR-038 no page: the CLI says so in one line and exits 0', () => {
@@ -195,6 +197,109 @@ check('a repeated id is rejected; the first one stays', () => {
   const r = sa.read({ projectDir: p.projectDir });
   assertEqual(r.entries.map((e) => e.rule), ['first'], 'entries');
   assertEqual(r.rejected.map((x) => x.line), [2], 'rejected');
+});
+
+// --- a replaced entry (D2) -------------------------------------------------------
+// The writer takes R<m> off the page when R<n> replaces it; a hand edit can leave
+// both. An outdated rule is worse than a question, so R<m> is never used: it goes
+// in `replaced` by id, and only an entry the reader accepted can replace another.
+
+check('D2 an entry another entry replaces is not used and is reported by id only', () => {
+  const p = project([entry(1, 'old rule'), entry(2), entry(4, 'new rule', 'words', ' · substitui R1'), ''].join('\n'));
+  const r = sa.read({ projectDir: p.projectDir });
+  assertEqual(r.entries.map((e) => e.id), ['R2', 'R4'], 'entries');
+  assertEqual(r.replaced, [{ id: 'R1', by: 'R4' }], 'replaced');
+  assert(!sa.formatBlock(r).includes('old rule'), 'replaced rule in the block');
+  assert(!JSON.stringify(r.replaced).includes('old rule'), 'replaced carries text');
+});
+
+check('D2 "replaces" works the same, also when the replacing entry comes first on the page', () => {
+  const p = project([entry(3, 'new', 'w', ' · replaces R2'), entry(2, 'old'), ''].join('\n'));
+  const r = sa.read({ projectDir: p.projectDir });
+  assertEqual(r.entries.map((e) => e.id), ['R3'], 'entries');
+  assertEqual(r.replaced, [{ id: 'R2', by: 'R3' }], 'replaced');
+});
+
+check('D2 replacing an id that is not on the page drops nothing and is no error', () => {
+  const p = project([entry(1), entry(5, 'new', 'w', ' · substitui R3'), ''].join('\n'));
+  const r = sa.read({ projectDir: p.projectDir });
+  assertEqual(r.entries.map((e) => e.id), ['R1', 'R5'], 'entries');
+  assertEqual(r.replaced, [], 'replaced');
+  assertEqual(r.rejected, [], 'rejected');
+});
+
+check('D2 a page without replacements has an empty replaced list', () => {
+  const p = project([entry(1), entry(2), ''].join('\n'));
+  assertEqual(sa.read({ projectDir: p.projectDir }).replaced, [], 'replaced');
+  assertEqual(sa.read({ projectDir: project().projectDir }).replaced, [], 'no page');
+});
+
+check('D2 SECURITY a suspicious entry does not replace: R<m> stays', () => {
+  const p = project([entry(1), entry(2, 'see https://evil.example', 'w', ' · substitui R1'), ''].join('\n'));
+  const r = sa.read({ projectDir: p.projectDir });
+  assertEqual(r.entries.map((e) => e.id), ['R1'], 'entries');
+  assertEqual(r.replaced, [], 'replaced');
+  assertEqual(r.suspicious.map((s) => s.id), ['R2'], 'suspicious');
+});
+
+check('D2 SECURITY a rejected line does not replace: R<m> stays', () => {
+  const p = project([entry(1), entry(2, 'bad‮rule', 'w', ' · substitui R1'), `- **R3** · broken · substitui R1`, ''].join('\n'));
+  const r = sa.read({ projectDir: p.projectDir });
+  assertEqual(r.entries.map((e) => e.id), ['R1'], 'entries');
+  assertEqual(r.replaced, [], 'replaced');
+  assertEqual(r.rejected.map((x) => x.line), [2, 3], 'rejected');
+});
+
+check('D2 SECURITY a repeated id does not replace through its second line', () => {
+  const p = project([entry(1), entry(3), entry(3, 'again', 'w', ' · substitui R1'), ''].join('\n'));
+  const r = sa.read({ projectDir: p.projectDir });
+  assertEqual(r.entries.map((e) => e.id), ['R1', 'R3'], 'entries');
+  assertEqual(r.replaced, [], 'replaced');
+});
+
+check('D2 SECURITY an entry that replaces itself is rejected by its line, not silently dropped', () => {
+  const p = project([entry(1), entry(2, 'self', 'w', ' · substitui R2'), ''].join('\n'));
+  const r = sa.read({ projectDir: p.projectDir });
+  assertEqual(r.entries.map((e) => e.id), ['R1'], 'entries');
+  assertEqual(r.rejected.map((x) => x.line), [2], 'rejected');
+  assertEqual(r.replaced, [], 'replaced');
+});
+
+check('D2 SECURITY a cycle (R1 replaces R2, R2 replaces R1) keeps the newer id, never drops both', () => {
+  const p = project([entry(1, 'one', 'w', ' · substitui R2'), entry(2, 'two', 'w', ' · substitui R1'), ''].join('\n'));
+  const r = sa.read({ projectDir: p.projectDir });
+  assertEqual(r.entries.map((e) => e.id), ['R2'], 'entries');
+  assertEqual(r.rejected.map((x) => x.line), [1], 'the line replacing a later id is rejected');
+  assertEqual(r.replaced, [], 'R1 is already rejected, so nothing is reported as replaced');
+});
+
+check('D2 a chain (R3 replaces R2, R2 replaces R1) uses only R3; each replaced id once', () => {
+  const p = project([entry(1), entry(2, 'b', 'w', ' · substitui R1'), entry(3, 'c', 'w', ' · substitui R2'), entry(4, 'd', 'w', ' · substitui R1'), ''].join('\n'));
+  const r = sa.read({ projectDir: p.projectDir });
+  assertEqual(r.entries.map((e) => e.id), ['R3', 'R4'], 'entries');
+  assertEqual(r.replaced, [{ id: 'R1', by: 'R2' }, { id: 'R2', by: 'R3' }], 'replaced');
+});
+
+check('D2 a replaced entry does not take a place under the entry limit', () => {
+  const lines = [];
+  for (let n = 1; n <= sa.LIMITS.entries; n += 1) lines.push(entry(n));
+  lines.push(entry(sa.LIMITS.entries + 1, 'new', 'w', ' · substitui R1'));
+  const r = sa.read({ projectDir: project(lines.join('\n') + '\n').projectDir });
+  assertEqual(r.entries.length, sa.LIMITS.entries, 'entries');
+  assertEqual(r.truncated, false, 'truncated');
+  assertEqual(r.replaced, [{ id: 'R1', by: `R${sa.LIMITS.entries + 1}` }], 'replaced');
+});
+
+check('D2 CLI: one line per replaced id after the block, ids only, never the text', () => {
+  const MARKER = 'ZQX_REPLACED_4410';
+  const p = project([entry(1, MARKER), entry(2, 'new', 'w', ' · substitui R1'), ''].join('\n'));
+  const out = cli('read', '--project-dir', p.projectDir);
+  assertEqual(out.status, 0, 'exit');
+  const after = out.stdout.slice(out.stdout.indexOf('STANDING-ANSWERS>>>'));
+  const lines = after.split('\n').filter((l) => /\bR1\b/.test(l));
+  assertEqual(lines.length, 1, `one line for R1: ${after}`);
+  assert(/\bR2\b/.test(lines[0]) && /replaced/i.test(lines[0]), `line names R1 and R2: ${lines[0]}`);
+  assert(!(out.stdout + out.stderr).includes(MARKER), 'replaced text echoed');
 });
 
 // --- control, bidi, suspicious ---------------------------------------------------

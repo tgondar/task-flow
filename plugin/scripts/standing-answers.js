@@ -37,6 +37,15 @@
 // number, an id or a field, never the text: the text is what someone else
 // chose, and the messages reach the model.
 //
+// A replaced entry is not used. The writer takes R<m> off the page when R<n>
+// replaces it, but a hand edit can leave both, and an outdated rule is worse
+// than a question (the idea's assumption). So an R<m> that an accepted entry
+// replaces goes in `replaced`, by id, never in the block. Only an accepted entry
+// replaces: a rejected or suspicious line, or a repeated id, drops nothing. Ids
+// only grow (FR-015: the writer takes the next one), so an entry that names its
+// own id or a later one is rejected by its line: no replacement order the writer
+// cannot produce is guessed at, and a cycle keeps its newest entry, never none.
+//
 //   node standing-answers.js read [--project-dir <dir>]
 
 'use strict';
@@ -93,7 +102,7 @@ const isRealDate = (value) => {
   return !Number.isNaN(time) && new Date(time).toISOString().slice(0, 10) === value;
 };
 
-const emptyResult = () => ({ entries: [], rejected: [], suspicious: [], truncated: false });
+const emptyResult = () => ({ entries: [], rejected: [], suspicious: [], replaced: [], truncated: false });
 const refusedResult = (why) => ({ ...emptyResult(), refused: why });
 
 /** <docsDir>/standing-answers.md, for a docsDir config.js accepted. Throws
@@ -131,6 +140,7 @@ function parseLine(line) {
   if (tail !== undefined) {
     const replaces = REPLACES.exec(tail);
     if (!replaces) return { why: 'the last field is not "substitui R<m>" or "replaces R<m>"' };
+    if (Number(replaces[1]) >= Number(head[1])) return { why: 'replaces its own id or a later one (only an earlier id can be replaced)' };
     entry.replaces = `R${replaces[1]}`;
   }
   return { entry };
@@ -140,6 +150,7 @@ function parseLine(line) {
 function parsePage(text) {
   const result = emptyResult();
   const seen = new Set();
+  const accepted = [];
   const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
   lines.forEach((line, index) => {
     const parsed = parseLine(line);
@@ -153,9 +164,20 @@ function parsePage(text) {
       const field = ['rule', 'words'].find((name) => pattern.test(entry[name]));
       if (field) return result.suspicious.push({ id: entry.id, why: `${field} ${why}` });
     }
-    if (result.entries.length >= LIMITS.entries) result.truncated = true;
-    else result.entries.push(entry);
+    accepted.push(entry);
   });
+  // The first accepted entry on the page that replaces an id is the one named.
+  // Replacing comes before the entry limit, so a replaced entry takes no place.
+  const replacedBy = new Map();
+  for (const entry of accepted) {
+    if (entry.replaces && !replacedBy.has(entry.replaces)) replacedBy.set(entry.replaces, entry.id);
+  }
+  for (const entry of accepted) {
+    const by = replacedBy.get(entry.id);
+    if (by) result.replaced.push({ id: entry.id, by });
+    else if (result.entries.length >= LIMITS.entries) result.truncated = true;
+    else result.entries.push(entry);
+  }
   return result;
 }
 
@@ -247,6 +269,7 @@ function reportLines(result) {
   };
   capped(result.rejected, (item) => `Line ${item.line} of the standing-answers page is not used: ${item.why}.`);
   capped(result.suspicious, (item) => `Standing answer ${item.id} is not used: ${item.why}.`);
+  capped(result.replaced, (item) => `Standing answer ${item.id} is not used: replaced by ${item.by}.`);
   if (result.truncated) lines.push(`Only the first ${LIMITS.entries} standing answers are used; the rest of the page is ignored.`);
   return lines;
 }
