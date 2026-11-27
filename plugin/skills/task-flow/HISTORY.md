@@ -676,6 +676,9 @@ own recent runs.
   the user to overrule; the answer stays in the log with the quoted passage. The
   quote is the point: without it in the log, "a document said so" would be a way
   to close a question unseen, so an answer with no quote is still a decision.
+  Only a source the run did not write counts (D1 of that run, found by its
+  security auditor): the spec and the plan are the run's own, so a run could
+  write an answer into its spec, quote it and keep the decision off the list.
 - **Each decision is listed to review in one place: `questions.json` (Q2 of that
   run).** The same decision used to be a ⚠️ entry in the `_log.md` and an item in
   the questions file, two lists to read. The log could not be the one to give it

@@ -133,6 +133,19 @@ check('section 3 (security): the documents are the closed list of sources',
 check('section 3 (security): the log entry names the document and the quote',
   /with the round, the document and the quoted passage/.test(s3));
 
+// D1 security: the spec and the plan are on that list, but the run writes them
+// itself, so a run could write its answer into its own spec, quote it and keep
+// the decision off the list. Only a source this run did not write closes a
+// question by document; a passage from its own spec or plan leaves it a decision.
+const docStart = s3.indexOf('**A document answers it explicitly.**');
+const docPath = docStart < 0 ? '' : s3.slice(docStart, s3.indexOf('\n- **', docStart));
+check('section 3 (security): only a source this run did not write closes a question by document',
+  /Only\s+a\s+passage\s+from\s+a\s+source\s+this\s+run\s+did\s+not\s+write\s+closes\s+it\s+this\s+way/.test(docPath));
+check('section 3 (security): the sources that close it are the ones the run did not write',
+  /task's\s+entry\s+in\s+the\s+task\s+list[^]*the\s+idea[^]*answered\s+decisions[^]*artifacts\s+of\s+earlier\s+runs/.test(docPath));
+check('section 3 (security): this run\'s own spec or plan leaves it a decision in questions.json',
+  /this\s+run's\s+own\s+spec\s+or\s+plan[^]*`questions\.json`\s+as\s+a\s+`decision`/.test(docPath));
+
 // T2 (FR-011, Q2): every decision to review is listed in one place, questions.json;
 // the _log.md keeps the full entry as the audit trail and cites Q<n>.
 check('section 3: questions.json is the one list to review', /One list to review/.test(s3));

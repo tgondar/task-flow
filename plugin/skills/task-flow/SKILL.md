@@ -770,7 +770,13 @@ the task list, sees or gets, it is a business rule; otherwise it is code.
   phase's `_log.md` with the round, the document and the quoted passage — and
   nowhere else: not into `questions.json`, not into `## Needs you`. The quote is
   what keeps it checkable: an answer "from a document" with no quoted passage in
-  the log is not closed this way — it is a decision, as below.
+  the log is not closed this way — it is a decision, as below. Only a passage
+  from a source this run did not write closes it this way: the task's entry in
+  the task list, the idea, the answered decisions in the questions files and
+  decision logs, and the artifacts of earlier runs. A passage from this run's own
+  spec or plan may still support the answer, but the item then goes into
+  `questions.json` as a `decision`, as below: the run writes those two itself,
+  and could write its answer there and quote it.
 - **The second opinion returns `Verdict: agree`**, with no document that says it.
   Write it into the run's `questions.json` as a `decision` (*Decisions taken — to
   review*), with the round it ended in and the passages it rests on in `rounds`.
