@@ -633,8 +633,9 @@ own recent runs.
 ## Each loop is measured: a start event by code, a result by the orchestrator (2026-11-27)
 
 The run-health row measures a run as a whole, and its split by phase did not work.
-In the 30 rows of `metrics.jsonl` on 2026-11-27 (measured for the idea behind this
-change), the tokens fell almost entirely into `other`, because a token was given a
+In the `metrics.jsonl` rows the idea behind this change looked at on 2026-11-27 (30 by
+its count, across projects; this repository's own 4 rows, re-measured for the spec,
+had every token in `other`), the tokens fell almost entirely into `other`, because a token was given a
 phase from `phaseLog`, which the orchestrator writes as prose tells it to; and the
 outcome fields (tasks, review, harden, questions) were missing in about two runs of
 three for the same reason. So each loop — one execution of one agent — now gets a
