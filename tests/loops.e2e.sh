@@ -50,7 +50,8 @@ if ! command -v claude >/dev/null 2>&1; then
   exit 0
 fi
 
-case "$SCRATCH" in
+# Windows: a TMPDIR may use backslashes and any casing, so normalise both first.
+case "$(printf '%s' "$SCRATCH" | tr '\134' / | tr '[:upper:]' '[:lower:]')/" in
   *"/.claude/"*) echo "ABORT: scratch dir is under ~/.claude." >&2; exit 1 ;;
 esac
 
@@ -172,7 +173,7 @@ sessionFiles.forEach((sessionFile, index) => {
   folders.push(subagents);
   try {
     for (const name of fs.readdirSync(subagents)) {
-      if (/^agent-[A-Za-z0-9]+.jsonl$/.test(name)) nestedCalls += agentCalls(records(path.join(subagents, name)));
+      if (/^agent-[A-Za-z0-9]+\.jsonl$/.test(name)) nestedCalls += agentCalls(records(path.join(subagents, name)));
     }
   } catch { /* no subagents folder: counted as zero */ }
 });
