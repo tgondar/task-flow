@@ -1030,7 +1030,8 @@ function listTranscripts(projectsRoot, base, startMs, limits, expired) {
           if (files.length + 1 > limits.maxFiles) return { reason: 'timeout' };
           if (fstats.size > CONSTANTS.MAX_TRANSCRIPT_FILE_BYTES) {
             oversize += 1;
-            files.push({ file: null });
+            // the name (already TRANSCRIPT_NAME) lets the loop join tell an oversize transcript from a missing one
+            files.push({ file: null, name: item.name });
             continue;
           }
           total += fstats.size;
@@ -1697,6 +1698,214 @@ function appendLoopRows(projectDir, stateDir, rows) {
 
 Object.assign(module.exports, { LOOP_KEYS, validateLoopRow, parseLoopRow, readLoops, appendLoopRows });
 
+// --- the join: each loop's start event with its transcript, at the close (spec 6.1, RF-005..RF-008; plan T4)
+//
+// A start event says which run, phase and task a subagent served; its transcript
+// `agent-<id>.jsonl` says what it spent. At the close (closeRun, below) the two are joined into
+// one loop row per start event and appended to loops.jsonl. WHY at the close and not in the hook:
+// the transcript is only complete once the subagent is done, and the close already runs once per
+// run with a time budget.
+//
+// The transcripts are the same untrusted, unversioned format readTokens reads, so the same rules:
+// ONE bounded listing of the project's transcript folder (listTranscripts: lstat, no link, names
+// in TRANSCRIPT_NAME only, under ~/.claude/projects), files opened through scanFile (O_NOFOLLOW,
+// fstat, size and line ceilings), only `assistant` records with an API_ID requestId and a usage in
+// the known shape count, deduplicated by requestId with the max of each field. Nothing of the
+// messages is read into a row: numbers, a model in SHAPE.model and an effort from a closed set.
+// The agent id is never joined into a path - it only looks a listed name up.
+//
+// Fail open (RF-008): a loop whose transcript is missing, unreadable or out of time still gets
+// its row, with tokens/duration/model/effort null and a closed reason, and never stops the others.
+
+/** RF-007: the `effort:` of each agent this plugin ships (plugin/agents/*.md), by the type a
+ *  SubagentStart payload gives it. A test compares it with the files, both ways. */
+const AGENT_EFFORT = Object.freeze({
+  'task-flow:code-reviewer': 'low',
+  'task-flow:security-auditor': 'low',
+  'task-flow:second-opinion-low': 'low',
+  'task-flow:second-opinion-medium': 'medium',
+  'task-flow:second-opinion-high': 'high',
+  'task-flow:second-opinion-xhigh': 'xhigh',
+  'task-flow:second-opinion-max': 'max',
+});
+const TRANSCRIPT_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+/** The listing skips transcripts last written before the run's first start event, less this
+ *  margin (clock rounding between the hook and the transcript writer). Not measured: a guess. */
+const LOOP_MTIME_SLACK_MS = 60 * 1000;
+
+/** The most frequent non-null value; a tie goes to the one that sorts first (deterministic). */
+function mostFrequent(values) {
+  const counts = new Map();
+  for (const value of values) if (value !== null) counts.set(value, (counts.get(value) || 0) + 1);
+  let best = null;
+  for (const [value, n] of counts) {
+    const top = best === null ? 0 : counts.get(best);
+    if (n > top || (n === top && value < best)) best = value;
+  }
+  return best;
+}
+
+/**
+ * What one loop's transcript says: `{ tokens, durationS, model, effort, reason: null }`, or
+ * `{ reason }` (`timeout`, `unreadable-format`). `effort` is the most frequent closed value in the
+ * records, or null (the caller applies RF-007's fallback). Never throws.
+ */
+function readLoopTranscript(file, deadline) {
+  try {
+    const requests = new Map();
+    let first = null;
+    let last = null;
+    let overflow = false;
+    const onLine = (text) => {
+      let line;
+      try {
+        line = JSON.parse(text);
+      } catch {
+        return; // the parser's message quotes the input: dropped
+      }
+      if (!isObject(line)) return;
+      const timestamp = ownValue(line, 'timestamp');
+      if (isInstant(timestamp)) {
+        const ms = Date.parse(timestamp);
+        first = first === null ? ms : Math.min(first, ms);
+        last = last === null ? ms : Math.max(last, ms);
+      }
+      if (ownValue(line, 'type') !== 'assistant') return;
+      const id = ownValue(line, 'requestId');
+      const message = ownValue(line, 'message');
+      if (typeof id !== 'string' || !API_ID.test(id) || !isObject(message)) return;
+      const model = ownValue(message, 'model');
+      if (model === '<synthetic>') return;
+      const usage = readUsage(ownValue(message, 'usage'));
+      if (!usage) return;
+      let request = requests.get(id);
+      if (!request) {
+        if (requests.size >= MAX_REQUESTS) {
+          overflow = true;
+          return;
+        }
+        request = { input: 0, cacheCreate: 0, cacheRead: 0, output: 0, model: null, effort: null };
+        requests.set(id, request);
+      }
+      // one request is written once per content block and only `output` grows: the max is final
+      for (const key of LOOP_TOKEN_KEYS) request[key] = Math.max(request[key], usage[key]);
+      if (request.model === null && typeof model === 'string' && SHAPE.model.test(model)) request.model = model;
+      const effort = ownValue(line, 'effort');
+      if (request.effort === null && TRANSCRIPT_EFFORTS.includes(effort)) request.effort = effort;
+    };
+    const scanned = scanFile(file, deadline, onLine, () => {});
+    if (scanned === 'timeout' || overflow) return { reason: 'timeout' };
+    if (scanned !== 'ok' || requests.size === 0) return { reason: 'unreadable-format' };
+
+    const tokens = { input: 0, cacheCreate: 0, cacheRead: 0, output: 0 };
+    for (const request of requests.values()) for (const key of LOOP_TOKEN_KEYS) tokens[key] += request[key];
+    const durationS = first === null ? null : Math.round((last - first) / 1000);
+    // sums of many bounded counts can still pass the ceiling: that is not a measurement
+    if (!LOOP_TOKEN_KEYS.every((key) => isCount(tokens[key])) || !orNull(isCount)(durationS)) return { reason: 'unreadable-format' };
+    const list = [...requests.values()];
+    return {
+      tokens,
+      durationS,
+      model: mostFrequent(list.map((r) => r.model)),
+      effort: mostFrequent(list.map((r) => r.effort)),
+      reason: null,
+    };
+  } catch {
+    return { reason: 'unreadable-format' };
+  }
+}
+
+/**
+ * `joinLoops({ projectDir, slug, events, deadline })` -> the loop rows of run `slug`, in memory
+ * (nothing is written): one per start event of `events` (readLoopEvents' result), the first start
+ * of an agent id winning, in event order. `deadline` (ms since the epoch) can only tighten the
+ * BUDGET_MS from now. Every row passes validateLoopRow; a start that would not is dropped.
+ * Never throws.
+ */
+function joinLoops(options) {
+  try {
+    const opts = isObject(options) ? options : {};
+    const { projectDir, slug } = opts;
+    if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || projectDir.length > 1024 || !isSlug(slug)) return [];
+    const given = isObject(opts.events) && Array.isArray(opts.events.starts) ? opts.events.starts : [];
+    const limit = Date.now() + CONSTANTS.BUDGET_MS;
+    const deadline = typeof opts.deadline === 'number' && Number.isFinite(opts.deadline) ? Math.min(opts.deadline, limit) : limit;
+    const expired = () => Date.now() > deadline;
+
+    const starts = [];
+    const seen = new Set();
+    for (const s of given.slice(0, 20000)) {
+      if (!isObject(s) || typeof s.agent !== 'string' || !SHAPE.agentId.test(s.agent) || !isInstant(s.at) || seen.has(s.agent)) continue;
+      seen.add(s.agent);
+      starts.push(s);
+    }
+    if (starts.length === 0) return [];
+
+    const row = (s, read) => {
+      const found = read.reason === null;
+      const fallback = typeof s.type === 'string' && hasOwn(AGENT_EFFORT, s.type) ? AGENT_EFFORT[s.type] : 'unknown';
+      return {
+        v: 1, source: 'taskflow', run: slug, id: s.agent, agentType: s.type, phase: s.phase, task: s.task, round: null,
+        model: found ? read.model : null,
+        effort: found ? read.effort || fallback : null,
+        startedAt: s.at,
+        durationS: found ? read.durationS : null,
+        tokens: found ? read.tokens : null,
+        costCents: null, outcome: null, tests: null, critical: null, required: null,
+        reason: read.reason,
+        backfill: false,
+      };
+    };
+    const finish = (rows) => rows.map(validateLoopRow).filter((r) => r.ok).map((r) => r.row);
+    const all = (reason) => finish(starts.map((s) => row(s, { reason })));
+
+    // the same folder readTokens reads: the slug has only [A-Za-z0-9-], ONE folder name
+    const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
+    const base = path.join(projectsRoot, projectDir.replace(/[^A-Za-z0-9]/g, '-'));
+    if (!isInside(projectsRoot, base) || crossesLink(projectsRoot, base)) return all('no-transcript');
+    try {
+      if (!fs.lstatSync(base).isDirectory()) return all('no-transcript');
+    } catch {
+      return all('no-transcript');
+    }
+    if (expired()) return all('timeout');
+    const startMs = Math.min(...starts.map((s) => Date.parse(s.at))) - LOOP_MTIME_SLACK_MS;
+    const limits = { maxFiles: CONSTANTS.MAX_TRANSCRIPT_FILES, maxTotalBytes: CONSTANTS.MAX_TRANSCRIPT_TOTAL_BYTES };
+    const listed = listTranscripts(projectsRoot, base, startMs, limits, expired);
+    if (listed.reason) return all('timeout');
+    // name -> file (null: listed but over the size ceiling); the first listed wins
+    const byName = new Map();
+    for (const entry of listed.files) {
+      const name = entry.file === null ? entry.name : path.basename(entry.file);
+      if (typeof name === 'string' && !byName.has(name)) byName.set(name, entry.file);
+    }
+
+    return finish(starts.map((s) => {
+      if (expired()) return row(s, { reason: 'timeout' });
+      const name = `agent-${s.agent}.jsonl`;
+      if (!byName.has(name)) return row(s, { reason: 'no-transcript' });
+      const file = byName.get(name);
+      return row(s, file === null ? { reason: 'unreadable-format' } : readLoopTranscript(file, deadline));
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/** closeRun's loop step: the run's start events joined and appended to loops.jsonl. A run with
+ *  no start event reads no transcript and creates no file. The result is information only. */
+function recordLoops(projectDir, stateDir, slug, deadline) {
+  try {
+    const events = readLoopEvents(projectDir, stateDir, slug);
+    if (events.starts.length === 0) return { ok: true, code: null, written: 0, invalid: 0 };
+    return appendLoopRows(projectDir, stateDir, joinLoops({ projectDir, slug, events, deadline }));
+  } catch {
+    return { ok: false, code: 'internal', written: 0, invalid: 0 };
+  }
+}
+
+Object.assign(module.exports, { AGENT_EFFORT, joinLoops });
+
 // --- closeRun and the CLI (spec R3, R4, R9; plan T7) -----------------------------------------------
 //
 // Deliberately AFTER module.exports: the security suites of the pure/reader sections scan
@@ -1716,7 +1925,9 @@ Object.assign(module.exports, { LOOP_KEYS, validateLoopRow, parseLoopRow, readLo
 //   1. TASK_FLOW_METRICS=off - before anything is read (D7, like TASK_FLOW_GATE in gate.js);
 //   2. arguments and config, then only state.json: eligible (phase done + startedAt)?
 //   3. is run+created already in metrics.jsonl? then stop: no collect, no write;
-//   4. collect -> baseline over the history -> re-check the history -> appendRow.
+//   4. collect -> baseline over the history -> re-check the history -> appendRow;
+//      just before appendRow, the loop rows of the run's start events (plan T4), inside the
+//      same 5 s budget counted from the start of the close.
 // Only a row that came out of collect (which validates it) is ever handed to baseline
 // (T3's note: baseline does not validate `current`). The token reader's time budget
 // lives in collect (BUDGET_MS): out of budget the row is written with tokensNull
@@ -1749,6 +1960,9 @@ function closeRun(options) {
     // 1. the escape hatch, first of all: no file is read when it is set
     const env = isObject(opts.env) ? opts.env : process.env;
     if (String(env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return closeResult(true, 'disabled');
+    // the one budget of this close; `budgetMs` (a test seam, like steps) can only tighten it
+    const budget = typeof opts.budgetMs === 'number' && Number.isFinite(opts.budgetMs) ? Math.min(opts.budgetMs, CONSTANTS.BUDGET_MS) : CONSTANTS.BUDGET_MS;
+    const deadline = Date.now() + budget;
 
     const { projectDir, slug } = opts;
     if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || !isSlug(slug)) return closeResult(false, 'bad-state');
@@ -1792,6 +2006,12 @@ function closeRun(options) {
     const again = plain(() => readHist(projectDir, stateDir));
     if (isObject(again) && again.code === 'unsafe-path') return closeResult(false, 'unsafe-path');
     if (isObject(again) && hasKey(again, key)) return closeResult(true, 'already-closed');
+
+    // 5. the loop rows (plan T4), BEFORE the metrics.jsonl line: a close cut short here is
+    // repeated by the next render (no line yet, so not already-closed), and the loop append is
+    // idempotent by key. With what is left of the budget; whatever it returns or throws, the
+    // close goes on to its own line and its own code.
+    attempt(() => step('loops', recordLoops)(projectDir, stateDir, slug, deadline));
 
     let appended;
     try {

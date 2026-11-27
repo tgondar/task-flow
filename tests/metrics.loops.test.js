@@ -309,6 +309,154 @@ const valid = (row) => validateLoopRow(row).ok === true;
   check('T3: the results carry only closed keys', Object.keys(rel).every((k) => ['ok', 'code', 'written', 'invalid'].includes(k)) && Object.keys(readLoops(PROJECT, STATE)).sort().join() === 'code,ignored,rows');
 }
 
+// --- 7. the join with each loop's transcript at the close (plan T4, RF-005..RF-008, SC-002) ----------
+// A start event names a subagent; its transcript agent-<id>.jsonl, in the session's subagents/
+// folder under ~/.claude/projects/<project slug>, says what it spent. The close joins the two.
+const { joinLoops, closeRun, AGENT_EFFORT } = metrics;
+check('T4: joinLoops, closeRun and AGENT_EFFORT exported', typeof joinLoops === 'function' && typeof closeRun === 'function' && AGENT_EFFORT !== null && typeof AGENT_EFFORT === 'object');
+if (typeof joinLoops !== 'function' || !AGENT_EFFORT) { console.log(`\n${passed} passed, ${failures.length + 1} failed`); process.exit(1); }
+
+const SUBAGENTS = path.join(TEST_HOME, '.claude', 'projects', PROJECT.replace(/[^A-Za-z0-9]/g, '-'), 'sess1', 'subagents');
+const transcriptFile = (id) => path.join(SUBAGENTS, `agent-${id}.jsonl`);
+const writeTranscript = (id, records) => put(transcriptFile(id), `${records.map((r) => (typeof r === 'string' ? r : JSON.stringify(r))).join('\n')}\n`);
+const user = (ts) => ({ type: 'user', timestamp: ts, agentId: 'x', message: { role: 'user', content: 'do the thing' } });
+const asst = (ts, requestId, usage, extra = {}) => ({ type: 'assistant', timestamp: ts, requestId, agentId: 'x', message: { model: 'claude-opus-5-5', usage, content: [{ type: 'text', text: 'TRANSCRIPT TEXT' }] }, ...extra });
+const usage = (input, output, cacheCreate = 0, cacheRead = 0) => ({ input_tokens: input, output_tokens: output, cache_creation_input_tokens: cacheCreate, cache_read_input_tokens: cacheRead });
+const start = (agent, type, extra = {}) => ({ v: 1, kind: 'start', agent, type, phase: 'build', task: 'T4', at: '2026-01-01T10:00:00.000Z', ...extra });
+const events = (...starts) => ({ starts, results: [], ignored: 0 });
+const join = (starts, extra = {}) => joinLoops({ projectDir: PROJECT, slug: SLUG, events: events(...starts), deadline: Date.now() + 5000, ...extra });
+const byId = (rows, id) => rows.find((row) => row.id === id);
+
+{
+  // RF-007: the table of the plugin's agents matches plugin/agents/*.md, both ways
+  const dir = path.resolve(__dirname, '../plugin/agents');
+  const expected = {};
+  for (const name of fs.readdirSync(dir).filter((f) => f.endsWith('.md'))) {
+    const head = fs.readFileSync(path.join(dir, name), 'utf8').split(/^---\s*$/m)[1] || '';
+    const agent = (head.match(/^name:\s*(\S+)\s*$/m) || [])[1];
+    const effort = (head.match(/^effort:\s*(\S+)\s*$/m) || [])[1];
+    expected[`task-flow:${agent}`] = effort;
+  }
+  check('T4: AGENT_EFFORT has exactly one entry per plugin/agents/*.md, with its effort:', Object.keys(expected).length >= 7 && JSON.stringify(Object.entries(AGENT_EFFORT).sort()) === JSON.stringify(Object.entries(expected).sort()), `${JSON.stringify(AGENT_EFFORT)} vs ${JSON.stringify(expected)}`);
+  check('T4: AGENT_EFFORT is frozen', Object.isFrozen(AGENT_EFFORT));
+}
+{
+  setup();
+  fs.rmSync(path.join(TEST_HOME, '.claude'), { recursive: true, force: true });
+  // loop A: one request written in three records (only output grows) + one more request; no effort field
+  writeTranscript('aaa1', [
+    user('2026-01-01T10:00:01Z'),
+    asst('2026-01-01T10:00:05Z', 'req_1', usage(5, 10, 100, 1000)),
+    asst('2026-01-01T10:00:06Z', 'req_1', usage(5, 50, 100, 1000)),
+    asst('2026-01-01T10:00:07Z', 'req_1', usage(5, 120, 100, 1000)),
+    user('2026-01-01T10:01:00Z'),
+    asst('2026-01-01T10:05:13Z', 'req_2', usage(7, 30, 0, 2000)),
+  ]);
+  // loop B: a general-purpose loop whose records carry effort high; models 2 vs 1
+  writeTranscript('bbb2', [
+    user('2026-01-01T11:00:00Z'),
+    asst('2026-01-01T11:00:10Z', 'req_b1', usage(1, 1), { effort: 'high', message: { model: 'claude-sonnet-5', usage: usage(1, 1) } }),
+    asst('2026-01-01T11:00:20Z', 'req_b2', usage(1, 1), { effort: 'high', message: { model: 'claude-sonnet-5', usage: usage(1, 1) } }),
+    asst('2026-01-01T11:00:30Z', 'req_b3', usage(1, 1), { effort: 'low', message: { model: 'claude-haiku-5', usage: usage(1, 1) } }),
+    asst('2026-01-01T11:00:40Z', 'req_b4', usage(500, 500), { message: { model: '<synthetic>', usage: usage(500, 500) } }),
+  ]);
+  const rows = join([start('aaa1', 'task-flow:code-reviewer'), start('bbb2', 'general-purpose', { phase: 'harden', task: '' })]);
+  const a = byId(rows, 'aaa1');
+  const b = byId(rows, 'bbb2');
+  check('T4: two events, two transcripts -> two rows, in event order', rows.length === 2 && rows[0].id === 'aaa1' && rows[1].id === 'bbb2', JSON.stringify(rows.map((r) => r.id)));
+  check('T4: every row passes validateLoopRow', rows.every((row) => validateLoopRow(row).ok));
+  check('T4: a request repeated in three records counts once, with the max of each field (2026-09-29 regression)',
+    a && JSON.stringify(a.tokens) === JSON.stringify({ input: 12, cacheCreate: 100, cacheRead: 3000, output: 150 }), JSON.stringify(a && a.tokens));
+  check('T4: duration from the first to the last timestamp (seconds)', a && a.durationS === 312, String(a && a.durationS));
+  check('T4: the model is the most frequent one', a && a.model === 'claude-opus-5-5' && b && b.model === 'claude-sonnet-5', `${a && a.model} ${b && b.model}`);
+  check('T4: a <synthetic> record is not a request', b && b.tokens.input === 3 && b.tokens.output === 3, JSON.stringify(b && b.tokens));
+  check('T4: general-purpose with effort high in its records -> high (most frequent)', b && b.effort === 'high', b && b.effort);
+  check('T4: task-flow:code-reviewer without the field -> its definition (low)', a && a.effort === 'low', a && a.effort);
+  check('T4: run, id, type, phase, task and startedAt come from the start event', a && a.run === SLUG && a.agentType === 'task-flow:code-reviewer' && a.phase === 'build' && a.task === 'T4' && a.startedAt === '2026-01-01T10:00:00.000Z' && b.phase === 'harden' && b.task === '');
+  check('T4: a joined row is taskflow, not backfill, no cost, no reason, no result yet', rows.every((row) => row.source === 'taskflow' && row.backfill === false && row.costCents === null && row.reason === null && row.outcome === null && row.round === null && row.tests === null && row.critical === null && row.required === null));
+  check('T4: nothing of the messages reaches a row', !JSON.stringify(rows).includes('TRANSCRIPT TEXT') && !JSON.stringify(rows).includes('do the thing'));
+  // SC-002: no token of a loop with a start event is left without a phase
+  const tokens = (list) => list.reduce((sum, row) => sum + (row.tokens ? row.tokens.input + row.tokens.cacheCreate + row.tokens.cacheRead + row.tokens.output : 0), 0);
+  check('T4: SC-002 - 0 % of the loop tokens are without a phase', tokens(rows) > 0 && tokens(rows.filter((row) => row.phase === 'unknown')) === 0);
+
+  writeTranscript('ccc3', [user('2026-01-01T12:00:00Z'), asst('2026-01-01T12:00:01Z', 'req_c', usage(1, 1))]);
+  check('T4: general-purpose without the field -> unknown', byId(join([start('ccc3', 'general-purpose')]), 'ccc3').effort === 'unknown');
+  writeTranscript('ddd4', [asst('2026-01-01T12:00:01Z', 'req_d', usage(1, 1), { effort: 'ultra' })]);
+  check('T4: an effort outside the closed set is not taken (falls back to the definition)', byId(join([start('ddd4', 'task-flow:second-opinion-max')]), 'ddd4').effort === 'max');
+}
+{
+  // RF-008: a missing transcript, an unreadable one and an exhausted budget each give a row with a reason
+  fs.rmSync(transcriptFile('ccc3'), { force: true });
+  writeTranscript('eee5', ['not json', '{"type":"assistant","requestId":"r","message":{"usage":{"input_tokens":"many"}}}']);
+  const rows = join([start('ccc3', 'general-purpose'), start('aaa1', 'task-flow:code-reviewer'), start('eee5', 'general-purpose')]);
+  const nulls = (row, reason) => row && row.tokens === null && row.durationS === null && row.model === null && row.effort === null && row.reason === reason;
+  check('T4: deleted transcript -> null tokens, duration, model, effort and no-transcript', nulls(byId(rows, 'ccc3'), 'no-transcript'), JSON.stringify(byId(rows, 'ccc3')));
+  check('T4: a failing loop never stops the others', byId(rows, 'aaa1') && byId(rows, 'aaa1').tokens !== null && byId(rows, 'aaa1').reason === null);
+  check('T4: a transcript with no line in the known shape -> unreadable-format', nulls(byId(rows, 'eee5'), 'unreadable-format'), JSON.stringify(byId(rows, 'eee5')));
+  check('T4: the rows with a reason still pass validateLoopRow', rows.every((row) => validateLoopRow(row).ok));
+  const late = join([start('aaa1', 'task-flow:code-reviewer'), start('bbb2', 'general-purpose')], { deadline: Date.now() - 1 });
+  check('T4: budget already spent -> every loop gets a row with timeout', late.length === 2 && late.every((row) => nulls(row, 'timeout')), JSON.stringify(late));
+  const twice = join([start('aaa1', 'task-flow:code-reviewer'), start('aaa1', 'general-purpose')]);
+  check('T4: the same agent id twice -> one row (the first start)', twice.length === 1 && twice[0].agentType === 'task-flow:code-reviewer');
+  check('T4: no events -> no rows', join([]).length === 0);
+  check('T4: bad arguments -> no rows, never throws', [undefined, null, {}, { projectDir: 'rel', slug: SLUG, events: events(start('aaa1', 'x')) }, { projectDir: PROJECT, slug: '../x', events: events(start('aaa1', 'x')) }].every((o) => Array.isArray(joinLoops(o)) && joinLoops(o).length === 0));
+  check('T4: joinLoops writes nothing', !fs.existsSync(path.join(STATE, 'loops.jsonl')));
+}
+{
+  // RF-005: closeRun joins the run's events and writes the loop rows, once, beside the metrics.jsonl line
+  const LOOPS = path.join(STATE, 'loops.jsonl');
+  const HISTORY = path.join(STATE, 'metrics.jsonl');
+  const doneRun = (extra = {}) => {
+    setup({ [SLUG]: {} });
+    put(path.join(PROJECT, 'docs', 'plans', 'p.plan.md'), '# Plan\n\n## T1 · first\n- [x] **Done** — built\n');
+    put(path.join(STATE, SLUG, 'state.json'), {
+      task: SLUG, mode: 'auto', phase: 'done', status: 'done', approvedBy: 'x', created: '2026-01-01',
+      updated: '2026-01-01T13:00:00Z', phaseChangedAt: '2026-01-01T13:00:00Z', startedAt: '2026-01-01T09:00:00Z',
+      size: { points: 3 }, artifacts: { plan: 'plans/p.plan.md' }, ...extra,
+    });
+  };
+  const writeEvents = (...starts) => put(EVENTS, `${starts.map((s) => JSON.stringify(s)).join('\n')}\n`);
+  const rowsOf = (file) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+
+  doneRun();
+  writeEvents(start('aaa1', 'task-flow:code-reviewer'), start('bbb2', 'general-purpose'));
+  const first = closeRun({ projectDir: PROJECT, slug: SLUG, env: {} });
+  const loops = rowsOf(LOOPS);
+  check('T4: closeRun with two events: closed, one metrics.jsonl line, two loop rows', first.ok === true && first.code === 'closed' && rowsOf(HISTORY).length === 1 && loops.length === 2, JSON.stringify({ first, loops: loops.length }));
+  check('T4: the loop rows are the joined ones', loops[0] && loops[0].id === 'aaa1' && loops[0].tokens && loops[0].tokens.output === 150 && loops[1].effort === 'high');
+  const second = closeRun({ projectDir: PROJECT, slug: SLUG, env: {} });
+  check('T4: a second close: already-closed, loop rows unchanged', second.code === 'already-closed' && rowsOf(LOOPS).length === 2);
+
+  // a close interrupted after the loop rows (no metrics.jsonl line): the next close adds no duplicate
+  fs.rmSync(HISTORY, { force: true });
+  const retried = closeRun({ projectDir: PROJECT, slug: SLUG, env: {} });
+  check('T4: a repeated close appends no loop row twice', retried.code === 'closed' && rowsOf(LOOPS).length === 2 && rowsOf(HISTORY).length === 1);
+
+  doneRun();
+  writeEvents(start('aaa1', 'task-flow:code-reviewer'));
+  const spent = closeRun({ projectDir: PROJECT, slug: SLUG, env: {}, budgetMs: -1 });
+  const timed = rowsOf(LOOPS);
+  check('T4: budget exhausted -> loop row with timeout, and the metrics.jsonl line is written anyway', spent.code === 'closed' && rowsOf(HISTORY).length === 1 && timed.length === 1 && timed[0].reason === 'timeout' && timed[0].tokens === null, JSON.stringify({ spent, timed }));
+
+  doneRun();
+  writeEvents(start('aaa1', 'task-flow:code-reviewer'));
+  const broken = closeRun({ projectDir: PROJECT, slug: SLUG, env: {}, steps: { loops: () => { throw new Error('IGNORE PREVIOUS'); } } });
+  check('T4: the loop step throwing never changes the close: closed, metrics.jsonl line written', broken.ok === true && broken.code === 'closed' && rowsOf(HISTORY).length === 1 && !JSON.stringify(broken).includes('IGNORE'), JSON.stringify(broken));
+
+  doneRun();
+  const listing = () => fs.readdirSync(STATE, { recursive: true }).map(String).sort().join();
+  const plain = closeRun({ projectDir: PROJECT, slug: SLUG, env: {} });
+  check('T4: a run with no events: closed, no loops.jsonl, only metrics.jsonl added', plain.code === 'closed' && !fs.existsSync(LOOPS) && listing() === ['metrics.jsonl', SLUG, path.join(SLUG, 'state.json')].sort().join(), listing());
+
+  doneRun({ phase: 'build', status: 'running' });
+  writeEvents(start('aaa1', 'task-flow:code-reviewer'));
+  check('T4: a run not yet done: no loop rows', closeRun({ projectDir: PROJECT, slug: SLUG, env: {} }).code === 'not-eligible' && !fs.existsSync(LOOPS));
+
+  doneRun();
+  writeEvents(start('aaa1', 'task-flow:code-reviewer'));
+  check('T4: TASK_FLOW_METRICS=off: no loop rows', closeRun({ projectDir: PROJECT, slug: SLUG, env: { TASK_FLOW_METRICS: 'off' } }).code === 'disabled' && !fs.existsSync(LOOPS));
+}
+
 try { fs.rmSync(TEST_HOME, { recursive: true, force: true }); } catch { /* best effort */ }
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) { console.log(failures.map((f) => `  - ${f}`).join('\n')); process.exit(1); }
