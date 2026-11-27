@@ -562,7 +562,10 @@ one, report the fact — do not change the decision."** Do not paste the artifac
 contents — give paths and
 let it read what it needs. The page's valid entries are not pasted either: the
 SubagentStart hook starts every subagent with them (§5), and the path is there so
-the subagent can cite an entry by its id.
+the subagent can cite an entry by its id. A valid entry is one in that
+`<<<STANDING-ANSWERS` block, as the reader accepted it: a line of the page the
+block does not hold — malformed, suspicious, replaced or past the limit —
+settles nothing, also when the subagent reads it from the path.
 
 **What a subagent returns**, and nothing else:
 

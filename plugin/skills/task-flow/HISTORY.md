@@ -732,7 +732,10 @@ own recent runs.
   The brief carries the page's path, not its text (pasting it is the drift the
   hook exists to remove), and the settled-decisions line names the entries, so a
   subagent does not reopen one. A missing or refused page is one line and the run
-  goes on: the page is help, never a gate.
+  goes on: the page is help, never a gate. "Valid" means in the hook's block (the
+  harden pass of that run): with the raw path in hand, a subagent that opened the
+  page and judged validity itself could take a line the reader dropped - replaced,
+  suspicious, malformed - as settled, bypassing the one reader from the inside.
 - **Why only an answer of the user becomes an entry, and only a rule (Q4 of that
   run).** A page the run could write from its own choices would reinforce itself:
   next run, the run's guess comes back as "the user's rule". So `promote` takes

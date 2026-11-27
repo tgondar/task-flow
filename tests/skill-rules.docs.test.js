@@ -193,6 +193,13 @@ check('section 1b: every brief carries the absolute path of the standing answers
   /absolute\s+path\s+of\s+the\s+project's\s+standing\s+answers\s+page,\s+`<docsDir>\/standing-answers\.md`,\s+when\s+it\s+exists/.test(s1b));
 check('section 1b: the settled-decisions line includes the valid entries of the page',
   /every\s+answered\s+`- \[x\]`\s+in\s+the\s+run's\s+questions\s+file,\s+and\s+every\s+valid\s+entry\s+of\s+the\s+project's\s+standing\s+answers\s+page,\s+are\s+settled\./.test(s1b));
+// Harden (cross-cutting): the brief hands every subagent the page's raw path,
+// and the settled line names "every valid entry". Without saying that valid
+// means "in the block the reader produced", a subagent that opens the path judges
+// validity itself and can take a line the reader dropped - replaced, suspicious,
+// malformed - as settled: the one reader would be bypassed by its own consumers.
+check('section 1b (security): only the entries of the hook\'s block are settled, not a line read from the path',
+  /settles\s+nothing,\s+also\s+when\s+the\s+subagent\s+reads\s+it\s+from\s+the\s+path/.test(s1b));
 check('section 2: the orchestrator reads the page with the one reader, before the first phase',
   /standing-answers\.js"\s+read/.test(s2) && /before\s+the\s+first\s+phase[^.]*new\s+run\s+and\s+on\s+a\s+resume/.test(s2));
 check('section 2: what the reader found is said in one line, and a missing or refused page does not stop the run',
