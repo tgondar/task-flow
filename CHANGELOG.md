@@ -35,6 +35,10 @@ shows with the top entry to know whether your install is current.
   every failure fails open. `TASK_FLOW_METRICS=off` switches all of it off. The
   `.gitignore` note (§8b) now also covers `loops.jsonl` and
   `*/loop-events.jsonl`; the script never edits a `.gitignore`.
+- Both hooks now skip a run's `state.json` that is not a plain file of at most
+  1 MiB when looking for a live run, so a repository cannot hold a hook until its
+  timeout with a huge file or a FIFO. The paperclip lookup and the backfill skip
+  folder names that are not run names before their 200-run cap.
 
 ## 2.3.0 — 2026-11-27
 

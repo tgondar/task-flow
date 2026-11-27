@@ -2683,13 +2683,12 @@ const issueRefOf = (value) => uuidOf(value) || (typeof value === 'string' && PAP
 function readRunStates(projectDir, stateDir) {
   let names = [];
   try {
-    names = fs.readdirSync(stateDir).slice(0, MAX_OTHER_RUNS);
+    names = fs.readdirSync(stateDir).filter(isSlug).slice(0, MAX_OTHER_RUNS); // filtered first: junk names cannot use up the cap
   } catch {
     // no folder: no run
   }
   const runs = [];
   for (const name of names) {
-    if (!isSlug(name)) continue;
     const state = readSmallObject(projectDir, path.join(stateDir, name, 'state.json'));
     if (state) runs.push({ slug: name, state });
   }

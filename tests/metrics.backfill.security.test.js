@@ -197,6 +197,16 @@ function setup() {
   check('a project without config: fails open, exit 0, fixed line', noConfig.status === 0 && /^metrics: [a-z-]+ backfill\n$/.test(noConfig.stdout), noConfig.stdout);
 }
 
+// --- 8. junk folder names cannot use up the 200-run cap and hide the real run (harden) ----------
+{
+  setup();
+  // '-' sorts before letters in readdir order on NTFS; none of these is a slug
+  for (let i = 0; i < 210; i += 1) fs.mkdirSync(path.join(STATE, `-junk${String(i).padStart(3, '0')}`));
+  transcript(SUBAGENTS, 'jk1');
+  const r = backfillLoops({ projectDir: PROJECT });
+  check('210 non-slug folders before the real run: the loop is still attributed to it', r.code === 'written' && byId('jk1').run === 'run-a', JSON.stringify([r, byId('jk1')]));
+}
+
 fs.rmSync(TEST_HOME, { recursive: true, force: true });
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) process.exit(1);
