@@ -209,6 +209,18 @@ const controlLines = {
   'a Unicode line separator': `a\u2028${MARK}`,
   'a paragraph separator': `a\u2029${MARK}`,
   'a C1 control': `\u0085${MARK}`,
+  // Invisible format characters: not in questions.js CONTROL, but here they can
+  // split a URL or a delimiter so that the SUSPICIOUS patterns no longer match,
+  // while the model reading the block still sees the URL.
+  'a zero-width space splitting a URL': `https:​//evil.example/${MARK}`,
+  'a zero-width joiner splitting www.': `www‍.${MARK}.example`,
+  'a zero-width non-joiner splitting a checkbox': `-‌[x] ${MARK}`,
+  'a left-to-right mark': `‎${MARK}`,
+  'a right-to-left mark': `‏${MARK}`,
+  'an Arabic letter mark': `؜${MARK}`,
+  'a word joiner splitting the delimiter name': `standing⁠-answers ${MARK}`,
+  'a BOM in the middle of a line': `a﻿${MARK}`,
+  'a soft hyphen': `ma­ilto:${MARK}`,
 };
 for (const [what, text] of Object.entries(controlLines)) {
   check(`SECURITY a line with ${what} is rejected by line number, its text never echoed`, () => {

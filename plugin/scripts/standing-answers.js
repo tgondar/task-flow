@@ -65,6 +65,14 @@ const REPLACES = /^(?:substitui|replaces) R([1-9][0-9]{0,3})$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const RESERVED = /[·«»]/;
 
+/** Invisible format characters questions.js CONTROL lets through: soft hyphen,
+ *  Arabic letter mark, zero-width space/joiners, LRM/RLM, word joiner and
+ *  invisible operators, a BOM past the start. Here they matter more than in a
+ *  questions file: one inside "https://" or "standing-answers" stops the
+ *  SUSPICIOUS patterns from matching while the model still reads the URL. Kept
+ *  local, not added to CONTROL, so the questions files' rules do not change. */
+const INVISIBLE = /[­؜᠎​-‏⁠-⁤﻿]/;
+
 /** What makes an otherwise well-formed entry suspicious, and the reason given.
  *  `\\` anywhere: a UNC path can sit mid-sentence, and a rule never needs two
  *  backslashes in a row. `//` only at the start of a field: "a/b" or "and/or"
@@ -103,7 +111,7 @@ function pagePath(config) {
  *  trying to be an entry at all (a title, prose, the control comment). */
 function parseLine(line) {
   if (!line.startsWith(ENTRY_START)) return null;
-  if (CONTROL.test(line)) return { why: 'contains control or bidirectional characters' };
+  if (CONTROL.test(line) || INVISIBLE.test(line)) return { why: 'contains control, bidirectional or invisible characters' };
   const head = ENTRY_HEAD.exec(line);
   if (!head) return { why: 'does not start with "- **R<n>** · " (n from 1, no leading zero)' };
   const parts = head[2].split(SEPARATOR);
