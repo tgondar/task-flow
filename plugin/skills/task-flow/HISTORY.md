@@ -684,7 +684,12 @@ own recent runs.
 - **Only the user's answer is written into the policy** (`config.js bump-policy`),
   never a level the run chose in an auto run: that one is URGENT and waits for
   the user. Otherwise a run would write the rule that later lets it skip the
-  stop. Each class written is listed under `## Needs you` with how to undo it.
+  stop. Each class written is listed under `## Needs you` with how to undo it,
+  and logged in the run's `_log.md` as ⚠️→asked (D6): it changes every later
+  run's bump, so the audit trail must say the user decided it, with their words.
+  The §0b table called this stop "§7.3": a label left from before the §4c
+  planned stop was removed, one item off like every "§7.<n>" then; they are
+  "§7 item <n>" now, and the docs test refuses a "§7.<n>" coming back.
   The command refuses a first policy without `feature` and `fix`, because `check`
   would refuse the configuration and the next run would not start.
 - **Calendar versioning stays outside the policy.** A calendar project (the
@@ -717,7 +722,9 @@ own recent runs.
   `## Found` (the entry's id and the question) makes that auditable in the PR
   without bringing the question back: it still does not count, is not a
   `decision` and is not asked (FR-016), since `## Found` is not the list to
-  review.
+  review. The line has the question as the run wrote it, never the entry's words
+  or rule (D6, from the D5 audit): pasting page text into the PR body would echo
+  whatever a planted entry says; the `R<n>` id is a closed shape, safe to print.
 - **Why the orchestrator reads it with `read`, and the brief carries its path.**
   The SubagentStart hook hands the entries to every subagent, but the orchestrator
   is not a subagent: §2 runs the one reader at every start and resume, so the

@@ -291,7 +291,7 @@ check('section 7 item 2 (security): only the user\'s answer is written, never th
   /the\s+user's\s+answer,\s+never\s+the\s+level\s+you\s+chose/.test(stop2) && /A\s+level\s+you\s+decided\s+in\s+an\s+auto\s+run\s+is\s+never\s+written/.test(stop2));
 check('section 7 item 2: with no policy yet, written only with feature and fix too', /no\s+`bumpPolicy`\s+yet[^.]*`feature`\s+and\s+`fix`/.test(stop2));
 check('section 7 item 2 (security): a refused bump-policy is never worked around by hand', /never\s+edit\s+the\s+file\s+by\s+hand/.test(stop2));
-check('section 0b: the auto table names the bump the policy does not cover', /\| §7\.3 a bump the `bumpPolicy` does not cover/.test(s0b));
+check('section 0b: the auto table names the bump the policy does not cover', /\| §7 item 2 a bump the `bumpPolicy` does not cover/.test(s0b));
 check('section 8b: ## Needs you lists each class written into bumpPolicy, with how to undo it',
   /class\s+this\s+run\s+wrote\s+into\s+`bumpPolicy`[^;]*undo/.test(s8bNeeds));
 check('section 8b: ## Changed has the version, classes, level, rule and reason',
@@ -302,6 +302,26 @@ check('HISTORY.md has the dated bump-policy section, with the FleetManager refac
 check('CLAUDE.md: check also validates bumpPolicy, and the new test is listed',
   /`bumpPolicy`/.test(claudeMd) && /node tests\/config\.bump-policy\.test\.js/.test(claudeMd));
 check('README lists bumpPolicy and the bump-policy command', /`bumpPolicy`/.test(readme) && /config\.js bump-policy/.test(readme));
+
+// D6 (from the D5 security audit, Low): the ## Found line for a question an
+// entry closed carries the entry's id and the question as this run wrote it.
+// The page is untrusted (it can come with a cloned repository), so the entry's
+// own words or rule never go into the PR body; the id is a closed shape.
+check('section 3 (security): the ## Found line has the question as this run wrote it, never the entry\'s words',
+  /the\s+question\s+as\s+this\s+run\s+wrote\s+it,\s+never\s+the\s+entry's\s+words\s+or\s+rule/.test(docPath));
+check('section 8b (security): the ## Found line has the question as this run wrote it, never the entry\'s words',
+  /the\s+question\s+as\s+this\s+run\s+wrote\s+it,\s+never\s+the\s+entry's\s+words\s+or\s+rule/.test(s8bFound));
+
+// D6 (T8 builder question, decided): a bump answer written into bumpPolicy is
+// the user's decision, so it is also an audit entry in the run's log, as
+// ⚠️→asked, besides the line under ## Needs you.
+check('section 7 item 2: each class written into bumpPolicy is logged as ⚠️→asked, besides ## Needs you',
+  /each\s+class\s+written[^.]*`_log\.md`\s+as\s+⚠️→asked[^.]*`## Needs you`/.test(stop2));
+
+// D6: §7's stops are numbered items 1 to 3 since the §4c planned stop was
+// removed; the old "§7.2/§7.3/§7.4" labels pointed one item off (the bump stop
+// is item 2, not "§7.3"). Any "§7.<n>" label coming back is that drift again.
+check('SKILL.md has no "§7.<n>" label left (the stops are "§7 item <n>")', !/§7\.\d/.test(skill));
 
 console.log(`\n${passed}/${passed + failures.length} passed`);
 if (failures.length) {
