@@ -1519,6 +1519,184 @@ function readLoopEvents(projectDir, stateDir, slug) {
 
 Object.assign(module.exports, { appendLoopEvent, readLoopEvents });
 
+// --- loop rows: the closed shape and the history loops.jsonl (spec 6.1, RF-009; plan T3) ---------
+//
+// One line per loop - one execution of an agent - in `<stateDir>/loops.jsonl`, the project's
+// loop history beside metrics.jsonl. The SAME validator takes the three origins (SC-007): a
+// task-flow subagent joined to its transcript at the close, a paperclip loop read from its API,
+// and a backfilled old run. WHY one shape for all three: the page, the PR summary and any later
+// comparison read one file and never ask where a line came from beyond `source`.
+//
+// Same section placement as the start events above (after module.exports, before closeRun), for
+// the same reason. Same trust model as metrics.jsonl: the file is repository data anybody may
+// have edited, so a line is a row only when every field is in its closed shape, an unknown key
+// at any level invalidates it, and the row handed back is rebuilt from the validated values
+// (never the parsed object: no prototype pollution, no smuggled key). A wrong line is counted,
+// never echoed. The key of a row is `source` + `run` + `id`; the FIRST line of a key wins on
+// read, and the writer never appends a key that is already there (RF-052: idempotent backfill).
+
+const LOOPS_FILE = 'loops.jsonl';
+const LOOP_KEYS = [
+  'v', 'source', 'run', 'id', 'agentType', 'phase', 'task', 'round', 'model', 'effort', 'startedAt', 'durationS',
+  'tokens', 'costCents', 'outcome', 'tests', 'critical', 'required', 'reason', 'backfill',
+];
+const LOOP_TOKEN_KEYS = ['input', 'cacheCreate', 'cacheRead', 'output'];
+const LOOP_SOURCES = ['taskflow', 'paperclip'];
+const LOOP_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'unknown'];
+const LOOP_OUTCOMES = ['ok', 'retry', 'failed', 'unknown'];
+const LOOP_TESTS = ['green', 'red'];
+const LOOP_REASONS = ['no-transcript', 'unreadable-format', 'timeout'];
+/** RF-009: one line of loops.jsonl. A full row is about 800 bytes; past this it is not ours. */
+const LOOP_ROW_MAX_BYTES = 1024;
+/** Only the tail is read. Bigger than the metrics.jsonl tail on purpose: the writer checks it
+ *  for keys already present, and a backfill must still see the rows it wrote earlier (about
+ *  5 000 rows fit). More lines than LOOPS_MAX_LINES in it: only the newest are parsed. */
+const LOOPS_TAIL_BYTES = 4 * 1024 * 1024;
+const LOOPS_MAX_LINES = 20000;
+/** A paperclip id: a lower-case UUID, the form its API uses in paths. One spelling only, so
+ *  that the same loop can never be two keys. */
+const PAPERCLIP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+const isShape = (re) => (value) => typeof value === 'string' && re.test(value);
+const isRound = (value) => typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 99;
+
+/**
+ * Is `row` a valid version-1 loop line? Never throws. `{ ok: true, row }` with `row` rebuilt
+ * from the validated values, in LOOP_KEYS order; `{ ok: false }` for a wrong shape;
+ * `{ ok: false, ignored: true }` for another version (a newer task-flow's line is not an
+ * error). No reason text, as in validateRow.
+ *
+ * Two rules tie fields together: `costCents` can only be a number on a paperclip line (RF-045:
+ * money only from paperclip, never priced by task-flow), and `reason` explains missing tokens,
+ * so it can only be set when `tokens` is null (tokens null with no reason is allowed: a
+ * paperclip loop may simply report none).
+ */
+function validateLoopRow(row) {
+  try {
+    if (!isObject(row)) return { ok: false };
+    if (hasOwn(row, 'v') && row.v !== 1 && typeof row.v === 'number') return { ok: false, ignored: true };
+    if (!hasExactKeys(row, LOOP_KEYS) || row.v !== 1 || !LOOP_SOURCES.includes(row.source)) return { ok: false };
+    const paperclip = row.source === 'paperclip';
+    const tokens = row.tokens;
+    if (tokens !== null && !(hasExactKeys(tokens, LOOP_TOKEN_KEYS) && LOOP_TOKEN_KEYS.every((key) => isCount(tokens[key])))) return { ok: false };
+
+    const fields =
+      (row.run === 'unknown' || isSlug(row.run)) &&
+      (paperclip ? isShape(PAPERCLIP_ID)(row.id) : isShape(SHAPE.agentId)(row.id)) &&
+      isShape(SHAPE.agentType)(row.agentType) &&
+      LOOP_PHASES.includes(row.phase) &&
+      (row.task === '' || isShape(SHAPE.taskId)(row.task)) &&
+      orNull(isRound)(row.round) &&
+      orNull(isShape(SHAPE.model))(row.model) &&
+      (row.effort === null || LOOP_EFFORTS.includes(row.effort)) &&
+      orNull(isInstant)(row.startedAt) &&
+      orNull(isCount)(row.durationS) &&
+      (row.costCents === null || (paperclip && isCount(row.costCents))) &&
+      (row.outcome === null || LOOP_OUTCOMES.includes(row.outcome)) &&
+      (row.tests === null || LOOP_TESTS.includes(row.tests)) &&
+      orNull(isCount)(row.critical) &&
+      orNull(isCount)(row.required) &&
+      (row.reason === null || (tokens === null && LOOP_REASONS.includes(row.reason))) &&
+      isBool(row.backfill);
+    if (!fields) return { ok: false };
+
+    const fresh = {};
+    for (const key of LOOP_KEYS) fresh[key] = row[key];
+    fresh.tokens = tokens === null ? null : { input: tokens.input, cacheCreate: tokens.cacheCreate, cacheRead: tokens.cacheRead, output: tokens.output };
+    if (Buffer.byteLength(JSON.stringify(fresh), 'utf8') > LOOP_ROW_MAX_BYTES) return { ok: false };
+    return { ok: true, row: fresh };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** One loops.jsonl line (text, without its newline) to a validated row. Never throws, never
+ *  echoes: length before parsing, and the JSON.parse message (which quotes the input) dropped. */
+function parseLoopRow(line) {
+  try {
+    if (typeof line !== 'string') return { ok: false };
+    const text = line.replace(/^﻿/, '').replace(/[\r\n]+$/, '');
+    if (text.length > LOOP_ROW_MAX_BYTES || Buffer.byteLength(text, 'utf8') > LOOP_ROW_MAX_BYTES) return { ok: false };
+    return validateLoopRow(JSON.parse(text));
+  } catch {
+    return { ok: false };
+  }
+}
+
+const loopKey = (row) => `${row.source}\n${row.run}\n${row.id}`;
+
+/**
+ * The validated rows of `<stateDir>/loops.jsonl`, oldest first, one per key (the first line
+ * wins). `{ rows, ignored, code }` exactly as readHistory: `ignored` counts non-blank lines that
+ * are not a row (a duplicate key is a valid row, not counted); `code` null, `unsafe-path` or
+ * `read-failed`. Bounded whatever the file; never throws, never carries text from the file.
+ */
+function readLoops(projectDir, stateDir) {
+  const result = { rows: [], ignored: 0, code: null };
+  try {
+    if (typeof stateDir !== 'string') return { ...result, code: 'unsafe-path' };
+    const tail = readTail(projectDir, stateDir, path.join(stateDir, LOOPS_FILE), LOOPS_TAIL_BYTES);
+    if (tail.code) return { ...result, code: tail.code };
+    let lines = tail.text.split('\n');
+    if (lines.length > LOOPS_MAX_LINES) lines = lines.slice(-LOOPS_MAX_LINES);
+    const seen = new Set();
+    for (const raw of lines) {
+      if (raw.replace(/^﻿/, '').trim() === '') continue;
+      const parsed = parseLoopRow(raw);
+      if (!parsed.ok) {
+        result.ignored += 1;
+        continue;
+      }
+      const key = loopKey(parsed.row);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.rows.push(parsed.row);
+    }
+    return result;
+  } catch {
+    return { rows: [], ignored: 0, code: 'read-failed' };
+  }
+}
+
+/**
+ * Appends to `<stateDir>/loops.jsonl` the rows of `rows` that are valid and whose key is not in
+ * the history yet (nor earlier in the same batch), each serialised from its validated object,
+ * all in ONE append (appendLine: contained, no link, no folder created). Returns
+ * `{ ok, code, written, invalid }`: code null on success (`written` 0 means nothing new, and
+ * then no file is created), or `bad-input`, `unsafe-path`, `read-failed`, `write-failed`.
+ * A history that cannot be read is not written either: without it the keys already there are
+ * unknown, and a blind append would duplicate them. Never throws.
+ */
+function appendLoopRows(projectDir, stateDir, rows) {
+  const outcome = (ok, code, written, invalid) => ({ ok, code, written, invalid });
+  try {
+    if (!Array.isArray(rows)) return outcome(false, 'bad-input', 0, 0);
+    const history = readLoops(projectDir, stateDir);
+    if (history.code) return outcome(false, history.code, 0, 0);
+    const seen = new Set(history.rows.map(loopKey));
+    const lines = [];
+    let invalid = 0;
+    for (const row of rows) {
+      const checked = validateLoopRow(row);
+      if (!checked.ok) {
+        invalid += 1;
+        continue;
+      }
+      const key = loopKey(checked.row);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      lines.push(JSON.stringify(checked.row));
+    }
+    if (lines.length === 0) return outcome(true, null, 0, invalid);
+    const written = appendLine(projectDir, stateDir, path.join(stateDir, LOOPS_FILE), lines.join('\n'), Infinity);
+    return written.ok ? outcome(true, null, lines.length, invalid) : outcome(false, written.code, 0, invalid);
+  } catch {
+    return outcome(false, 'write-failed', 0, 0);
+  }
+}
+
+Object.assign(module.exports, { LOOP_KEYS, validateLoopRow, parseLoopRow, readLoops, appendLoopRows });
+
 // --- closeRun and the CLI (spec R3, R4, R9; plan T7) -----------------------------------------------
 //
 // Deliberately AFTER module.exports: the security suites of the pure/reader sections scan
