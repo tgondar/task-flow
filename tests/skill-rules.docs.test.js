@@ -256,6 +256,53 @@ check('section 8b: ## Found lists every question a standing answer closed, by it
 check('HISTORY.md says why a question closed by an entry is listed under ## Found',
   /planted\s+entry[^]*`## Found`/.test(section(history, '##', "The orchestrator reads the standing answers first")));
 
+// T8 (FR-005 to FR-008, Q8 option four): the per-project bump policy. The code
+// only validates its shape (`config.js check`) and writes one answer into it
+// (`config.js bump-policy`); the rule that uses it is prose, here: the run's bump
+// is the highest level among the classes present, a class with no level is the
+// uncovered case that stops (attended) or is URGENT (auto), only the user's
+// answer is written into the policy, a covered bump is not a decision, and the
+// PR says which version, classes, level and rule. Drop one and the bump stop
+// either comes back every run, or the run starts writing its own policy.
+const s6 = section(skill, '##', '6. ');
+const bumpStart = s6.indexOf('- **Version bump**');
+const bump = bumpStart < 0 ? '' : s6.slice(bumpStart, s6.indexOf('\n- **', bumpStart + 1));
+const stop2Start = s7.indexOf('2. **A genuine block**');
+const stop2 = stop2Start < 0 ? '' : s7.slice(stop2Start, s7.indexOf('\n3. **', stop2Start));
+const s8bNeedsStart = s8b.indexOf('**`## Needs you`**');
+const s8bNeeds = s8bNeedsStart < 0 ? '' : s8b.slice(s8bNeedsStart, s8b.indexOf('\n2. **`## Changed`**', s8bNeedsStart));
+const s8bChanged = s8b.slice(s8b.indexOf('**`## Changed`**'), s8bFoundStart);
+const configJs = fs.readFileSync(path.join(ROOT, 'plugin', 'scripts', 'config.js'), 'utf8');
+check('section 0 lists bumpPolicy among the optional fields', /`defaultBump`, `bumpPolicy`/.test(s0));
+check('section 6: the bump follows bumpPolicy, which wins over defaultBump', /`bumpPolicy`[^]*wins over `defaultBump`/.test(bump));
+check('section 6: the run classifies its changes from the plan and the diff', /from\s+the\s+plan\s+and\s+the\s+diff/.test(bump));
+check('section 6: the classes in the prose are the classes in config.js',
+  ['feature', 'fix', 'breaking', 'restructure'].every((c) => bump.includes(`\`${c}\``) && configJs.includes(`${c}: '`)));
+check('section 6: the bump is the highest level among the classes present', /highest\s+level\s+among\s+the\s+classes\s+present/.test(bump));
+check('section 6: a covered bump is not a decision and goes under ## Changed only',
+  /covers[^.]*without\s+stopping[^]*not\s+a\s+decision[^]*`## Changed`[^.]*never\s+into\s+`questions\.json`/.test(bump));
+check('section 6: a class present with no level is a blocker (section 7 item 2)', /class\s+present\s+with\s+no\s+level[^.]*§7\s+item\s+2/.test(bump));
+check('section 6: calendar stays outside the policy and check refuses both together',
+  /calendar[^]*`defaultBump: "calendar"`[^.]*`config\.js check`\s+refuses/.test(bump));
+check('section 7 item 2: the uncovered bump stops, named by bumpPolicy', /bump\s+the\s+project's\s+`bumpPolicy`\s+does\s+not\s+cover/.test(stop2));
+check('section 7 item 2: in an auto run the uncovered bump is decided and URGENT', /auto\s+run[^]*bump\s+the\s+policy\s+does\s+not\s+cover[^]*\*\*URGENT\*\*/.test(stop2));
+check('section 7 item 2: the answer is written with config.js bump-policy', /config\.js"\s+bump-policy\s+--class/.test(stop2));
+check('section 7 item 2 (security): only the user\'s answer is written, never the run\'s own level',
+  /the\s+user's\s+answer,\s+never\s+the\s+level\s+you\s+chose/.test(stop2) && /A\s+level\s+you\s+decided\s+in\s+an\s+auto\s+run\s+is\s+never\s+written/.test(stop2));
+check('section 7 item 2: with no policy yet, written only with feature and fix too', /no\s+`bumpPolicy`\s+yet[^.]*`feature`\s+and\s+`fix`/.test(stop2));
+check('section 7 item 2 (security): a refused bump-policy is never worked around by hand', /never\s+edit\s+the\s+file\s+by\s+hand/.test(stop2));
+check('section 0b: the auto table names the bump the policy does not cover', /\| §7\.3 a bump the `bumpPolicy` does not cover/.test(s0b));
+check('section 8b: ## Needs you lists each class written into bumpPolicy, with how to undo it',
+  /class\s+this\s+run\s+wrote\s+into\s+`bumpPolicy`[^;]*undo/.test(s8bNeeds));
+check('section 8b: ## Changed has the version, classes, level, rule and reason',
+  /new\s+version,\s+the\s+classes\s+of\s+change\s+found,\s+the\s+level,\s+the\s+rule\s+applied[^]*why/.test(s8bChanged));
+check('HISTORY.md has the dated bump-policy section, with the FleetManager refactor and calendar',
+  /\n## A per-project bump policy replaces the bump stop \(2026-11-27\)/.test(history) &&
+  /v1\.61\.0/.test(section(history, '##', 'A per-project bump policy')) && /calendar/.test(section(history, '##', 'A per-project bump policy')));
+check('CLAUDE.md: check also validates bumpPolicy, and the new test is listed',
+  /`bumpPolicy`/.test(claudeMd) && /node tests\/config\.bump-policy\.test\.js/.test(claudeMd));
+check('README lists bumpPolicy and the bump-policy command', /`bumpPolicy`/.test(readme) && /config\.js bump-policy/.test(readme));
+
 console.log(`\n${passed}/${passed + failures.length} passed`);
 if (failures.length) {
   console.log(`${failures.length} failing:`);

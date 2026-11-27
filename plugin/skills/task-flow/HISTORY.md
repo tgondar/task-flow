@@ -657,6 +657,47 @@ own recent runs.
   dependency not worth carrying once the viewer had its own identity; this was his
   call to make, not a compliance problem being worked around.
 
+## A per-project bump policy replaces the bump stop (2026-11-27)
+
+- **The bump stop asked the same question every time.** §7 item 2 stopped
+  whenever a bump looked like a minor or a major: 16 times in the baseline of the
+  standing-answers run, always with the same answer. A project now writes its
+  rule once, `bumpPolicy` in `.claude/task-flow.json`, and a run applies it at
+  the close without stopping, in either mode; `## Changed` says which version,
+  which classes of change, which level and which rule. A covered bump is not a
+  decision, so it is not on the list to review either. With no policy, nothing
+  changes: `defaultBump` and the stop, as before; with both, the policy wins.
+- **Four classes, not two (Q8 of that run, working answer `four`).** The first
+  shape was "a new capability" and "a fix = everything else". The user had
+  answered **minor** to an architecture refactor with no new feature
+  (FleetManager v1.61.0) and **patch** to a deploy-only change; with two classes
+  the refactor would have been a patch, unasked. So `restructure` (a structural
+  change to the product's code with nothing visible) and `breaking` (an
+  incompatible change) are classes of their own, optional: left without a level,
+  a run that finds one stops once, and the answer is written into the policy.
+  `feature` and `fix` must have a level. The classes are one constant in
+  `config.js` (`BUMP_CLASSES`) so that a different answer to Q8 is a small diff.
+- **The run's bump is the highest level among the classes present.** That rule
+  stays prose (§6), with no `bump-level` function: the run classifies its own
+  diff from the plan, and code taking a list of classes would only move the
+  judgement, not remove it.
+- **Only the user's answer is written into the policy** (`config.js bump-policy`),
+  never a level the run chose in an auto run: that one is URGENT and waits for
+  the user. Otherwise a run would write the rule that later lets it skip the
+  stop. Each class written is listed under `## Needs you` with how to undo it.
+  The command refuses a first policy without `feature` and `fix`, because `check`
+  would refuse the configuration and the next run would not start.
+- **Calendar versioning stays outside the policy.** A calendar project (the
+  Rav's) keeps `defaultBump: "calendar"`; a policy next to it is refused by
+  `check`, naming both fields, so a project never has two rules that disagree.
+- **Validated by `check` only, never by `loadConfig`.** Like `githubProject`: a
+  malformed policy must not switch off the Stop hook, the SubagentStart hook, the
+  renderer or the measurement. The file is committed, so the shape is closed
+  (closed classes, closed levels, no other key) and an error names the field,
+  never the value or an unknown key. `tests/config.bump-policy.test.js` holds
+  both, and `tests/skill-rules.docs.test.js` fails when §6, §7 item 2, §0b or
+  §8b stop describing it.
+
 ## The orchestrator reads the standing answers first and promotes only the user's rules (2026-11-27)
 
 - **Why the page is the first source of the question loop.** The idea behind this

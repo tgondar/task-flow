@@ -22,6 +22,7 @@
 //   node config.js trust [--project-dir <dir>]
 //   node config.js github-projects [--project-dir <dir>]
 //   node config.js github-project <number>|none [--ready-option <status name>] [--project-dir <dir>]
+//   node config.js bump-policy --class <class> --level <major|minor|patch> [--class ... --level ...] [--project-dir <dir>]
 
 'use strict';
 
@@ -551,6 +552,82 @@ function setGithubProject(projectDir, value) {
   fs.writeFileSync(configPath(projectDir), JSON.stringify({ ...read.raw, githubProject: value }, null, 2) + '\n');
 }
 
+// --- the project's bump policy (SKILL.md §6, §7 item 2) --------------------
+//
+// Which semver level each class of change gets, written once per project so a
+// run stops asking. It was the most repeated stop of the pipeline (16 in the
+// baseline, always the same answer). The run classifies its own diff and takes
+// the highest level among the classes present; that rule is prose (SKILL.md
+// §6), this file only holds the shape. A class present with no level is the
+// case the policy does not cover, and stops as before.
+//
+// Validated by `check` only, like githubProject: a malformed policy must never
+// switch off the Stop hook, the SubagentStart hook, the renderer or the
+// measurement. Calendar versioning stays outside the policy: a calendar project
+// keeps `defaultBump: "calendar"`, and the two together are refused.
+//
+// The classes are Q8's working answer (option `four`) and the one place to
+// change if the answer differs: `required` must have a level, `optional` may.
+const BUMP_CLASSES = { feature: 'required', fix: 'required', breaking: 'optional', restructure: 'optional' };
+const BUMP_LEVELS = ['major', 'minor', 'patch'];
+
+const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const isCalendar = (defaultBump) => typeof defaultBump === 'string' && defaultBump.trim().toLowerCase() === 'calendar';
+
+/** Problems with a bumpPolicy value, naming fields only - never a value, and
+ *  never an unknown key, which is text from the file too. undefined is valid
+ *  (no policy). */
+function bumpPolicyErrors(value, defaultBump) {
+  if (value === undefined) return [];
+  if (isCalendar(defaultBump)) {
+    return ['bumpPolicy cannot be set next to a calendar defaultBump: calendar versioning stays outside the policy; ' +
+      'keep defaultBump and remove bumpPolicy, or the other way round'];
+  }
+  if (!isPlainObject(value)) {
+    return [`bumpPolicy must be an object mapping ${Object.keys(BUMP_CLASSES).join(', ')} to ${BUMP_LEVELS.join(', ')}`];
+  }
+  const errors = [];
+  for (const [name, kind] of Object.entries(BUMP_CLASSES)) {
+    const present = Object.prototype.hasOwnProperty.call(value, name);
+    if (kind === 'required' && !present) errors.push(`bumpPolicy.${name} is missing or malformed`);
+    else if (present && !BUMP_LEVELS.includes(value[name])) {
+      errors.push(kind === 'required' ? `bumpPolicy.${name} is missing or malformed` : `bumpPolicy.${name} is malformed`);
+    }
+  }
+  if (Object.keys(value).some((key) => !Object.prototype.hasOwnProperty.call(BUMP_CLASSES, key))) {
+    errors.push(`bumpPolicy has a key that is not a class (${Object.keys(BUMP_CLASSES).join(', ')})`);
+  }
+  return errors;
+}
+
+/** Writes `levels` ({ class: level }) into the policy, keeping every other
+ *  field and class. The whole resulting policy is validated before the write,
+ *  so this never leaves a file `check` would refuse - a first policy needs the
+ *  required classes in the same call. */
+function setBumpPolicy(projectDir, levels) {
+  const pairs = Object.entries(levels);
+  if (!pairs.length) throw new Error('give at least one --class and --level pair');
+  for (const [name, level] of pairs) {
+    if (!Object.prototype.hasOwnProperty.call(BUMP_CLASSES, name)) {
+      throw new Error(`--class must be one of ${Object.keys(BUMP_CLASSES).join(', ')}`);
+    }
+    if (!BUMP_LEVELS.includes(level)) throw new Error(`--level must be one of ${BUMP_LEVELS.join(', ')}`);
+  }
+  const read = readRaw(projectDir);
+  if (!read.exists) throw new Error(`${CONFIG_FILE} is missing; run init first`);
+  if (read.error) throw new Error(`${CONFIG_FILE} is not a valid configuration; fix or remove it first`);
+  // A policy already there must be a valid shape before anything merges into
+  // it: spreading a string or an array would turn it into numbered keys.
+  const current = read.raw.bumpPolicy;
+  if (current !== undefined && !isPlainObject(current)) throw new Error(bumpPolicyErrors(current).join('; '));
+  const next = { ...current, ...Object.fromEntries(pairs) };
+  const errors = bumpPolicyErrors(next, read.raw.defaultBump);
+  if (errors.length) throw new Error(errors.join('; '));
+  refuseLinkedConfig(projectDir);
+  fs.writeFileSync(configPath(projectDir), JSON.stringify({ ...read.raw, bumpPolicy: next }, null, 2) + '\n');
+  return next;
+}
+
 /** A committed `.claude` or `.claude/task-flow.json` that is a symlink or
  *  junction would make a write land in whatever file it points at. */
 function refuseLinkedConfig(projectDir) {
@@ -637,7 +714,7 @@ function projectKey(projectDir, platform = process.platform) {
  * `requireExisting` (default true) also checks that docsDir and tasksFile exist;
  * `init` turns it off because creating them is its job.
  */
-function loadConfig(projectDir, { env = process.env, requireExisting = true, requireGithubProject = false } = {}) {
+function loadConfig(projectDir, { env = process.env, requireExisting = true, requireGithubProject = false, validateBumpPolicy = false } = {}) {
   const read = readRaw(projectDir);
   const result = { exists: read.exists, file: read.file, ok: false, errors: [], config: null };
   if (!read.exists) {
@@ -714,6 +791,13 @@ function loadConfig(projectDir, { env = process.env, requireExisting = true, req
       result.errors.push(...problems);
       if (!problems.length) config.githubProject = raw.githubProject;
     }
+  }
+
+  // Also the gate's only - see "the project's bump policy".
+  if (validateBumpPolicy) {
+    const problems = bumpPolicyErrors(raw.bumpPolicy, raw.defaultBump);
+    result.errors.push(...problems);
+    if (!problems.length && raw.bumpPolicy !== undefined) config.bumpPolicy = raw.bumpPolicy;
   }
 
   result.ok = result.errors.length === 0;
@@ -802,6 +886,10 @@ function initConfig(projectDir, { docsDir, language = DEFAULT_LANGUAGE, tasksFil
 }
 
 module.exports = {
+  BUMP_CLASSES,
+  BUMP_LEVELS,
+  bumpPolicyErrors,
+  setBumpPolicy,
   CONFIG_FILE,
   DEFAULT_STATE_DIR,
   PAGE_LANGUAGES,
@@ -861,7 +949,10 @@ if (require.main === module) {
           `  stateDir  : ${config.stateDir}\n` +
           (config.githubProject === undefined ? ''
             : config.githubProject === null ? '  githubProject : none (/task-flow paperclip is unavailable)\n'
-              : `  githubProject : ${config.githubProject.owner}/${config.githubProject.repo} (${config.githubProject.projectId})\n`)
+              : `  githubProject : ${config.githubProject.owner}/${config.githubProject.repo} (${config.githubProject.projectId})\n`) +
+          // Closed classes and levels only (validated above), never free text.
+          (config.bumpPolicy === undefined ? ''
+            : `  bumpPolicy : ${Object.entries(config.bumpPolicy).map(([k, v]) => `${k}=${v}`).join(', ')}\n`)
       );
       return 0;
     }
@@ -877,7 +968,7 @@ if (require.main === module) {
   };
 
   if (command === 'check') {
-    process.exitCode = report(loadConfig(projectDir, { requireGithubProject: true }));
+    process.exitCode = report(loadConfig(projectDir, { requireGithubProject: true, validateBumpPolicy: true }));
   } else if (command === 'init') {
     const docsDir = value('--docs-dir');
     const tasksFile = value('--tasks-file');
@@ -969,8 +1060,27 @@ if (require.main === module) {
       process.stderr.write(`github-project failed: ${error.message}\n`);
       process.exitCode = 1;
     }
+  } else if (command === 'bump-policy') {
+    // The answer to a §7 item 2 stop, written into the policy. Only the user's
+    // answer, never the run's own decision: SKILL.md says so, this cannot tell.
+    // Pairs in order: --class a --level x [--class b --level y ...].
+    const flags = (flag) => argv.flatMap((arg, index) => (arg === flag ? [argv[index + 1]] : []));
+    const classes = flags('--class');
+    const levels = flags('--level');
+    if (!classes.length || classes.length !== levels.length) {
+      process.stderr.write('bump-policy needs --class and --level in pairs: --class <class> --level <major|minor|patch> [...]\n');
+      process.exitCode = 2;
+    } else {
+      try {
+        const policy = setBumpPolicy(projectDir, Object.fromEntries(classes.map((name, index) => [name, levels[index]])));
+        process.stdout.write(`bumpPolicy set to ${Object.entries(policy).map(([k, v]) => `${k}=${v}`).join(', ')}.\n`);
+      } catch (error) {
+        process.stderr.write(`bump-policy failed: ${error.message}\n`);
+        process.exitCode = 1;
+      }
+    }
   } else {
-    process.stderr.write('usage: config.js check | trust | trust-paperclip --url <url> | init --docs-dir <dir> --tasks-file <file> [--language <tag>] | github-projects | github-project <number>|none [--ready-option <name>]\n');
+    process.stderr.write('usage: config.js check | trust | trust-paperclip --url <url> | init --docs-dir <dir> --tasks-file <file> [--language <tag>] | github-projects | github-project <number>|none [--ready-option <name>] | bump-policy --class <class> --level <level> [...]\n');
     process.exitCode = 2;
   }
 }

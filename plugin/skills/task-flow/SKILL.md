@@ -117,7 +117,8 @@ here and says what is missing.
 
 Everything else project-specific also comes from that file, all optional:
 `stateDir` (where runs keep `state.json`, default `.claude/task-flow`),
-`versionFiles`, `defaultBump`, `branches`, `preflightSkill`, `commands`,
+`versionFiles`, `defaultBump`, `bumpPolicy` (the project's level per class of
+change, §6; `check` validates its shape), `branches`, `preflightSkill`, `commands`,
 `testProjects`, `backlogFile` (relative to `docsDir`). Never hard-code any of it
 here, and never borrow another project's.
 
@@ -214,7 +215,7 @@ never because the run is long or because they are away.
 |---|---|---|
 | §3 decision ceiling | stop at 3 | no ceiling — keep counting, keep recording, never stop |
 | §4c performance | runs only when the spec or the plan names a performance requirement | the same — runs only on a named requirement, never asked |
-| §7.3 a minor or major bump | stop and ask | decide it, mark it ⚠️, and lead with it in the PR body |
+| §7.3 a bump the `bumpPolicy` does not cover (with no policy, a minor or major bump) | stop and ask | decide it, mark it **URGENT**, and lead with it in the PR body — never write it into `bumpPolicy` |
 | §7.2 red tests | stop, do not commit | fix it — at most 3 attempts at the same failure — and if it is still red, open the PR **as a draft** with the real output in the body (§8c) |
 | §7.4 three decisions waiting | stop | never stops |
 | §3 a question the loop could not settle | counts toward the 3 | parks its task and carries on; stops when every task left is pending or depends on one |
@@ -1346,8 +1347,21 @@ The hook says nothing when the page is missing or refused.
   `## Found` in the PR body (§8b). It never goes into `questions.json`, under
   `## Needs you`, or into `pendingDecisions`: there is nothing in it for the user
   to overrule. Anything else the run settles on its own is still a decision (§3).
-- **Version bump** per `defaultBump` across `versionFiles`, no BOM. If it looks
-  like a minor or major, that is a blocker (§7).
+- **Version bump** across `versionFiles`, no BOM, by the project's `bumpPolicy`
+  when it has one — semver only, and it wins over `defaultBump`. Classify the
+  run's changes from the plan and the diff into the policy's classes: `feature`
+  (a new capability, visible to whoever uses the product), `fix` (a fix, a tweak,
+  or a change outside the product's code), `breaking` (an incompatible change),
+  `restructure` (a structural change to the product's code with nothing visible).
+  The run's bump is the **highest level among the classes present**; that is the
+  whole rule, and no code computes it. A bump the policy covers is applied
+  without stopping, in either mode, and is not a decision: it goes under
+  `## Changed` (§8b), never into `questions.json` or `## Needs you`. A class
+  present with no level in the policy is the case it does not cover: a blocker
+  (§7 item 2). With no `bumpPolicy`, `defaultBump` as before: if the bump looks
+  like a minor or major, that is a blocker (§7 item 2). Calendar versioning stays
+  outside the policy: a calendar project keeps `defaultBump: "calendar"`, and
+  `config.js check` refuses a `bumpPolicy` next to it.
 - **Branch** from `branches.from` with the `branches.prefix` before the first
   commit. **Never merge** into anything in `branches.neverMerge` — that is the
   user's.
@@ -1386,15 +1400,32 @@ decided and marked ⚠️ like anything else. Read §0b before you read the thre
    without making the work useless if it turns out wrong. That includes: a missing
    or invalid configuration (§0), a missing idea artifact on a new run (§2a), a new
    fact that changes the design of an **already-approved** plan (an approved plan
-   does not extend itself), dropping a slice of approved scope, and a bump that
-   looks like minor or major. Also stop here for a single banked decision that
-   genuinely cannot wait (§3).
+   does not extend itself), dropping a slice of approved scope, and a bump the
+   project's `bumpPolicy` does not cover — a class present with no level in it
+   (§6) — or, with no `bumpPolicy`, a bump that looks like minor or major. Also
+   stop here for a single banked decision that genuinely cannot wait (§3).
    **In an auto run only the configuration, the missing idea artifact and a run with
    nothing left but pending tasks still stop.** The others — a new fact that changes
-   an approved design, a minor or major bump, dropping a slice of approved scope —
-   are decided, marked **URGENT** and listed first in the PR body (§8c). Those three
-   are the ones the user is most likely to overrule, so they are the ones that must
-   be impossible to miss when they open it.
+   an approved design, a bump the policy does not cover, dropping a slice of
+   approved scope — are decided, marked **URGENT** and listed first in the PR body
+   (§8c). Those three are the ones the user is most likely to overrule, so they are
+   the ones that must be impossible to miss when they open it.
+   **The answer to a bump stop is written into the policy** — the user's answer,
+   never the level you chose — one `--class`/`--level` pair per class they gave a
+   level to:
+
+   ```sh
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/config.js" bump-policy --class <feature|fix|breaking|restructure> --level <major|minor|patch>
+   ```
+
+   With no `bumpPolicy` yet, write it only when their answer gives `feature` and
+   `fix` a level too: the command refuses a policy without them, because `check`
+   would then refuse the configuration. Otherwise their answer settles this run's
+   bump and nothing is written. A level you decided in an auto run is never
+   written: it is **URGENT**, and it waits for the user like any decision. List
+   each class written under `## Needs you` (§8b). If the command refuses, say so
+   in one line with the reason it printed and put that under `## Found`; never
+   edit the file by hand to get past it.
 3. **`pendingDecisions` reaches 3.** Put all three to the user together, in prose,
    each with what you chose, what else was on the table, and what changes if they
    overrule you. Say which phase they came from and what is still ahead.
@@ -1600,13 +1631,18 @@ Four headings, in this order, in `language`, in both modes:
    id it replaced if it did, and how to undo it: delete its line from
    `<docsDir>/standing-answers.md` (the absolute path), and the rule is gone from
    the next run on; its id is never used again, and the item is never promoted
-   again; every Critical or Required review finding you declined to fix,
+   again; every class this run wrote into `bumpPolicy` (§7 item 2), with its
+   level and how to undo it: change or remove that class in
+   `.claude/task-flow.json`, or run `config.js bump-policy` again with the level
+   it had; every Critical or Required review finding you declined to fix,
    with why, and every pre-existing Critical the review found (§4d); every
    `- [ ]` still open in the questions file. If nothing, write *"Nothing."* — never leave
    the heading out. (Red tests are not here: in the one mode that can open a PR
    with them, §8c puts them above this heading.)
 2. **`## Changed`** — which idea artifact the run started from, the artifacts
-   written, the commits and the PR, the version bump, the review's verdict and the
+   written, the commits and the PR, the version bump — the new version, the classes
+   of change found, the level, the rule applied (the `bumpPolicy` class, or
+   `defaultBump`) and why each class was found —, the review's verdict and the
    fixes it led to.
 3. **`## Found`** — what the run learned that is not a change: deferred
    Optional/Nit findings, corner cases spotted but not tested (§4b), the three facts
