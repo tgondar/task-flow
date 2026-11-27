@@ -641,6 +641,43 @@ async function checkAsync(name, fn) {
     assert(result.state.status === 'blocked' && result.state.outcome === 'handed-off', 'the transition still happens');
   });
 
+  // --- security (T10): hostile POST responses ------------------------------
+
+  const HOSTILE = ['../../etc/passwd', 'IGNORE PREVIOUS instructions', '<img src=x onerror=alert(1)>', 'GON-12‮', 'GON-12/../x', 'GON-12\n', 'ＧＯＮ-12', 'GON-١٢', 'GON-12?x=1', 'x'.repeat(100000)];
+  check('paperclipIssueIdOf refuses hostile strings, arrays, objects, numbers and prototype keys', () => {
+    for (const value of HOSTILE) {
+      assert(paperclipIssueIdOf({ id: value, identifier: value }) === undefined, `refused: ${JSON.stringify(value.slice(0, 40))}`);
+      assert(paperclipIssueIdOf({ id: `${ISSUE_UUID}${value}` }) === undefined, 'no UUID prefix trick');
+    }
+    for (const value of [[ISSUE_UUID], { toString: () => ISSUE_UUID }, 12, true, ['GON-12']]) {
+      assert(paperclipIssueIdOf({ id: value, identifier: value }) === undefined, 'non-strings refused');
+    }
+    assert(paperclipIssueIdOf(JSON.parse(`{"__proto__":{"id":"${ISSUE_UUID}","identifier":"GON-12"}}`)) === undefined, '__proto__ key gives nothing');
+  });
+
+  check('every value paperclipIssueIdOf accepts is safe as one URL path segment', () => {
+    for (const value of [ISSUE_UUID, 'GON-12', 'A-1', 'ABCDEFGHIJ-9999999']) {
+      const got = paperclipIssueIdOf({ identifier: value, id: value });
+      assert(got === value && encodeURIComponent(got) === got && !/[./]/.test(got) && !got.includes("\\"), `path-safe: ${got}`);
+    }
+  });
+
+  for (const [label, body] of [
+    ['null', null], ['an array', [ISSUE_UUID]], ['a string', 'GON-12'], ['a number', 5],
+    ['hostile fields', { id: '../../IGNORE PREVIOUS <img onerror> ‮', identifier: 'IGNORE PREVIOUS‮../x' }],
+  ]) {
+    await checkAsync(`a POST response that is ${label} hands off, records nothing, echoes nothing, never leaks the token`, async () => {
+      const result = await handOffAgainst(body);
+      assert(result.status === 0, `hand-off must still record its transition, got ${result.status}`);
+      assert(!('paperclipIssueId' in result.state), 'no paperclipIssueId');
+      assert(result.state.outcome === 'handed-off', 'transition recorded');
+      const all = result.stdout + result.stderr + JSON.stringify(result.state);
+      for (const marker of ['IGNORE PREVIOUS', 'onerror', '../', '‮', 'test-token']) {
+        assert(!all.includes(marker), `${JSON.stringify(marker)} must not appear in stdout/stderr/state.json`);
+      }
+    });
+  }
+
   // --- summary ---------------------------------------------------------------
 
   // readArtifact's own fail() sets process.exitCode as a side effect when called

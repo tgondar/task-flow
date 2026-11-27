@@ -368,10 +368,14 @@ async function main() {
   state.outcome = 'handed-off';
   const paperclipIssueId = paperclipIssueIdOf(issue);
   if (paperclipIssueId) state.paperclipIssueId = paperclipIssueId;
-  state.outcomeNote = `paperclip issue ${issue.identifier || issue.id}${statusFlipped ? '' : ' (board status not flipped)'}`;
+  // Only the closed-shape id is ever written or printed: the raw identifier/id
+  // is a third party's text (stdout reaches the model), and a response that
+  // parsed to null used to throw here after the issue was already created.
+  const shownId = paperclipIssueId || '(id not recognised)';
+  state.outcomeNote = `paperclip issue ${shownId}${statusFlipped ? '' : ' (board status not flipped)'}`;
   fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
 
-  process.stdout.write(`handed off ${slug} to paperclip as ${issue.identifier || issue.id}\n`);
+  process.stdout.write(`handed off ${slug} to paperclip as ${shownId}\n`);
 }
 
 if (require.main === module) {
