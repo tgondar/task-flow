@@ -125,6 +125,14 @@ check('section 3: no quote in the log means it was not closed by a document', /n
 check('section 3: closed by agree is still a decision in questions.json',
   /`Verdict: agree`[^]*`questions\.json` as a `decision`/.test(s3));
 
+// T2 security: the document path keeps a decision OFF the list to review, so
+// "a document" must stay the closed list of sources step 1 names (a file merely
+// sitting in docsDir is not one), and the log entry must name which document.
+check('section 3 (security): the documents are the closed list of sources',
+  /in this\s+order: the task's entry in the task list[^]*the idea; the spec;\s+the plan/.test(s3));
+check('section 3 (security): the log entry names the document and the quote',
+  /with the round, the document and the quoted passage/.test(s3));
+
 // T2 (FR-011, Q2): every decision to review is listed in one place, questions.json;
 // the _log.md keeps the full entry as the audit trail and cites Q<n>.
 check('section 3: questions.json is the one list to review', /One list to review/.test(s3));
