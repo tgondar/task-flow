@@ -2006,6 +2006,7 @@ const CLI_USAGE = [
   `         [--phase ${PHASES.join('|')}] [--task <id>] [--project-dir <dir>]`,
   '       metrics.js time --slug <run> [--project-dir <dir>]',
   '       metrics.js summary --slug <run> [--project-dir <dir>]',
+  '       metrics.js paperclip --issue <n> [--paperclip-issue <id>] [--project-dir <dir>]',
   '',
 ].join('\n');
 
@@ -2105,6 +2106,8 @@ function runCommand(argv, projectDir) {
     const args = Array.isArray(argv) ? argv : [];
     if (args[0] === 'time') return timeCommand(args.slice(1), projectDir, exit); // plan T8, below
     if (args[0] === 'summary') return summaryCommand(args.slice(1), projectDir, exit); // plan T9, below
+    // plan T12, below: asynchronous (HTTP), so this one returns a promise; it never rejects
+    if (args[0] === 'paperclip') return paperclipCommand(args.slice(1), projectDir, exit);
     if (args[0] !== 'loop-result') return exit(2, process.stderr, CLI_USAGE);
     if (String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return exit(0, process.stdout, 'metrics: disabled loop-result\n');
     const code = appendLoopResult(projectDir, args.slice(1));
@@ -2606,6 +2609,251 @@ function paperclipGet(options) {
 }
 
 Object.assign(module.exports, { paperclipGet });
+
+// --- metrics.js paperclip --issue N: paperclip's runs as loop rows (spec 6.4, RF-040..RF-045; plan T12)
+//
+//   node plugin/scripts/metrics.js paperclip --issue <n> [--paperclip-issue <id>] [--project-dir <dir>]
+//
+// A run handed to paperclip never reaches `done` here, so its loops are collected by hand (Q2),
+// with this command, as often as wanted: a row is keyed by source+run+id and appendLoopRows never
+// writes a key twice, so a second call only adds what finished since.
+//
+// Steps, and why each one is where it is:
+//   1. `--issue N` (^[1-9][0-9]*$) finds THE run whose state.json `paperclipIssue` is a JSON number
+//      whose decimal form is N (SKILL.md §0d); zero or several is a code and nothing is asked.
+//   2. The paperclip issue: state.json `paperclipIssueId` (plan T10) or `--paperclip-issue`, both a
+//      UUID or a GON-12 identifier (RF-041); both given and different is a code. None: no request.
+//   3. GET the issue (an identifier is resolved to its UUID there), its sub-issues (one level:
+//      `?parentId=`, and each one must really name the parent - a server that ignored the query
+//      would otherwise hand us every issue of the company), and the runs of each.
+//   4. Per FINISHED run (a `finishedAt` instant: the status values were never measured) not yet in
+//      the history: one GET of its agent, once per distinct agentId, for `name`/`role` through the
+//      closed role table. An agent lookup that fails leaves its runs for the next call instead of
+//      writing them as `unknown` - the first row of a key wins forever, so a guess would stick.
+//   5. Rows through validateLoopRow (inside appendLoopRows), the same validator as the other
+//      origins (SC-007). `model` and `effort` are null: paperclip reports neither (`adapterType`
+//      is not a model). Tokens and cost are paperclip's own figures (RF-045, Q7): integer USD cents,
+//      unit USD, never converted or priced here.
+//
+// Trust: every value of a response is untrusted data. Ids are taken only in their closed shape
+// and lower-cased (one spelling per key, T3), objects are read by own keys, nothing of a response
+// is ever printed, and the output is one fixed line `metrics: <code> paperclip`, exit 0 (RF-044),
+// with TASK_FLOW_METRICS=off checked before anything is read. Every request goes through
+// paperclipGet (trusted origin, token from PAPERCLIP_TOKEN, 10 s each), all of them inside ONE
+// command deadline, so a slow paperclip costs at most PAPERCLIP_COMMAND_MS.
+
+/** The whole command, every request included. A guess: a handful of issues and agents each. */
+const PAPERCLIP_COMMAND_MS = 60 * 1000;
+const PAPERCLIP_MAX_SUBISSUES = 100;
+const PAPERCLIP_MAX_RUNS = 5000;
+const PAPERCLIP_MAX_AGENTS = 50;
+const ISSUE_ARG = /^[1-9][0-9]*$/;
+const PAPERCLIP_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const PAPERCLIP_IDENTIFIER = /^[A-Z][A-Z0-9]{0,9}-[1-9][0-9]{0,6}$/;
+/** The closed role table (RF-043): lower-cased name or role -> [agentType, phase]. */
+const PAPERCLIP_ROLES = new Map([
+  ['builder', ['Builder', 'build']], ['tester', ['Tester', 'tests']], ['security', ['Security', 'harden']], ['reviewer', ['Reviewer', 'review']],
+]);
+/** usageJson's names for each token count, first present wins (camelCase is paperclip's own). */
+const PAPERCLIP_TOKEN_FIELDS = new Map([
+  ['input', ['inputTokens', 'input_tokens']],
+  ['cacheCreate', ['cacheCreationInputTokens', 'cache_creation_input_tokens']],
+  ['cacheRead', ['cachedInputTokens', 'cached_input_tokens', 'cache_read_input_tokens']],
+  ['output', ['outputTokens', 'output_tokens']],
+]);
+const PAPERCLIP_COST_FIELDS = ['costUsd', 'cost_usd', 'total_cost_usd'];
+const PAPERCLIP_FLAGS = new Map([
+  ['--issue', (v) => ISSUE_ARG.test(v)],
+  ['--paperclip-issue', (v) => PAPERCLIP_UUID.test(v) || PAPERCLIP_IDENTIFIER.test(v)],
+  ['--project-dir', () => true], // resolved and checked by the CLI block, as for close
+]);
+
+/** A UUID in its one spelling (lower case), or null. */
+const uuidOf = (value) => (typeof value === 'string' && PAPERCLIP_UUID.test(value) ? value.toLowerCase() : null);
+/** A paperclip issue reference (UUID lower-cased, or an identifier), or null. */
+const issueRefOf = (value) => uuidOf(value) || (typeof value === 'string' && PAPERCLIP_IDENTIFIER.test(value) ? value : null);
+
+/** The one run recorded for GitHub issue `issue`: `{ slug, state }`, or `{ code }` (no-run, many-runs). */
+function findPaperclipRun(projectDir, stateDir, issue) {
+  const found = [];
+  let names = [];
+  try {
+    names = fs.readdirSync(stateDir).slice(0, MAX_OTHER_RUNS);
+  } catch {
+    // no folder: no run
+  }
+  for (const name of names) {
+    if (!isSlug(name)) continue;
+    const state = readSmallObject(projectDir, path.join(stateDir, name, 'state.json'));
+    const recorded = state ? ownValue(state, 'paperclipIssue') : undefined;
+    if (Number.isSafeInteger(recorded) && String(recorded) === issue) found.push({ slug: name, state });
+  }
+  if (found.length === 0) return { code: 'no-run' };
+  return found.length === 1 ? found[0] : { code: 'many-runs' };
+}
+
+/** usageJson's tokens, or null: input and output must be there; a count that is present but not a
+ *  count spoils the block. No cache-creation field (none measured, T11) counts as 0. */
+function paperclipTokens(usage) {
+  if (!isObject(usage)) return null;
+  const tokens = {};
+  for (const [key, names] of PAPERCLIP_TOKEN_FIELDS) {
+    const name = names.find((n) => hasOwn(usage, n));
+    if (name === undefined && (key === 'input' || key === 'output')) return null;
+    if (name !== undefined && !isCount(usage[name])) return null;
+    tokens[key] = name === undefined ? 0 : usage[name];
+  }
+  return tokens;
+}
+
+/** usageJson's cost in integer USD cents, or null. Every cost field present must be a finite
+ *  amount >= 0 and they must agree to the cent; when they disagree no figure is chosen. Rounded
+ *  half up after dropping binary float noise (1.005 USD is 101 cents, not 100). */
+function paperclipCostCents(usage) {
+  if (!isObject(usage)) return null;
+  const cents = PAPERCLIP_COST_FIELDS.filter((n) => hasOwn(usage, n)).map((n) => {
+    const usd = usage[n];
+    return typeof usd === 'number' && Number.isFinite(usd) && usd >= 0 ? Math.round(Number((usd * 100).toPrecision(12))) : NaN;
+  });
+  return cents.length > 0 && cents.every((c) => c === cents[0] && isCount(c)) ? cents[0] : null;
+}
+
+/** An agent object to its [agentType, phase] from the role table, by `name` then `role`; else null. */
+function paperclipRole(agent) {
+  if (!isObject(agent)) return null;
+  for (const field of ['name', 'role']) {
+    const value = ownValue(agent, field);
+    if (typeof value === 'string' && value.length <= 100 && PAPERCLIP_ROLES.has(value.toLowerCase())) return PAPERCLIP_ROLES.get(value.toLowerCase());
+  }
+  return null;
+}
+
+/** One finished paperclip run as a loop row (validated later, by appendLoopRows). */
+function paperclipRow(slug, id, run, role) {
+  const startedAt = toUtcInstant(ownValue(run, 'startedAt'));
+  const ms = startedAt ? Date.parse(ownValue(run, 'finishedAt')) - Date.parse(ownValue(run, 'startedAt')) : NaN;
+  const usage = ownValue(run, 'usageJson');
+  return {
+    v: 1, source: 'paperclip', run: slug, id,
+    agentType: role ? role[0] : 'unknown', phase: role ? role[1] : 'unknown', task: '', round: null,
+    model: null, effort: null, startedAt, durationS: ms >= 0 ? Math.round(ms / 1000) : null,
+    tokens: paperclipTokens(usage), costCents: paperclipCostCents(usage),
+    outcome: null, tests: null, critical: null, required: null, reason: null, backfill: false,
+  };
+}
+
+/**
+ * The command's work: `{ code, written }`, never rejects, never carries text from a response.
+ * Codes: written, up-to-date, partial (some request failed: what was read is written, the rest
+ * waits for the next call), invalid, bad-config, no-run, many-runs, no-issue-id, id-mismatch,
+ * bad-response, paperclipGet's codes for the issue itself, appendLoopRows' codes, internal.
+ * `deadline` (ms since the epoch) is a test seam: it can only tighten PAPERCLIP_COMMAND_MS.
+ */
+async function collectPaperclip(options) {
+  const done = (code, written) => ({ code, written: written || 0 });
+  try {
+    const opts = isObject(options) ? options : {};
+    const { projectDir, issue } = opts;
+    if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || typeof issue !== 'string' || !ISSUE_ARG.test(issue)) return done('invalid');
+    const flag = opts.paperclipIssue === undefined ? null : issueRefOf(opts.paperclipIssue);
+    if (opts.paperclipIssue !== undefined && !flag) return done('invalid');
+
+    const loaded = loadConfig(projectDir);
+    if (!loaded.ok || !loaded.config || typeof loaded.config.stateDir !== 'string') return done('bad-config');
+    const stateDir = loaded.config.stateDir;
+    const found = findPaperclipRun(projectDir, stateDir, issue);
+    if (found.code) return done(found.code);
+    const recorded = issueRefOf(ownValue(found.state, 'paperclipIssueId'));
+    if (recorded && flag && recorded !== flag) return done('id-mismatch');
+    const ref = recorded || flag;
+    if (!ref) return done('no-issue-id');
+    const raw = isObject(loaded.config.raw) ? ownValue(loaded.config.raw, 'paperclip') : undefined;
+    const company = isObject(raw) ? uuidOf(ownValue(raw, 'companyId')) : null;
+    if (!company) return done('bad-config');
+    const history = readLoops(projectDir, stateDir);
+    if (history.code) return done(history.code);
+    const known = new Set(history.rows.map(loopKey));
+
+    const limit = Date.now() + PAPERCLIP_COMMAND_MS;
+    const deadline = typeof opts.deadline === 'number' && Number.isFinite(opts.deadline) ? Math.min(opts.deadline, limit) : limit;
+    const env = isObject(opts.env) ? opts.env : process.env;
+    const get = (pathname) => (Date.now() >= deadline
+      ? paperclipFailure('timeout')
+      : paperclipGet({ projectDir, url: ownValue(raw, 'url'), pathname, env, deadline }));
+    const enc = encodeURIComponent;
+
+    const head = await get(`/api/issues/${enc(ref)}`);
+    if (!head.ok) return done(head.code);
+    const parent = isObject(head.body) ? uuidOf(ownValue(head.body, 'id')) : null;
+    if (!parent || (parent !== ref && ownValue(head.body, 'identifier') !== ref)) return done('bad-response');
+
+    let partial = false;
+    const issues = [parent];
+    const subs = await get(`/api/companies/${enc(company)}/issues?parentId=${enc(parent)}`);
+    if (!subs.ok || !Array.isArray(subs.body)) partial = true;
+    else {
+      for (const sub of subs.body) {
+        const id = isObject(sub) ? uuidOf(ownValue(sub, 'id')) : null;
+        if (!id || issues.includes(id) || uuidOf(ownValue(sub, 'parentId')) !== parent) continue;
+        if (issues.length > PAPERCLIP_MAX_SUBISSUES) { partial = true; break; }
+        issues.push(id);
+      }
+    }
+
+    const runs = new Map(); // runId -> run, finished and not in the history yet
+    for (const id of issues) {
+      const got = await get(`/api/issues/${enc(id)}/runs`); // eslint-disable-line no-await-in-loop
+      if (!got.ok || !Array.isArray(got.body)) { partial = true; continue; }
+      for (const run of got.body) {
+        const runId = isObject(run) ? uuidOf(ownValue(run, 'runId')) : null;
+        if (!runId || runs.has(runId) || !toUtcInstant(ownValue(run, 'finishedAt'))) continue;
+        if (known.has(loopKey({ source: 'paperclip', run: found.slug, id: runId }))) continue;
+        if (runs.size >= PAPERCLIP_MAX_RUNS) { partial = true; break; }
+        runs.set(runId, run);
+      }
+    }
+
+    const roles = new Map(); // agentId -> { role } once answered, { failed: true } once failed
+    const rows = [];
+    for (const [runId, run] of runs) {
+      const agentId = uuidOf(ownValue(run, 'agentId'));
+      if (agentId && !roles.has(agentId)) {
+        if (roles.size >= PAPERCLIP_MAX_AGENTS) { partial = true; continue; }
+        const got = await get(`/api/agents/${enc(agentId)}`); // eslint-disable-line no-await-in-loop
+        roles.set(agentId, got.ok ? { role: paperclipRole(got.body) } : { failed: true });
+      }
+      const entry = agentId ? roles.get(agentId) : { role: null };
+      if (entry.failed) { partial = true; continue; }
+      rows.push(paperclipRow(found.slug, runId, run, entry.role));
+    }
+
+    const appended = appendLoopRows(projectDir, stateDir, rows);
+    if (!appended.ok) return done(appended.code);
+    if (partial) return done('partial', appended.written);
+    return done(appended.written > 0 ? 'written' : 'up-to-date', appended.written);
+  } catch {
+    return done('internal');
+  }
+}
+
+/** runCommand's `paperclip`: TASK_FLOW_METRICS=off first (nothing read), then the arguments (all
+ *  or nothing: the usage and 2), then one fixed line `metrics: <code> paperclip`, exit 0. Never
+ *  rejects (the CLI block does not wait on it). */
+async function paperclipCommand(args, projectDir, exit) {
+  try {
+    if (String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return exit(0, process.stdout, 'metrics: disabled paperclip\n');
+    const given = parseFlags(args, PAPERCLIP_FLAGS);
+    if (!given || !given.has('--issue') || typeof projectDir !== 'string' || !path.isAbsolute(projectDir)) return exit(2, process.stderr, CLI_USAGE);
+    const result = await collectPaperclip({
+      projectDir, issue: given.get('--issue'), paperclipIssue: given.has('--paperclip-issue') ? given.get('--paperclip-issue') : undefined,
+    });
+    return exit(0, process.stdout, `metrics: ${result.code} paperclip\n`);
+  } catch {
+    return exit(0, process.stdout, 'metrics: internal paperclip\n');
+  }
+}
+
+Object.assign(module.exports, { collectPaperclip });
 
 // --- closeRun and the CLI (spec R3, R4, R9; plan T7) -----------------------------------------------
 //
