@@ -828,6 +828,7 @@ function stateDirOf(projectDir) {
  *  run", which is what every caller fails open to. The names come from readdir,
  *  so they are folder names, but nothing here checks their shape: a caller that
  *  builds a path from one checks it first (metrics.js uses SAFE_SEGMENT). */
+const MAX_STATE_BYTES = 1024 * 1024;
 function runningRuns(dir) {
   const names = [];
   if (!dir) return names;
@@ -843,6 +844,12 @@ function runningRuns(dir) {
       const statePath = path.join(dirStateDir, task, 'state.json');
       let state;
       try {
+        // Both hooks call this, several times per SubagentStart (5 s timeout): a
+        // repository's state.json that is a FIFO, a device or a huge file must not
+        // hold the hook until it is killed. Plain file, at most 1 MiB (metrics.js
+        // readSmallObject's ceiling for the same file), checked before reading.
+        const stats = fs.statSync(statePath);
+        if (!stats.isFile() || stats.size > MAX_STATE_BYTES) continue;
         state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
       } catch (error) {
         continue;

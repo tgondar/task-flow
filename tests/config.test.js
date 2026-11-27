@@ -716,5 +716,22 @@ check('C54 runningRuns with one live run gives its folder name; two give both', 
   assertEqual(runningRuns(withRuns({ a: RUNNING, b: RUNNING })).sort().join(), 'a,b', 'two runs');
 });
 
+check('C55 runningRuns never reads a state.json that is huge, a folder or (POSIX) a FIFO', () => {
+  // the hooks call it on every turn and every subagent start: a cloned repository's
+  // state.json must not hold them until their timeout
+  const big = `{"status":"running","phase":"plan","pad":"${'x'.repeat(1024 * 1024)}"}`;
+  const project = withRuns({ huge: big, ok: RUNNING, folder: RUNNING });
+  const folderState = path.join(project, '.claude', 'task-flow', 'folder', 'state.json');
+  fs.rmSync(folderState);
+  fs.mkdirSync(folderState);
+  if (process.platform !== 'win32') {
+    fs.mkdirSync(path.join(project, '.claude', 'task-flow', 'fifo'));
+    require('child_process').execFileSync('mkfifo', [path.join(project, '.claude', 'task-flow', 'fifo', 'state.json')]);
+  }
+  const started = Date.now();
+  assertEqual(runningRuns(project).join(), 'ok', 'only the plain, small state.json counts');
+  assert(Date.now() - started < 2000, 'runningRuns took too long');
+});
+
 console.log(`\n${passed}/${passed + failures.length} passed`);
 if (failures.length) process.exit(1);
