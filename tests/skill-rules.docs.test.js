@@ -213,6 +213,8 @@ check('section 7: the orchestrator judges whether an answer is a project rule be
   /states\s+a\s+rule\s+of\s+the\s+project\s+that\s+holds\s+beyond\s+this\s+run/.test(s7));
 check('section 7: a project rule is written by promote, with --replaces for an entry it contradicts',
   /standing-answers\.js"\s+promote\s+--slug\s+<slug>\s+--item\s+Q<n>\s+--rule\s+"<the rule>"/.test(s7) && /--replaces\s+R<m>/.test(s7));
+check('section 3 (security): an answer of this run wins over a standing answer it contradicts',
+  /answered\s+item\s+of\s+this\s+run's\s+`questions\.json`[^]*wins\s+over\s+a\s+standing\s+answer\s+it\s+contradicts/.test(docPath));
 check('section 7: each promotion is logged as a warning entry',
   /promotion[^.]*`_log\.md`[^.]*⚠️/.test(s7));
 check('section 7: a promote that refuses is said, never worked around by hand',

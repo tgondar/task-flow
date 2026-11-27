@@ -824,7 +824,9 @@ the task list, sees or gets, it is a business rule; otherwise it is code.
   never reaches the user. An entry this run promoted is not a second
   source: cite the answered item it came from instead. Two entries that
   contradict each other close nothing: the question goes on through the rounds
-  as if neither existed.
+  as if neither existed. An answered item of this run's `questions.json` (a
+  `- [x]`, or a mid-run overrule written there, §1c) wins over a standing answer
+  it contradicts: the user said it now, and the entry answers nothing for it.
 - **The second opinion returns `Verdict: agree`**, with no document that says it.
   Write it into the run's `questions.json` as a `decision` (*Decisions taken — to
   review*), with the round it ended in and the passages it rests on in `rounds`.
