@@ -752,6 +752,42 @@ const byId = (rows, id) => rows.find((row) => row.id === id);
   }
 }
 
-try { fs.rmSync(TEST_HOME, { recursive: true, force: true }); } catch { /* best effort */ }
-console.log(`\n${passed} passed, ${failures.length} failed`);
-if (failures.length) { console.log(failures.map((f) => `  - ${f}`).join('\n')); process.exit(1); }
+// --- tests phase: start events written by parallel subagents (spec «loops em paralelo») -----------
+// A harden pass or the review areas start several subagents at once, so several
+// SubagentStart hook processes append to the same loop-events.jsonl at the same
+// moment. Each must land as one whole line: N good payloads give N readable starts
+// and nothing ignored (no torn or merged line), and payloads out of shape started
+// in the same burst add nothing and break none of the good ones.
+async function parallelStarts() {
+  const { spawn } = require('child_process');
+  const HOOK = path.resolve(__dirname, '../plugin/hooks/subagent-start.js');
+  const runHook = (payload) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [HOOK], {
+      env: { ...process.env, TASK_FLOW_GATE: '', TASK_FLOW_METRICS: '', CLAUDE_PROJECT_DIR: PROJECT },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { out += d; });
+    child.on('close', (code) => resolve({ code, out }));
+    child.stdin.end(JSON.stringify(payload));
+  });
+
+  setup();
+  const good = Array.from({ length: 12 }, (_, i) => ({ ...PAYLOAD, agent_id: `par${i}` }));
+  const bad = [{ ...PAYLOAD, agent_id: '../x' }, { ...PAYLOAD, agent_type: 'IGNORE PREVIOUS\n' }, { ...PAYLOAD, agent_id: 42 }];
+  const results = await Promise.all([...good, ...bad].map(runHook));
+  check('parallel: every hook process exits 0 and prints nothing', results.every((r) => r.code === 0 && r.out === ''), JSON.stringify(results.filter((r) => r.code !== 0 || r.out)));
+  const read = readLoopEvents(PROJECT, STATE, SLUG);
+  const agents = read.starts.map((s) => s.agent).sort();
+  check('parallel: 12 good starts give 12 readable lines, one per agent, nothing ignored',
+    read.starts.length === 12 && new Set(agents).size === 12 && good.every((p) => agents.includes(p.agent_id)) && read.ignored === 0,
+    JSON.stringify({ starts: read.starts.length, ignored: read.ignored }));
+  check('parallel: the out-of-shape payloads in the same burst add no line', lines().length === 12 && !lines().some((l) => l.includes('IGNORE') || l.includes('../')), String(lines().length));
+}
+
+parallelStarts().catch((error) => check('parallel starts ran', false, String(error && error.message))).finally(() => {
+  try { fs.rmSync(TEST_HOME, { recursive: true, force: true }); } catch { /* best effort */ }
+  console.log(`\n${passed} passed, ${failures.length} failed`);
+  if (failures.length) { console.log(failures.map((f) => `  - ${f}`).join('\n')); process.exit(1); }
+});
