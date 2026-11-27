@@ -20,6 +20,8 @@ const path = require('path');
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-home-'));
 process.env.HOME = TEST_HOME;
 process.env.USERPROFILE = TEST_HOME;
+process.env.LOCALAPPDATA = TEST_HOME;
+process.env.XDG_STATE_HOME = TEST_HOME;
 
 const MODULE = path.join(__dirname, '..', 'plugin', 'scripts', 'config.js');
 const {
@@ -660,6 +662,58 @@ check('C51 SECURITY a junction anywhere under the folder, or the folder itself, 
     threw = /link/.test(error.message);
   }
   assert(threw, 'a linked task-flow folder was accepted');
+});
+
+// --- runningRuns: the live runs by name (plan T1) ----------------------------
+// hasRunningRun is now `runningRuns(dir).length > 0`; these pin both, so the Stop
+// hook's notion of "live" cannot drift from the start-event writer's.
+const { hasRunningRun, runningRuns } = require(MODULE);
+
+/** A project whose state folder holds these runs ({ folder: state.json text or object }). */
+function withRuns(runs, config = { docsDir: 'docs', language: 'EN', tasksFile: 'tasks.md' }) {
+  const project = temp('runs');
+  fs.mkdirSync(path.join(project, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(project, '.claude', 'task-flow.json'), JSON.stringify(config));
+  for (const [name, state] of Object.entries(runs)) {
+    fs.mkdirSync(path.join(project, '.claude', 'task-flow', name), { recursive: true });
+    fs.writeFileSync(path.join(project, '.claude', 'task-flow', name, 'state.json'), typeof state === 'string' ? state : JSON.stringify(state));
+  }
+  return project;
+}
+const RUNNING = { status: 'running', phase: 'plan' };
+
+check('C52 runningRuns names every running run that is not done, and only those', () => {
+  const project = withRuns({
+    alpha: RUNNING,
+    beta: { status: 'RUNNING', phase: 'build' },
+    gamma: { status: 'blocked', phase: 'plan' },
+    delta: { status: 'running', phase: 'done' },
+    broken: '{ not json',
+    nostate: null,
+  });
+  fs.rmSync(path.join(project, '.claude', 'task-flow', 'nostate', 'state.json'));
+  assertEqual(runningRuns(project).sort().join(), 'alpha,beta', 'running runs');
+  assertEqual(hasRunningRun(project), true, 'hasRunningRun');
+});
+
+check('C53 runningRuns is empty, and hasRunningRun false, wherever there is no live run', () => {
+  const idle = withRuns({ gamma: { status: 'blocked', phase: 'plan' } });
+  const none = withRuns({});
+  const notOptedIn = temp('runs-none');
+  const badConfig = withRuns({ alpha: RUNNING }, '{ not json');
+  fs.writeFileSync(path.join(badConfig, '.claude', 'task-flow.json'), '{ not json');
+  const escaping = withRuns({ alpha: RUNNING }, { stateDir: '..' });
+  for (const [name, dir] of [['idle', idle], ['no runs', none], ['not opted in', notOptedIn], ['bad config', badConfig],
+    ['stateDir escaping', escaping], ['empty', ''], ['missing', path.join(none, 'missing')], ['undefined', undefined]]) {
+    const names = runningRuns(dir);
+    assert(Array.isArray(names) && names.length === 0, `${name}: ${JSON.stringify(names)}`);
+    assertEqual(hasRunningRun(dir), false, `${name}: hasRunningRun`);
+  }
+});
+
+check('C54 runningRuns with one live run gives its folder name; two give both', () => {
+  assertEqual(runningRuns(withRuns({ 'my-run': RUNNING, old: { status: 'done', phase: 'done' } })).join(), 'my-run', 'one run');
+  assertEqual(runningRuns(withRuns({ a: RUNNING, b: RUNNING })).sort().join(), 'a,b', 'two runs');
 });
 
 console.log(`\n${passed}/${passed + failures.length} passed`);

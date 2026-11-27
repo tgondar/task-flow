@@ -32,6 +32,13 @@
 // into a cloned repository with a "running" state.json of its own must not be
 // handed that clone's page. A network or device path is never examined at all.
 //
+// It also records that the subagent started (plan T1): once the configuration is
+// accepted and before the page is read, metrics.js appendLoopEvent writes one
+// closed-shape line to the live run's loop-events.jsonl - only when exactly one
+// run is running, TASK_FLOW_METRICS is not "off" and the payload's agent_id and
+// agent_type are in shape. Nothing it does reaches stdout or stderr, so what the
+// subagent is handed is the same with or without the measurement.
+//
 // It FAILS OPEN on everything. The event cannot block a subagent, but a hook that
 // throws would print a stack trace with paths in it; so every failure is silence.
 //
@@ -54,6 +61,22 @@ function projectDirFor(payload, env) {
   return cwdCounts && !hasRunningRun(envDir) && hasRunningRun(cwd) ? cwd : envDir;
 }
 
+// The loop start event (spec RF-001): one line per subagent in the run's
+// loop-events.jsonl, so the close can tell which run, phase and task each
+// subagent's transcript served. metrics.js is the one writer and makes every
+// decision (TASK_FLOW_METRICS, exactly one running run, the payload's shape);
+// this only hands it the project and the payload. It runs before the page is
+// read and whatever the page holds, and in a try of its own, required lazily
+// inside it: a measurement that throws - even while loading - must change
+// neither the injection nor the exit code, nor print anything.
+function recordStart(projectDir, payload) {
+  try {
+    require('../scripts/metrics.js').appendLoopEvent({ projectDir, payload, env: process.env });
+  } catch {
+    // fail open: the measurement never touches what the subagent gets
+  }
+}
+
 function output() {
   if (String(process.env.TASK_FLOW_GATE || '').toLowerCase() === 'off') return '';
   const payload = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -61,6 +84,7 @@ function output() {
   const projectDir = projectDirFor(payload, process.env);
   if (!projectDir || !hasRunningRun(projectDir)) return '';
   if (!loadConfig(projectDir).ok) return '';
+  recordStart(projectDir, payload);
   const result = read({ projectDir });
   if (result.refused || !result.entries.length) return '';
   return JSON.stringify({ hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: formatBlock(result) } });

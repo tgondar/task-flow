@@ -34,7 +34,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { crossesLink, isInside, loadConfig } = require('./config.js');
+const { crossesLink, isInside, loadConfig, runningRuns } = require('./config.js');
 const { PHASES, SAFE_SEGMENT, readPlanTasks, readSkippedTasks, readPendingTasks } = require('./render-run.js');
 
 // --- constants ---------------------------------------------------------------
@@ -67,6 +67,11 @@ const CONSTANTS = Object.freeze({
   /** git --numstat: no shell, a short leash, a small buffer. */
   GIT_TIMEOUT_MS: 3000,
   GIT_MAX_BUFFER: 1024 * 1024,
+
+  /** One line of a run's loop-events.jsonl. A start event is about 150 bytes; a ceiling. */
+  LOOP_EVENT_MAX_BYTES: 512,
+  /** A loop-events.jsonl already past this gets no more lines (thousands of loops). */
+  LOOP_EVENTS_MAX_FILE_BYTES: 1024 * 1024,
 });
 
 // --- deviation table (spec R7) --------------------------------------------------
@@ -121,6 +126,10 @@ const SHAPE = Object.freeze({
   date: /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/,
   /** ISO in UTC with a Z; optional milliseconds. Offsets are not accepted. */
   instant: /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,3})?Z$/,
+  /** A subagent's id, as the SubagentStart payload gives it and agent-<id>.jsonl names it. */
+  agentId: /^[A-Za-z0-9]{1,64}$/,
+  /** A subagent's type (`general-purpose`, `task-flow:security-auditor`): a model name's shape. */
+  agentType: /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/,
 });
 
 const OUTCOMES = ['done', 'failed'];
@@ -355,6 +364,53 @@ function closeQuietly(fd) {
 }
 
 /**
+ * The last `maxBytes` of `file` as text, for this module's bounded line readers
+ * (metrics.jsonl, a run's loop-events.jsonl). Returns `{ text, code }`: code null
+ * (text '' when the file does not exist yet), `unsafe-path` when the path fails
+ * isSafeHistoryPath or is a link/folder/etc. (nothing was opened), or
+ * `read-failed`. Never throws, and a code never carries text from the file.
+ *
+ * One bounded read whatever the size. When the file is bigger than the window, the
+ * window starts mid-line and that first fragment is dropped, so every line of
+ * `text` is whole as written (the last one may still be cut by a crash).
+ */
+function readTail(projectDir, stateDir, file, maxBytes) {
+  let fd = null;
+  try {
+    if (!isSafeHistoryPath(projectDir, stateDir, file)) return { text: '', code: 'unsafe-path' };
+    let stats;
+    try {
+      stats = fs.lstatSync(file);
+    } catch {
+      return { text: '', code: null }; // nothing written yet
+    }
+    if (!stats.isFile()) return { text: '', code: 'unsafe-path' };
+
+    fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW);
+    const size = fs.fstatSync(fd).size;
+    const length = Math.min(size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    let read = 0;
+    while (read < length) {
+      const n = fs.readSync(fd, buffer, read, length - read, size - length + read);
+      if (n === 0) break;
+      read += n;
+    }
+    let text = buffer.subarray(0, read).toString('utf8');
+    if (size > length) {
+      // the window starts mid-line: that first fragment is not a line
+      const cut = text.indexOf('\n');
+      text = cut === -1 ? '' : text.slice(cut + 1);
+    }
+    return { text, code: null };
+  } catch {
+    return { text: '', code: 'read-failed' };
+  } finally {
+    closeQuietly(fd);
+  }
+}
+
+/**
  * The validated rows of `<stateDir>/metrics.jsonl`, oldest first, one per
  * `run`+`created` (the FIRST line wins: two racing closes may both append, and the
  * earlier one is the measurement that was reported).
@@ -365,42 +421,17 @@ function closeQuietly(fd) {
  * opened) or `read-failed`. Never throws, and never carries text from the file:
  * only counts and codes.
  *
- * Cost is bounded whatever the file: only the last HISTORY_TAIL_BYTES are read, the
- * first (probably partial) line of a truncated window is dropped, and when the window
+ * Cost is bounded whatever the file: only the last HISTORY_TAIL_BYTES are read
+ * (readTail, which drops the partial first line of a cut window), and when the window
  * still holds more than HISTORY_MAX_ROWS lines only the last HISTORY_KEEP_ROWS are
  * looked at, so a hostile multi-GiB file costs one bounded read and a bounded parse.
  */
 function readHistory(projectDir, stateDir) {
   const result = { rows: [], ignored: 0, code: null };
-  let fd = null;
   try {
-    const file = historyPath(stateDir);
-    if (!isSafeHistoryPath(projectDir, stateDir, file)) return { ...result, code: 'unsafe-path' };
-    let stats;
-    try {
-      stats = fs.lstatSync(file);
-    } catch {
-      return result; // no history yet
-    }
-    if (!stats.isFile()) return { ...result, code: 'unsafe-path' };
-
-    fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW);
-    const size = fs.fstatSync(fd).size;
-    const length = Math.min(size, CONSTANTS.HISTORY_TAIL_BYTES);
-    const buffer = Buffer.alloc(length);
-    let read = 0;
-    while (read < length) {
-      const n = fs.readSync(fd, buffer, read, length - read, size - length + read);
-      if (n === 0) break;
-      read += n;
-    }
-    let text = buffer.subarray(0, read).toString('utf8');
-    if (size > length) {
-      // the window starts mid-line: that first fragment is not a row
-      const cut = text.indexOf('\n');
-      text = cut === -1 ? '' : text.slice(cut + 1);
-    }
-    let lines = text.split('\n');
+    const tail = readTail(projectDir, stateDir, historyPath(stateDir), CONSTANTS.HISTORY_TAIL_BYTES);
+    if (tail.code) return { ...result, code: tail.code };
+    let lines = tail.text.split('\n');
     if (lines.length > CONSTANTS.HISTORY_MAX_ROWS) lines = lines.slice(-CONSTANTS.HISTORY_KEEP_ROWS);
 
     const seen = new Set();
@@ -419,8 +450,6 @@ function readHistory(projectDir, stateDir) {
     return result;
   } catch {
     return { rows: [], ignored: 0, code: 'read-failed' };
-  } finally {
-    closeQuietly(fd);
   }
 }
 
@@ -431,20 +460,37 @@ function readHistory(projectDir, stateDir) {
  *
  * The row is re-validated here so that nothing that is not a closed-shape v1 row can
  * reach the file, whoever the caller is, and it is serialised from the validated
- * object. If the last byte on disk is not a newline (a crash cut the previous line)
- * a newline is written first, so the new row is never glued to the fragment. The
- * write is one append-mode write on a descriptor we fstat'ed (the same effect as
- * fs.appendFileSync with flag 'a', but the file we checked is the file we wrote).
+ * object, then written by appendLine (no size cap on the file: the reader reads a
+ * bounded tail of it).
  */
 function appendRow(projectDir, stateDir, row) {
-  let fd = null;
   try {
     const checked = validateRow(row);
     if (!checked.ok) return { ok: false, code: 'invalid-row' };
     const body = JSON.stringify(checked.row);
     if (Buffer.byteLength(body, 'utf8') + 1 > CONSTANTS.MAX_ROW_BYTES) return { ok: false, code: 'invalid-row' };
 
-    const file = historyPath(stateDir);
+    return appendLine(projectDir, stateDir, historyPath(stateDir), body, Infinity);
+  } catch {
+    return { ok: false, code: 'write-failed' };
+  }
+}
+
+/**
+ * Appends `body` and a newline to `file`: the one write path of this module's line
+ * files. `{ ok: true }` or `{ ok: false, code }` with code `unsafe-path`, `full`
+ * (the file is already over `maxFileBytes`; nothing written) or `write-failed`.
+ * Never throws, never creates a folder (no state folder means nothing to measure).
+ * Validating `body` is the caller's job: each file has its own closed shape.
+ *
+ * If the last byte on disk is not a newline (a crash cut the previous line) a
+ * newline is written first, so the new line is never glued to the fragment. The
+ * write is one append-mode write on a descriptor we fstat'ed (the same effect as
+ * fs.appendFileSync with flag 'a', but the file we checked is the file we wrote).
+ */
+function appendLine(projectDir, stateDir, file, body, maxFileBytes) {
+  let fd = null;
+  try {
     if (!isSafeHistoryPath(projectDir, stateDir, file)) return { ok: false, code: 'unsafe-path' };
     try {
       if (!fs.lstatSync(file).isFile()) return { ok: false, code: 'unsafe-path' };
@@ -455,6 +501,7 @@ function appendRow(projectDir, stateDir, row) {
     fd = fs.openSync(file, fs.constants.O_RDWR | fs.constants.O_APPEND | fs.constants.O_CREAT | NOFOLLOW, 0o644);
     const stats = fs.fstatSync(fd);
     if (!stats.isFile()) return { ok: false, code: 'unsafe-path' };
+    if (stats.size > maxFileBytes) return { ok: false, code: 'full' };
     let prefix = '';
     if (stats.size > 0) {
       const last = Buffer.alloc(1);
@@ -1323,6 +1370,154 @@ module.exports = {
   collect,
   closeRun,
 };
+
+// --- loop start events (spec 6.1, RF-001..RF-004, RF-060..RF-062; plan T1) --------------------
+//
+// One line per subagent of a live run, written by the SubagentStart hook at the moment the
+// subagent starts, in `<stateDir>/<run>/loop-events.jsonl`. WHY a start event at all: the
+// transcript of a subagent (`agent-<id>.jsonl`) says what it spent, but not which run, phase
+// or task it served - only the hook knows that, and only at that moment, from state.json. The
+// close (closeRun, a later task) joins each start to its transcript and writes one line per
+// loop to the project's history.
+//
+// Deliberately AFTER module.exports and BEFORE closeRun: the security suites scan slices of
+// this file that end at module.exports and that start at closeRun, and the code here does I/O
+// and reads TASK_FLOW_METRICS, which those slices forbid or count. Exported with
+// Object.assign for the same reason.
+//
+// Trust. The hook's payload, state.json and the events file are all input somebody else may
+// have written. So: the payload gives two values and only when they match their closed shape
+// (`agent_id`, `agent_type`) - session_id, transcript_path, cwd and the rest are never read,
+// let alone stored (RF-003, RF-062); state.json gives a phase from PHASES and a task id in
+// SHAPE.taskId, anything else becomes `unknown` / ''; the run folder must be a SAFE_SEGMENT;
+// the file goes through appendLine (contained in the project and the state folder, no link,
+// a plain file, append-only, no folder created, nothing once it is over 1 MiB). The reader
+// rebuilds every line fresh from validated values and only counts what it rejects.
+//
+// It FAILS OPEN (RF-061): every failure is a closed `{ ok, code }`, never an exception, and
+// the hook ignores the result. A subagent must start whatever happens here.
+
+const LOOP_EVENTS_FILE = 'loop-events.jsonl';
+const LOOP_EVENT_KEYS = ['v', 'kind', 'agent', 'type', 'phase', 'task', 'at'];
+const LOOP_PHASES = [...PHASES, 'unknown'];
+
+const loopResult = (ok, code) => ({ ok, code });
+/** An own property or undefined: an inherited or polluted key never answers. */
+const ownValue = (object, key) => (hasOwn(object, key) ? object[key] : undefined);
+
+/** The phase a subagent started now works in: state.json's `phase` is the last stage
+ *  COMPLETED (SKILL.md section 8), so the work in flight is the next one. Past the last
+ *  phase, or for anything that is not a phase, `unknown` - never a guess. */
+function phaseInFlight(done) {
+  const index = typeof done === 'string' ? PHASES.indexOf(done) : -1;
+  return index >= 0 && index + 1 < PHASES.length ? PHASES[index + 1] : 'unknown';
+}
+
+/**
+ * Appends the start event of one subagent to the live run's loop-events.jsonl.
+ * `options`: `{ projectDir, payload, env }` - the hook's project, its parsed stdin and
+ * the environment (only TASK_FLOW_METRICS is read from it; the configuration expands
+ * its folder variables from the real environment, as in closeRun).
+ *
+ * Checks, in this order (RF-001): the switch; a valid configuration; exactly one running
+ * run, whose folder is a safe segment (two live runs: no way to tell which one the
+ * subagent serves, so none); the payload's two values in shape. Returns `{ ok, code }`:
+ * `written`, `disabled` (ok), or `bad-input`, `bad-config`, `no-single-run`, `bad-payload`,
+ * `bad-state`, `too-long`, `unsafe-path`, `full`, `write-failed`, `internal`. Never throws.
+ */
+function appendLoopEvent(options) {
+  try {
+    const opts = isObject(options) ? options : {};
+    const env = isObject(opts.env) ? opts.env : process.env;
+    if (String(env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return loopResult(true, 'disabled');
+    const { projectDir, payload } = opts;
+    if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || !isObject(payload)) return loopResult(false, 'bad-input');
+
+    const loaded = loadConfig(projectDir);
+    if (!loaded.ok || !loaded.config || typeof loaded.config.stateDir !== 'string') return loopResult(false, 'bad-config');
+    const stateDir = loaded.config.stateDir;
+
+    const runs = runningRuns(projectDir);
+    if (runs.length !== 1 || !isSlug(runs[0])) return loopResult(false, 'no-single-run');
+    const run = runs[0];
+
+    const agent = ownValue(payload, 'agent_id');
+    const type = ownValue(payload, 'agent_type');
+    if (typeof agent !== 'string' || !SHAPE.agentId.test(agent) || typeof type !== 'string' || !SHAPE.agentType.test(type)) {
+      return loopResult(false, 'bad-payload');
+    }
+
+    const state = readSmallObject(projectDir, path.join(stateDir, run, 'state.json'));
+    if (!state) return loopResult(false, 'bad-state');
+    const cursor = ownValue(state, 'buildCursor');
+    const event = {
+      v: 1,
+      kind: 'start',
+      agent,
+      type,
+      phase: phaseInFlight(ownValue(state, 'phase')),
+      task: typeof cursor === 'string' && SHAPE.taskId.test(cursor) ? cursor : '',
+      at: new Date().toISOString(),
+    };
+    const body = JSON.stringify(event);
+    if (Buffer.byteLength(body, 'utf8') + 1 > CONSTANTS.LOOP_EVENT_MAX_BYTES) return loopResult(false, 'too-long');
+    const file = path.join(stateDir, run, LOOP_EVENTS_FILE);
+    const written = appendLine(projectDir, stateDir, file, body, CONSTANTS.LOOP_EVENTS_MAX_FILE_BYTES);
+    return written.ok ? loopResult(true, 'written') : loopResult(false, written.code);
+  } catch {
+    return loopResult(false, 'internal');
+  }
+}
+
+/** One line of loop-events.jsonl as a fresh start event, or null. Length first (a long
+ *  line is never parsed), then the closed shape of every field. */
+function parseStartEvent(line) {
+  if (line.length > CONSTANTS.LOOP_EVENT_MAX_BYTES || Buffer.byteLength(line, 'utf8') > CONSTANTS.LOOP_EVENT_MAX_BYTES) return null;
+  let value;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    return null; // the parser's message quotes the input: dropped
+  }
+  if (!hasExactKeys(value, LOOP_EVENT_KEYS) || value.v !== 1 || value.kind !== 'start') return null;
+  const { agent, type, phase, task, at } = value;
+  if (typeof agent !== 'string' || !SHAPE.agentId.test(agent)) return null;
+  if (typeof type !== 'string' || !SHAPE.agentType.test(type)) return null;
+  if (!LOOP_PHASES.includes(phase)) return null;
+  if (task !== '' && !(typeof task === 'string' && SHAPE.taskId.test(task))) return null;
+  if (!isInstant(at)) return null;
+  return { v: 1, kind: 'start', agent, type, phase, task, at };
+}
+
+/**
+ * The events of run `slug`, oldest first: `{ starts, results, ignored }`. `results` stays
+ * empty until the loop-result event exists (a later task); `ignored` counts the non-blank
+ * lines that are not a valid event. Only the bounded tail is read (the writer's cap plus
+ * one line, so a file the writer filled is read whole). A missing, refused or unreadable
+ * file is simply no events. Never throws, never carries text from the file.
+ */
+function readLoopEvents(projectDir, stateDir, slug) {
+  const empty = () => ({ starts: [], results: [], ignored: 0 });
+  try {
+    if (!isSlug(slug) || typeof stateDir !== 'string') return empty();
+    const file = path.join(stateDir, slug, LOOP_EVENTS_FILE);
+    const tail = readTail(projectDir, stateDir, file, CONSTANTS.LOOP_EVENTS_MAX_FILE_BYTES + CONSTANTS.LOOP_EVENT_MAX_BYTES);
+    const result = empty();
+    if (tail.code) return result;
+    for (const raw of tail.text.split('\n')) {
+      const line = raw.replace(/^﻿/, '');
+      if (line.trim() === '') continue;
+      const start = parseStartEvent(line);
+      if (start) result.starts.push(start);
+      else result.ignored += 1;
+    }
+    return result;
+  } catch {
+    return empty();
+  }
+}
+
+Object.assign(module.exports, { appendLoopEvent, readLoopEvents });
 
 // --- closeRun and the CLI (spec R3, R4, R9; plan T7) -----------------------------------------------
 //

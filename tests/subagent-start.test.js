@@ -353,6 +353,63 @@ for (const value of ['off', 'OFF', 'Off']) {
   check('S38 config.js exports hasRunningRun with the stop.js behaviour', { code: ok ? 0 : 1, stdout: '', stderr: '' }, '');
 }
 
+// --- the loop start event (plan T1, spec RF-001) ------------------------------
+// The hook also writes one start event per subagent through metrics.js. Its stdout
+// must stay exactly what it was; the event is written whether or not there is a page.
+{
+  const eventsOf = (root, run = 'demo0') => {
+    const file = path.join(root, '.claude', 'task-flow', run, 'loop-events.jsonl');
+    return fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean) : [];
+  };
+  const VALID = { agent_id: 'a1b2c3', agent_type: 'general-purpose' };
+  const oneEvent = (root) => () => {
+    const lines = eventsOf(root);
+    if (lines.length !== 1) return `expected 1 event, got ${lines.length}`;
+    const event = JSON.parse(lines[0]);
+    const keys = Object.keys(event).sort().join();
+    if (keys !== 'agent,at,kind,phase,task,type,v') return `event keys ${keys}`;
+    if (event.agent !== 'a1b2c3' || event.type !== 'general-purpose' || event.phase !== 'tests' || event.kind !== 'start') return `event ${lines[0]}`;
+    return null;
+  };
+  const noEvent = (root, run) => () => (eventsOf(root, run).length ? 'an event was written' : null);
+
+  let root = makeProject();
+  check('S39 a valid payload with a page: same injection, and one start event',
+    runHook(root, payloadFor(root, VALID)), expectedFor([GOOD_ENTRY]), oneEvent(root));
+
+  root = makeProject({ page: null });
+  check('S40 no standing-answers page: still silent, and the event is written anyway',
+    runHook(root, payloadFor(root, VALID)), SILENT, oneEvent(root));
+
+  root = makeProject();
+  check('S41 TASK_FLOW_METRICS=off: the injection is unchanged, no event',
+    runHook(root, payloadFor(root, VALID), { TASK_FLOW_METRICS: 'off' }), expectedFor([GOOD_ENTRY]), noEvent(root));
+
+  root = makeProject();
+  check('S42 TASK_FLOW_GATE=off: silent, no event',
+    runHook(root, payloadFor(root, VALID), { TASK_FLOW_GATE: 'off' }), SILENT, noEvent(root));
+
+  root = makeProject({ runs: [{}, {}] });
+  check('S43 two running runs: the page is injected, but no event in either run',
+    runHook(root, payloadFor(root, VALID)), expectedFor([GOOD_ENTRY]), (a) => noEvent(root, 'demo0')(a) || noEvent(root, 'demo1')(a));
+
+  root = makeProject({ runs: [{}, { status: 'blocked' }] });
+  check('S44 one running run beside a blocked one: the event goes to the running run',
+    runHook(root, payloadFor(root, VALID)), expectedFor([GOOD_ENTRY]), (a) => oneEvent(root)(a) || noEvent(root, 'demo1')(a));
+
+  root = makeProject();
+  check('S45 an agent_id outside the shape (agent-1): same injection, no event',
+    runHook(root, payloadFor(root)), expectedFor([GOOD_ENTRY]), noEvent(root));
+
+  root = makeProject({ config: { tasksFile: 'missing.md' } });
+  check('S46 a configuration with an error: silent, no event', runHook(root, payloadFor(root, VALID)), SILENT, noEvent(root));
+
+  root = makeProject();
+  fs.mkdirSync(path.join(root, '.claude', 'task-flow', 'demo0', 'loop-events.jsonl'));
+  check('S47 the events file is a folder: the injection is unchanged, exit 0, nothing on stderr',
+    runHook(root, payloadFor(root, VALID)), expectedFor([GOOD_ENTRY]));
+}
+
 // --- report ---------------------------------------------------------------
 const total = passed + failures.length;
 console.log(`\n${passed}/${total} passed`);

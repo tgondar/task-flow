@@ -820,20 +820,24 @@ function stateDirOf(projectDir) {
   return resolveStateDir(read.raw.stateDir, projectDir);
 }
 
-/** True when the project at `dir` opted in and one of its runs has status
- *  "running" and is not done. Both hooks ask it: the Stop hook to know whether
- *  to push, the SubagentStart hook whether to inject. Never throws - any failure
- *  means "no running run", which is what both hooks fail open to. Moved here
- *  from stop.js unchanged, so the two hooks cannot disagree on what "live" is. */
-function hasRunningRun(dir) {
-  if (!dir) return false;
+/** The folder names of the project's runs that have status "running" and are
+ *  not done, in readdir order. Both hooks ask it, through hasRunningRun: the Stop
+ *  hook to know whether to push, the SubagentStart hook whether to inject - and
+ *  the start-event writer in metrics.js, which needs the run itself and writes
+ *  only when there is exactly one. Never throws - any failure means "no running
+ *  run", which is what every caller fails open to. The names come from readdir,
+ *  so they are folder names, but nothing here checks their shape: a caller that
+ *  builds a path from one checks it first (metrics.js uses SAFE_SEGMENT). */
+function runningRuns(dir) {
+  const names = [];
+  if (!dir) return names;
   let dirStateDir;
   try {
     dirStateDir = stateDirOf(dir);
   } catch (error) {
-    return false;
+    return names;
   }
-  if (!dirStateDir) return false;
+  if (!dirStateDir) return names;
   try {
     for (const task of fs.readdirSync(dirStateDir)) {
       const statePath = path.join(dirStateDir, task, 'state.json');
@@ -844,14 +848,19 @@ function hasRunningRun(dir) {
         continue;
       }
       if (state && String(state.status || '').toLowerCase() === 'running' && String(state.phase || '') !== 'done') {
-        return true;
+        names.push(task);
       }
     }
   } catch (error) {
-    return false;
+    return [];
   }
-  return false;
+  return names;
 }
+
+/** True when the project at `dir` opted in and one of its runs is live (see
+ *  runningRuns). Moved here from stop.js unchanged in meaning, so the two hooks
+ *  cannot disagree on what "live" is. */
+const hasRunningRun = (dir) => runningRuns(dir).length > 0;
 
 // --- writing (init) --------------------------------------------------------
 
@@ -907,6 +916,7 @@ module.exports = {
   githubProjectErrors,
   GITHUB_NAME,
   hasRunningRun,
+  runningRuns,
   GRAPHQL_ID,
   listGithubProjects,
   parseGithubRemote,
