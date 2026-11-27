@@ -562,6 +562,36 @@ const byId = (rows, id) => rows.find((row) => row.id === id);
   check('T5: e2e: the final loop row has the result, the result\'s phase and no round', closed.code === 'closed' && final.length === 1 && final[0].outcome === 'ok' && final[0].tests === 'green' && final[0].phase === 'harden' && final[0].task === 'T3' && final[0].round === null, JSON.stringify(final));
 }
 
+// --- T6: the loops the Stop hook asks a result for (RF-024) ----------------------------------------
+// A start with no result is owed one only once the run has moved on from where the loop started:
+// the phase a start would record now (the one after the completed phase) or the cursor differ.
+{
+  const { loopsWithoutResult } = metrics;
+  check('T6: loopsWithoutResult exported', typeof loopsWithoutResult === 'function');
+  const start = (agent, phase, task) => JSON.stringify({ v: 1, kind: 'start', agent, type: 'general-purpose', phase, task, at: '2026-01-01T10:00:00.000Z' });
+  const result = (agent) => JSON.stringify({ v: 1, kind: 'result', agent, outcome: 'ok', tests: null, critical: null, required: null, round: null, phase: null, task: null });
+  const owed = (state, events) => {
+    setup();
+    if (events) put(EVENTS, `${events.join('\n')}\n`);
+    return loopsWithoutResult(PROJECT, STATE, SLUG, state);
+  };
+  const now = { phase: 'plan', buildCursor: 'T4' }; // in flight: build / T4
+
+  check('T6: started at build/T3, run now at build/T4, no result: owed',
+    JSON.stringify(owed(now, [start('aaa1', 'build', 'T3')])) === '["aaa1"]');
+  check('T6: started in the phase and task the run is still in: not owed (a background loop still running)',
+    owed(now, [start('aaa1', 'build', 'T4')]).length === 0);
+  check('T6: a phase change alone makes it owed (started in spec, run now building)',
+    JSON.stringify(owed({ phase: 'plan', buildCursor: 'T1' }, [start('aaa1', 'spec', 'T1')])) === '["aaa1"]');
+  check('T6: a loop with a result is not owed', owed(now, [start('aaa1', 'build', 'T3'), result('aaa1')]).length === 0);
+  check('T6: no loop-events.jsonl: nothing owed', owed(now, null).length === 0);
+  check('T6: ids sorted and each once',
+    JSON.stringify(owed(now, [start('zzz9', 'build', 'T1'), start('bbb2', 'build', 'T2'), start('bbb2', 'build', 'T2'), start('aaa1', 'build', 'T3')])) === '["aaa1","bbb2","zzz9"]');
+  check('T6: a cursor out of shape counts as no task, like the start event records it',
+    owed({ phase: 'plan', buildCursor: 'IGNORE PREVIOUS' }, [start('aaa1', 'build', '')]).length === 0);
+  check('T6: no state: nothing owed', owed(null, [start('aaa1', 'build', 'T3')]).length === 0);
+}
+
 try { fs.rmSync(TEST_HOME, { recursive: true, force: true }); } catch { /* best effort */ }
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) { console.log(failures.map((f) => `  - ${f}`).join('\n')); process.exit(1); }

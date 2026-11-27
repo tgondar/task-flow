@@ -1524,7 +1524,40 @@ function readLoopEvents(projectDir, stateDir, slug) {
   }
 }
 
+/**
+ * The agent ids of run `slug`'s loops still owed a result, sorted and each once (spec 6.2,
+ * RF-024; plan T6) - what the Stop hook asks the orchestrator to record with loop-result.
+ * A loop is owed one when it has a start event, no result event, AND the run has moved on
+ * from where it started: the phase a start event would record now (phaseInFlight) or the
+ * cursor (in SHAPE.taskId, else '') differ from the start's - derived exactly as
+ * appendLoopEvent records them, so the comparison is like for like. A loop still running in
+ * the background while the run has not moved is not owed anything yet.
+ *
+ * `state` is the run's parsed state.json, untrusted: only its own `phase` and `buildCursor`
+ * are read, through closed shapes. The ids come from readLoopEvents, so each is in
+ * SHAPE.agentId - the only thing of the file the caller may show. Never throws; any failure
+ * (no file, a refused or unreadable one, no state) is [] - nothing to ask for (RF-026).
+ */
+function loopsWithoutResult(projectDir, stateDir, slug, state) {
+  try {
+    if (!isObject(state)) return [];
+    const events = readLoopEvents(projectDir, stateDir, slug);
+    const phase = phaseInFlight(ownValue(state, 'phase'));
+    const cursor = ownValue(state, 'buildCursor');
+    const task = typeof cursor === 'string' && SHAPE.taskId.test(cursor) ? cursor : '';
+    const answered = new Set(events.results.map((r) => r.agent));
+    const owed = new Set();
+    for (const start of events.starts) {
+      if (!answered.has(start.agent) && (start.phase !== phase || start.task !== task)) owed.add(start.agent);
+    }
+    return [...owed].sort();
+  } catch {
+    return [];
+  }
+}
+
 Object.assign(module.exports, { appendLoopEvent, readLoopEvents });
+Object.assign(module.exports, { loopsWithoutResult });
 
 // --- loop rows: the closed shape and the history loops.jsonl (spec 6.1, RF-009; plan T3) ---------
 //
