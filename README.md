@@ -15,10 +15,10 @@ shows where every run is.
 
 - **Starts from a refined idea**, never from nothing: a run needs an idea document
   in the docs folder before it begins.
-- **One planned stop** — whether to run security-harden and review now or check
-  later with `/task-flow review <PR number>`. Everything else is decided, written
-  into a decision log, and counted; after three decisions that only a person can
-  take, an attended run stops and asks.
+- **Security-harden and review always run** before the PR, in every mode, unasked;
+  `/task-flow review <PR number>` runs them against a PR opened some other way.
+  Everything else is decided, written into a decision log, and counted; after
+  three decisions that only a person can take, an attended run stops and asks.
 - **Auto mode** for long runs: nothing stops it, and the PR carries every decision
   it took without asking.
 - **Security tests on every task**, written by a security-auditor subagent on that
@@ -101,7 +101,7 @@ node <plugin>/scripts/config.js github-project 3         # or: github-project no
 ```
 
 Optional fields: `stateDir` (where runs keep `state.json`, default
-`.claude/task-flow`), `versionFiles`, `defaultBump`, `branches` (`from`, `prefix`,
+`.claude/task-flow`), `versionFiles`, `defaultBump`, `bumpPolicy`, `branches` (`from`, `prefix`,
 `neverMerge`), `preflightSkill`, `commands`, `testProjects`, `backlogFile`.
 
 ```json
@@ -111,11 +111,20 @@ Optional fields: `stateDir` (where runs keep `state.json`, default
   "tasksFile": "tasks/index.md",
   "versionFiles": ["src/App/App.csproj"],
   "defaultBump": "patch",
+  "bumpPolicy": { "feature": "minor", "fix": "patch", "restructure": "minor" },
   "branches": { "from": "origin/develop", "prefix": "feature/", "neverMerge": ["develop", "main"] },
   "commands": { "build": "dotnet build", "test": "dotnet test" },
   "testProjects": ["tests/App.UnitTests"]
 }
 ```
+
+`bumpPolicy` is the project's semver level (`major`, `minor` or `patch`) for each
+class of change: `feature` and `fix` are required, `breaking` and `restructure`
+optional. A run takes the highest level among the classes it finds and bumps
+without asking; a class it finds with no level stops it once, and your answer is
+written into the policy (`node <plugin>/scripts/config.js bump-policy --class
+restructure --level minor`). It wins over `defaultBump`, and is refused next to
+`"defaultBump": "calendar"`: calendar versioning stays outside it.
 
 Without that file the plugin's hooks do nothing in the repository, and `/task-flow`
 says it is not configured.
@@ -230,7 +239,7 @@ claude plugin validate .
 
 ## Escape hatch
 
-`TASK_FLOW_GATE=off` disables the Stop hook for a session.
+`TASK_FLOW_GATE=off` disables both hooks (Stop and SubagentStart) for a session.
 
 ## Credits
 

@@ -40,6 +40,9 @@ const SUBMISSION_ID = /^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$/;
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+/** The standing answer an item became (standing-answers.js promote, which
+ *  checks its --replaces with this same pattern). */
+const STANDING_ID = /^R[1-9][0-9]{0,3}$/;
 
 /** How long each kind of text may be. Over the limit is an error, not a silent
  *  cut: a cut answer is a different answer. */
@@ -140,7 +143,7 @@ function validateQuestions(data) {
     if (!v.isObject(item)) return v.fail(at, 'must be an object');
     v.onlyKeys(item, at, [
       'id', 'kind', 'phase', 'task', 'title', 'chosen', 'options', 'why', 'ifOverruled',
-      'urgent', 'rounds', 'createdAt', 'answer', 'explanations',
+      'urgent', 'rounds', 'createdAt', 'answer', 'explanations', 'promotedAs',
     ]);
     v.pattern(item.id, `${at}.id`, QUESTION_ID, 'Q followed by a number', { required: true });
     if (typeof item.id === 'string') {
@@ -156,6 +159,9 @@ function validateQuestions(data) {
     v.text(item.ifOverruled, `${at}.ifOverruled`, LIMITS.text);
     if (item.urgent !== undefined && typeof item.urgent !== 'boolean') v.fail(`${at}.urgent`, 'must be true or false');
     v.pattern(item.createdAt, `${at}.createdAt`, ISO_TIME, 'an ISO timestamp');
+    // Written by standing-answers.js promote once the item is on the page; its
+    // presence is what refuses a second promote, even after a hand delete (FR-034).
+    v.pattern(item.promotedAs, `${at}.promotedAs`, STANDING_ID, 'a standing answer id like R3');
     if (item.kind === 'decision' && !item.chosen) v.fail(`${at}.chosen`, 'is required for a decision');
 
     const optionIds = new Set();
@@ -430,6 +436,7 @@ module.exports = {
   LIMITS,
   CONTROL,
   QUESTION_ID,
+  STANDING_ID,
   OPTION_ID,
   SUBMISSION_ID,
   ANSWER_STATUSES,

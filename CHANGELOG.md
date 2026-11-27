@@ -5,6 +5,36 @@ Every change to `plugin/` raises the `version` in
 (`scripts/check-version.js` checks both in CI). Compare the version `/plugin`
 shows with the top entry to know whether your install is current.
 
+## 2.3.0 — 2026-11-27
+
+- **Security-harden and review always run** before the PR, unasked, in both
+  modes (§4c). The performance pass is no longer asked either: it runs only
+  when the spec or plan names a performance requirement, otherwise it is a fact
+  under `## Found`. `/task-flow review <PR>` and paperclip mode are unchanged.
+- Three warnings are **facts, not decisions** (§6): performance not run, a plan
+  estimate above the pre-estimate, and task-split granularity go under
+  `## Found`, never into `questions.json` or `## Needs you`. Each decision to
+  review is listed in one place, `questions.json`; the `_log.md` cites `Q<n>`.
+  Only a passage from a source this run did not write closes a question "by
+  document".
+- **Standing answers per project**: `<docsDir>/standing-answers.md`, one rule
+  per line with the user's words, origin run and date.
+  `scripts/standing-answers.js read` is its single reader (closed line shape,
+  path containment, size and entry limits, control/invisible/bidi characters
+  refused, URLs and delimiter imitations flagged, replaced entries dropped);
+  `promote` is its single writer, only from an answered `questions.json` item
+  (`promotedAs` records it). The §3 question loop reads the page first; new
+  entries are listed under `## Needs you` with how to undo.
+- New **SubagentStart hook** (`hooks/subagent-start.js`): while a run is
+  `running`, every subagent starts with the page's valid entries as a delimited
+  data block. Fails open, inert without the opt-in, off with
+  `TASK_FLOW_GATE=off`.
+- **`bumpPolicy`** (optional) in `.claude/task-flow.json`: a level per change
+  class (`feature`, `fix` required; `breaking`, `restructure` optional). The
+  run's bump is the highest level among the classes present; an uncovered class
+  stops once and the user's answer is written with `config.js bump-policy`.
+  Validated only by `check`; refused next to `defaultBump: "calendar"`.
+
 ## 2.2.0 — 2026-11-03
 
 - Review (§4d): a finding on code the branch neither touches nor makes

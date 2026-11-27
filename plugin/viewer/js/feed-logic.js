@@ -28,6 +28,7 @@
   const PHASES = ["idea", "spec", "plan", "build", "tests", "harden", "review", "done"];
   const STATUSES = ["running", "blocked", "failed", "done", "paused"];
   const QUESTION_ID = /^Q[1-9][0-9]{0,3}$/;
+  const STANDING_ID = /^R[1-9][0-9]{0,3}$/;
   const ANSWER_STATUSES = ["ok", "ko", "modify", "explain"]; // "explain" only ever leaves the question open
   const MAX_FEED_BYTES = 5 * 1024 * 1024;
   const MAX_ANSWERS = 50;
@@ -126,7 +127,7 @@
     items.forEach((item, index) => {
       const at = `items[${index}]`;
       if (!v.isObject(item)) return v.fail(at, "must be an object");
-      v.onlyKeys(item, at, ["id", "kind", "phase", "task", "title", "chosen", "options", "why", "ifOverruled", "urgent", "rounds", "createdAt", "answer", "explanations"]);
+      v.onlyKeys(item, at, ["id", "kind", "phase", "task", "title", "chosen", "options", "why", "ifOverruled", "urgent", "rounds", "createdAt", "answer", "explanations", "promotedAs"]);
       v.pattern(item.id, `${at}.id`, QUESTION_ID, "Q followed by a number", { required: true });
       if (typeof item.id === "string") {
         if (seen.has(item.id)) v.fail(`${at}.id`, "is used by another item");
@@ -141,6 +142,7 @@
       v.text(item.ifOverruled, `${at}.ifOverruled`, Q_LIMITS.text);
       if (item.urgent !== undefined && typeof item.urgent !== "boolean") v.fail(`${at}.urgent`, "must be true or false");
       v.pattern(item.createdAt, `${at}.createdAt`, ISO_TIME, "an ISO timestamp");
+      v.pattern(item.promotedAs, `${at}.promotedAs`, STANDING_ID, "a standing answer id like R3");
       if (item.kind === "decision" && !item.chosen) v.fail(`${at}.chosen`, "is required for a decision");
 
       const optionIds = new Set();

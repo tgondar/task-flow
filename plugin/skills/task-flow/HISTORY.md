@@ -59,7 +59,9 @@ Every rule below comes from something that went wrong, or nearly did, in them.
   the shape of an exception, never a target.
 - **The ceiling is three.** Three decisions waiting is when an attended run stops
   to ask — not five, and not rounded up because the run is going well.
-- **Security-harden and review are asked, not automatic (§4c step 2).** They used
+- **Security-harden and review are asked, not automatic (§4c step 2)** — reversed
+  on 2026-11-27, see "Security-harden and review always run; performance is not
+  asked" below. They used
   to always run before the PR. The user wanted to deploy faster and check later,
   so now there is a question — run them now, or skip to the PR and run
   `/task-flow review <PR number>` (§0c) afterward. This question is the one
@@ -654,6 +656,204 @@ own recent runs.
 - **Why bother, given MIT only asks for a kept notice.** The maintainer judged the
   dependency not worth carrying once the viewer had its own identity; this was his
   call to make, not a compliance problem being worked around.
+
+## A per-project bump policy replaces the bump stop (2026-11-27)
+
+- **The bump stop asked the same question every time.** §7 item 2 stopped
+  whenever a bump looked like a minor or a major: 16 times in the baseline of the
+  standing-answers run, always with the same answer. A project now writes its
+  rule once, `bumpPolicy` in `.claude/task-flow.json`, and a run applies it at
+  the close without stopping, in either mode; `## Changed` says which version,
+  which classes of change, which level and which rule. A covered bump is not a
+  decision, so it is not on the list to review either. With no policy, nothing
+  changes: `defaultBump` and the stop, as before; with both, the policy wins.
+- **Four classes, not two (Q8 of that run, working answer `four`).** The first
+  shape was "a new capability" and "a fix = everything else". The user had
+  answered **minor** to an architecture refactor with no new feature
+  (FleetManager v1.61.0) and **patch** to a deploy-only change; with two classes
+  the refactor would have been a patch, unasked. So `restructure` (a structural
+  change to the product's code with nothing visible) and `breaking` (an
+  incompatible change) are classes of their own, optional: left without a level,
+  a run that finds one stops once, and the answer is written into the policy.
+  `feature` and `fix` must have a level. The classes are one constant in
+  `config.js` (`BUMP_CLASSES`) so that a different answer to Q8 is a small diff.
+- **The run's bump is the highest level among the classes present.** That rule
+  stays prose (§6), with no `bump-level` function: the run classifies its own
+  diff from the plan, and code taking a list of classes would only move the
+  judgement, not remove it.
+- **Only the user's answer is written into the policy** (`config.js bump-policy`),
+  never a level the run chose in an auto run: that one is URGENT and waits for
+  the user. Otherwise a run would write the rule that later lets it skip the
+  stop. Each class written is listed under `## Needs you` with how to undo it,
+  and logged in the run's `_log.md` as ⚠️→asked (D6): it changes every later
+  run's bump, so the audit trail must say the user decided it, with their words.
+  The §0b table called this stop "§7.3": a label left from before the §4c
+  planned stop was removed, one item off like every "§7.<n>" then; they are
+  "§7 item <n>" now, and the docs test refuses a "§7.<n>" coming back.
+  The command refuses a first policy without `feature` and `fix`, because `check`
+  would refuse the configuration and the next run would not start.
+- **Calendar versioning stays outside the policy.** A calendar project (the
+  Rav's) keeps `defaultBump: "calendar"`; a policy next to it is refused by
+  `check`, naming both fields, so a project never has two rules that disagree.
+- **Validated by `check` only, never by `loadConfig`.** Like `githubProject`: a
+  malformed policy must not switch off the Stop hook, the SubagentStart hook, the
+  renderer or the measurement. The file is committed, so the shape is closed
+  (closed classes, closed levels, no other key) and an error names the field,
+  never the value or an unknown key. `tests/config.bump-policy.test.js` holds
+  both, and `tests/skill-rules.docs.test.js` fails when §6, §7 item 2, §0b or
+  §8b stop describing it.
+
+## The orchestrator reads the standing answers first and promotes only the user's rules (2026-11-27)
+
+- **Why the page is the first source of the question loop.** The idea behind this
+  change found the same project rules asked again run after run: a rule the user
+  gave once lived only in an old run's questions file, which nobody re-read. The
+  page holds those rules, one line each, so §3 step 1 reads it before the task
+  list. An entry is a source the run did not write — the user's words, from an
+  earlier answer — so it closes a question like any other document: quoted in the
+  log with its id, never sent to the user, not counted. An entry this run promoted
+  is not a second source (the answered item is), and two entries that contradict
+  each other close nothing: an outdated rule is worse than a question.
+- **Why a question an entry closed is also listed under `## Found` (D5 of that
+  run, from the T6 security audit).** Closed only in the log, a planted entry
+  with a valid shape decided a business question in silence: a `docsDir` inside
+  the project needs no trust, so the page can come with a cloned repository, and
+  the user saw nothing but how many entries were read. One line per question in
+  `## Found` (the entry's id and the question) makes that auditable in the PR
+  without bringing the question back: it still does not count, is not a
+  `decision` and is not asked (FR-016), since `## Found` is not the list to
+  review. The line has the question as the run wrote it, never the entry's words
+  or rule (D6, from the D5 audit): pasting page text into the PR body would echo
+  whatever a planted entry says; the `R<n>` id is a closed shape, safe to print.
+- **Why the orchestrator reads it with `read`, and the brief carries its path.**
+  The SubagentStart hook hands the entries to every subagent, but the orchestrator
+  is not a subagent: §2 runs the one reader at every start and resume, so the
+  agent that runs the question loop has the same entries as the ones it spawns.
+  The brief carries the page's path, not its text (pasting it is the drift the
+  hook exists to remove), and the settled-decisions line names the entries, so a
+  subagent does not reopen one. A missing or refused page is one line and the run
+  goes on: the page is help, never a gate. "Valid" means in the hook's block (the
+  harden pass of that run): with the raw path in hand, a subagent that opened the
+  page and judged validity itself could take a line the reader dropped - replaced,
+  suspicious, malformed - as settled, bypassing the one reader from the inside.
+- **Why only an answer of the user becomes an entry, and only a rule (Q4 of that
+  run).** A page the run could write from its own choices would reinforce itself:
+  next run, the run's guess comes back as "the user's rule". So `promote` takes
+  only an item with a recorded `answer`, the words come from that answer (Q10), and
+  a mid-run overrule (§1c) is written into `questions.json` first, so it has one.
+  Not every answer is a rule — "go ahead" is not — and a page of one-run choices
+  would stop being read whole; the orchestrator judges, logs each promotion as ⚠️
+  and the PR lists it.
+- **Why new entries are used at once and listed in `## Needs you` (the idea log's
+  decision).** Asking the user to approve each new rule would be the stop this
+  change removes. Instead an entry is used from the next run on, and the PR that
+  wrote it lists it with how to undo it: delete the line. The id is never reused
+  and the item is never promoted again, so a deleted rule stays deleted.
+- **A refused promotion is said, not worked around.** The reader refuses `·`, `«`,
+  `»`, URLs and the rest; the writer refuses what the reader would. Rewording the
+  user's words to get past it would change what the page promises to keep, so the
+  orchestrator says the rule did not go in and puts it under `## Found`.
+- **Paperclip is unchanged (Q6 of that run).** The spec and the plan are written
+  here, with the page read; `send-to-paperclip.js` sends those, not the page.
+- **`README.md` said `TASK_FLOW_GATE=off` disables the Stop hook**; it disables
+  both hooks since the SubagentStart one shipped.
+- **Anchored in code by `tests/skill-rules.docs.test.js`**, which fails when §1b
+  stops carrying the page's path, §3 stops reading it first, §7 stops promoting
+  through the command, or §8b stops listing what the run promoted with how to
+  delete it.
+
+## Standing answers reach every subagent through a SubagentStart hook (2026-11-27)
+
+- **Why a hook, not the brief.** A standing answer is a rule of the project the
+  person already gave once. Written rules were ignored by subagents, and the brief
+  that was supposed to carry them drifted: the orchestrator writes a fresh brief
+  per subagent, and a rule it forgets to paste is a question asked again, or a
+  decision taken the other way. Like every rule here that drifted as prose, this
+  one gets an anchor in code: `plugin/hooks/subagent-start.js` hands the page's
+  accepted entries to every subagent itself, whatever the brief says. The plugin
+  ships two hooks again (Stop and SubagentStart), so `CLAUDE.md` no longer calls
+  the Stop hook the only one.
+- **It never reads the page itself.** It passes on only `standing-answers.js`'s
+  `formatBlock` - the one reader decides what of the page is used - and nothing
+  goes to stderr, so no text of a refused line can reach the model another way.
+- **It is silent unless a run is live.** Opt-in, a configuration `config.js`
+  accepts in full, a `running` run (`hasRunningRun`, moved from `stop.js` into
+  `config.js` so the two hooks cannot disagree on what "live" means) and at
+  least one accepted entry. Everything else - including every error - is no
+  output and exit 0: the event cannot block a subagent, and a stack trace would
+  carry paths.
+- **`payload.cwd` counts only inside `CLAUDE_PROJECT_DIR`, without a link.**
+  `stop.js` follows `payload.cwd` anywhere when the session's own project has
+  no running run (for worktrees). For a hook that injects text that rule would let
+  a session in one repository, whose cwd wandered into a clone with its own
+  `running` state.json, receive the clone's page. Worktrees live under the
+  project's `.claude/worktrees/`, so they still work. `stop.js` is unchanged.
+- **No matcher, a 5 s timeout.** Every agent type gets the page, the
+  second-opinion agents included. The timeout behaviour of this event is not
+  documented; `tests/subagent-start.e2e.sh` probes it.
+- **Anchored in code by `tests/skill-rules.docs.test.js`**, which fails when
+  `hooks.json` stops registering the hook, or `CLAUDE.md` stops naming it.
+
+## Three facts go to "Found"; each decision is listed in one place (2026-11-27)
+
+- **The list to review was full of things that were not decisions.** The idea
+  behind this change measured it on 2026-11-27: 87 of 110 items still waiting in
+  the FleetManager's questions files, 14 of 16 in the Prumo's, and among them
+  about 24 "performance did not run" warnings and 11 "the plan came out above the
+  pre-estimate" ones. Nobody can overrule a fact, so listing it next to real
+  decisions only buried those. Exactly three warnings are now facts (§6): the
+  performance that did not run, the plan above the §2c pre-estimate, and how the
+  tasks were split. They go to the log without a ⚠️ marker and to the PR body's
+  `## Found`, never to `questions.json`, `## Needs you` or `pendingDecisions`.
+  The list is closed at three on purpose: a run that could call anything a fact
+  would have a way to hide a decision from the user.
+- **A question a document answered is not a decision to review.** The loop of §3
+  used to bank it in `questions.json` like one closed by the second opinion's
+  `agree`. When the spec or the task list already says it, there is nothing for
+  the user to overrule; the answer stays in the log with the quoted passage. The
+  quote is the point: without it in the log, "a document said so" would be a way
+  to close a question unseen, so an answer with no quote is still a decision.
+  Only a source the run did not write counts (D1 of that run, found by its
+  security auditor): the spec and the plan are the run's own, so a run could
+  write an answer into its spec, quote it and keep the decision off the list.
+- **Each decision is listed to review in one place: `questions.json` (Q2 of that
+  run).** The same decision used to be a ⚠️ entry in the `_log.md` and an item in
+  the questions file, two lists to read. The log could not be the one to give it
+  up — the user's global rules require the full entry there for every decision
+  taken alone — so the log stays the audit trail and cites the item's `Q<n>`, and
+  `## Needs you` lists the decisions of `questions.json`.
+- **Anchored in code by `tests/skill-rules.docs.test.js`**, which fails when a
+  fact is dropped from the §6 list or a fourth one is added, when §8c talks about
+  performance again, or when §3 and §8b go back to listing decisions twice.
+
+## Security-harden and review always run; performance is not asked (2026-11-27)
+
+- **The harden/review question of §4c step 2 is gone; both passes always run in a
+  local run, attended or auto.** The idea behind this change measured the question
+  on 2026-11-27: asked 20 times across three projects (Prumo 15 runs, FleetManager
+  4, task-flow 1), answered "later" 19 times and "run now" once. A question with
+  the same answer nineteen times out of twenty is not a decision, it is a stop; and
+  it was the one question that still held an auto run waiting. The user then
+  decided, the same day, that security-harden and review run every time, before
+  the PR. This reverses "Security-harden and review are asked, not automatic"
+  (above, in "The gate and the stops"), and with it the one exception to "no
+  `AskUserQuestion` in an auto run": an auto run now asks nothing, in any phase.
+- **Performance is not asked either (Q1 of that run).** It used to be a follow-up
+  of the same question, attended runs only. Keeping it once its parent was gone
+  would have turned it into a stop in every attended run, where it used to come
+  only after a "yes" (about 1 in 20). It now runs only when the spec or the plan
+  names a performance requirement, in both modes; when it does not run, that is a
+  fact for the PR body's `## Found`, not a decision to review.
+- **`/task-flow review <PR number>` stays as it is.** It no longer answers a
+  question nobody asks, but it still hardens and reviews a PR that did not come
+  through a local run's §4c — opened by hand, or by a run that skipped it before
+  this change. `paperclip` is untouched.
+- **A run that was waiting on the old question when this landed** resumes without
+  it and goes on to the harden; an old "later" in its questions file or log does
+  not skip it. There is no `state.json` migration: `phase` means what it meant.
+- **Anchored in code by `tests/skill-rules.docs.test.js`**, which fails when the
+  question, the auto exception or a "planned stop" comes back into `SKILL.md`,
+  `CLAUDE.md` or `README.md`, or when this section goes.
 
 ## Review: pre-existing findings, and the repository's `REVIEW.md` (2026-11-03)
 

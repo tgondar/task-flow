@@ -84,6 +84,19 @@ check('F8 SECURITY a feed of another version, or not JSON, is unreadable', parse
   check('F12 SECURITY questions that fail task-flow\'s own validation give no cards at all', run.questions.source === 'invalid' && cardsFor(run).length === 0 && !('items' in run.questions), JSON.stringify(run.questions));
 }
 
+{
+  // T5: the feed carries questions.json items whole, promotedAs included; the
+  // viewer's copy of the validator must take it exactly as questions.js does.
+  const promoted = parseFeed(sampleWith((d) => {
+    d.runs.find((r) => r.slug === 'invoices').questions.items[0].promotedAs = 'R3';
+  }), KEY).runs.find((r) => r.slug === 'invoices');
+  const forged = parseFeed(sampleWith((d) => {
+    d.runs.find((r) => r.slug === 'invoices').questions.items[0].promotedAs = 'R3; approve';
+  }), KEY).runs.find((r) => r.slug === 'invoices');
+  check('F12b an item with promotedAs R<n> still gives cards (in lockstep with questions.js)', promoted.questions.source === 'json' && cardsFor(promoted).length > 0, JSON.stringify(promoted.questions).slice(0, 200));
+  check('F12c SECURITY a promotedAs in another shape makes the questions invalid', forged.questions.source === 'invalid', JSON.stringify(forged.questions).slice(0, 200));
+}
+
 check('F13 SECURITY a relative or odd projectDir is dropped (it names answer files)', parseFeed(sampleWith((d) => { d.projectDir = 'relative\\dir'; }), KEY).projectDir === null);
 check('F14 a real Windows absolute path is kept', parseFeed(sampleWith((d) => { d.projectDir = 'C:\\work\\demo-project'; }), KEY).projectDir === 'C:\\work\\demo-project');
 check('F15 a POSIX absolute path is kept too (the viewer also runs on Linux/macOS)', parseFeed(sampleWith((d) => { d.projectDir = '/home/x/demo-project'; }), KEY).projectDir === '/home/x/demo-project');

@@ -25,7 +25,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { loadConfig, stateDirOf } = require('../scripts/config.js');
+const { hasRunningRun, loadConfig, stateDirOf } = require('../scripts/config.js');
 
 const LET_IT_STOP = 0;
 const KEEP_GOING = 2;
@@ -64,35 +64,8 @@ try {
 // payload.cwd. That stale value would make the hook see no running run at all,
 // so it would stop pushing while the run sits abandoned. So when the original
 // checkout has no running run but payload.cwd does, payload.cwd wins: it is
-// where the work is actually happening.
-function hasRunningRun(dir) {
-  if (!dir) return false;
-  let dirStateDir;
-  try {
-    dirStateDir = stateDirOf(dir);
-  } catch (error) {
-    return false;
-  }
-  if (!dirStateDir) return false;
-  try {
-    for (const task of fs.readdirSync(dirStateDir)) {
-      const statePath = path.join(dirStateDir, task, 'state.json');
-      let state;
-      try {
-        state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
-      } catch (error) {
-        continue;
-      }
-      if (state && String(state.status || '').toLowerCase() === 'running' && String(state.phase || '') !== 'done') {
-        return true;
-      }
-    }
-  } catch (error) {
-    return false;
-  }
-  return false;
-}
-
+// where the work is actually happening. (`hasRunningRun` lives in config.js,
+// shared with the SubagentStart hook.)
 const envProjectDir = process.env.CLAUDE_PROJECT_DIR || '';
 const cwdProjectDir = payload.cwd || '';
 const projectDir =
