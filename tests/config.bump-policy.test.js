@@ -359,5 +359,54 @@ check('B21 a disk full while writing the temp file: the error rises, task-flow.j
   noTmp(project);
 });
 
+// --- SECURITY: the temp path is never followed ------------------------------
+//
+// The temp name is random, but anyone who can write into .claude can guess or
+// race it. `wx` must refuse a file or a link already at that exact path:
+// EEXIST rises, the planted thing is neither written through nor deleted (it
+// is not ours), and task-flow.json stays as it was.
+const crypto = require('crypto');
+function withFixedTemp(fn) {
+  const original = crypto.randomBytes;
+  crypto.randomBytes = () => Buffer.from('deadbeef', 'hex');
+  try {
+    return fn();
+  } finally {
+    crypto.randomBytes = original;
+  }
+}
+const tempOf = (file) => `${file}.${process.pid}.deadbeef.tmp`;
+
+check('S4 SECURITY a file planted at the exact temp path: EEXIST, planted file untouched and kept, original byte for byte', () => {
+  const project = makeProject(POLICY);
+  const before = fs.readFileSync(configFile(project));
+  const planted = tempOf(configFile(project));
+  fs.writeFileSync(planted, 'planted');
+  const error = withFixedTemp(() => thrownBy(() => setBumpPolicy(project, { fix: 'minor' })));
+  assert(error.code === 'EEXIST', `another error rose: ${error.message}`);
+  assert(fs.readFileSync(planted, 'utf8') === 'planted', 'the planted file was written or deleted');
+  assert(fs.readFileSync(configFile(project)).equals(before), 'the file changed');
+});
+
+check('S5 SECURITY a symlink planted at the exact temp path: EEXIST, never followed, link kept, target byte for byte', () => {
+  const project = makeProject(POLICY);
+  const before = fs.readFileSync(configFile(project));
+  const victimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taskflow-bump-victim-'));
+  const victim = path.join(victimDir, 'victim.json');
+  fs.writeFileSync(victim, '{"keep":"me"}');
+  const planted = tempOf(configFile(project));
+  try {
+    fs.symlinkSync(victim, planted, 'file');
+  } catch {
+    process.stdout.write('  skip  (no symlink permission on this machine)\n');
+    return;
+  }
+  const error = withFixedTemp(() => thrownBy(() => setBumpPolicy(project, { fix: 'minor' })));
+  assert(error.code === 'EEXIST', `another error rose: ${error.message}`);
+  assert(fs.lstatSync(planted).isSymbolicLink(), 'the planted link was removed');
+  assert(fs.readFileSync(victim, 'utf8') === '{"keep":"me"}', 'the link target was written');
+  assert(fs.readFileSync(configFile(project)).equals(before), 'the file changed');
+});
+
 console.log(`\n${passed}/${passed + failures.length} passed`);
 if (failures.length) process.exit(1);
