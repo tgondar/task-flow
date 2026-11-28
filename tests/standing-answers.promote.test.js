@@ -649,6 +649,21 @@ check('SECURITY a same-looking line the reader rejects (control character) does 
   assertEqual(itemOf(p, 'Q1').promotedAs, result.id, 'promotedAs');
 });
 
+// The guard reads the page as the reader does. A page saved by a Windows
+// editor starts with a UTF-8 BOM and ends its lines with CRLF; without the BOM
+// strip the first line is not an entry to the guard (it starts with U+FEFF, not
+// "- "), and without \r? every CRLF line's date ends in \r, so the duplicate
+// slipped past and a second line for the item was written.
+check('SECURITY a page starting with a UTF-8 BOM, the same line first: refused before any temp file', () => {
+  const p = project({ page: ['﻿' + dupLine(4), '<!-- task-flow: next R5 -->', ''].join('\n') });
+  assert(/already has R4 from run/.test(refusedBeforeTemp(p, () => promote(p, { item: 'Q1', rule: 'Mine' }), 'bom')), 'refused by the guard');
+});
+
+check('SECURITY a CRLF page holding the same line: refused before any temp file', () => {
+  const p = project({ page: ['﻿# T', '<!-- task-flow: next R5 -->', entry(1), dupLine(4), ''].join('\r\n') });
+  assert(/already has R4 from run/.test(refusedBeforeTemp(p, () => promote(p, { item: 'Q1', rule: 'Mine' }), 'crlf')), 'refused by the guard');
+});
+
 // --- the CLI -----------------------------------------------------------------------
 
 check('SECURITY questions.json changed after the page write (answers.js consume) keeps that change: the write-back re-reads, no lost update', () => {
