@@ -664,6 +664,11 @@ check('SECURITY a CRLF page holding the same line: refused before any temp file'
   assert(/already has R4 from run/.test(refusedBeforeTemp(p, () => promote(p, { item: 'Q1', rule: 'Mine' }), 'crlf')), 'refused by the guard');
 });
 
+check('SECURITY a --rule that matches the line only once its spaces are collapsed: still refused', () => {
+  const p = project({ page: ['# T', '<!-- task-flow: next R5 -->', dupLine(4), ''].join('\n') });
+  assert(/already has R4 from run/.test(refusedBeforeTemp(p, () => promote(p, { item: 'Q1', rule: '  Mine \n' }), 'spaces')), 'refused by the guard');
+});
+
 // --- the CLI -----------------------------------------------------------------------
 
 check('SECURITY questions.json changed after the page write (answers.js consume) keeps that change: the write-back re-reads, no lost update', () => {
