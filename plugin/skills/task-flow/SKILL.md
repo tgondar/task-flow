@@ -1553,8 +1553,9 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/standing-answers.js" promote --slug <slug> -
   the page and the new entry says it replaces it. Say so in the log too.
 - A decision the run took alone, with no `answer`, is never promoted — the
   command refuses it, and so does an item already promoted (`promotedAs`).
-- Record each promotion in the phase's `_log.md` as a ⚠️ entry citing `Q<n>` and
-  the new `R<n>` — it is a decision you took alone, and the user reviews it in
+- Record each promotion in the phase's `_log.md` as a ⚠️ entry citing `Q<n>`,
+  the new `R<n>` and the rule as you passed it to `--rule` — it is a decision
+  you took alone, and the user reviews it in
   `## Needs you` (§8b). It does not count toward the three: there is nothing left
   to ask.
 - If it says it created the page, add a line for `standing-answers.md` to the
@@ -1754,8 +1755,10 @@ Four headings, in this order, in `language`, in both modes:
    fact (§6) is not one — in the order they were taken, each with what was
    chosen, what else was on the table, why this one, and what changes if they
    overrule it; every standing answer this run added or replaced — the items of
-   `questions.json` with a `promotedAs` (§7) — each with its id, its rule, the
-   id it replaced if it did, and how to undo it: delete its line from
+   `questions.json` with a `promotedAs` (§7) — each with its id, its rule as
+   this run passed it to `promote --rule` (from its `_log.md`), never read back
+   from `standing-answers.md`; of an entry it replaced, only the id; the id it
+   replaced if it did, and how to undo it: delete its line from
    `<docsDir>/standing-answers.md` (the absolute path), and the rule is gone from
    the next run on; its id is never used again, and the item is never promoted
    again; every class this run wrote into `bumpPolicy` (§7 item 2), with its

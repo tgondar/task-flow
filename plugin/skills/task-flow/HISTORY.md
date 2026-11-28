@@ -801,6 +801,10 @@ paperclip.
   review. The line has the question as the run wrote it, never the entry's words
   or rule (D6, from the D5 audit): pasting page text into the PR body would echo
   whatever a planted entry says; the `R<n>` id is a closed shape, safe to print.
+  For the same reason the rule of an entry this run promoted, listed under
+  `## Needs you`, is the text the run passed to `promote --rule` and logged,
+  never read back from the page: the page may have been edited after the write,
+  or come with a cloned repository (task #5, 2026-11-28).
 - **Why the orchestrator reads it with `read`, and the brief carries its path.**
   The SubagentStart hook hands the entries to every subagent, but the orchestrator
   is not a subagent: §2 runs the one reader at every start and resume, so the
