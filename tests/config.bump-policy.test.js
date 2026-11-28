@@ -312,6 +312,7 @@ check('B19 `bump-policy` refuses to write through a linked .claude, untouched', 
   }
   refuses(project, ['--class', 'fix', '--level', 'minor'], /symlink or junction/);
   assert(readConfig(project).bumpPolicy.fix === 'patch', 'the outside file changed');
+  assert(!tmpFiles(outside).length, `temp files in the junction target: ${tmpFiles(outside).join(', ')}`);
 });
 
 // Security T8: the other Object-prototype name, a flag smuggled in as a level,

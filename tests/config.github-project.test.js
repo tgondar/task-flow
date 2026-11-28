@@ -265,6 +265,8 @@ check('G17 SECURITY github-project and init refuse to write through a linked .cl
   const i = cli(project, 'init', '--docs-dir', 'docs', '--tasks-file', 'tasks/index.md');
   assert(i.status === 1 && /symlink or junction/.test(i.stderr), `init exit ${i.status}: ${i.stderr}`);
   assert(fs.readFileSync(victim, 'utf8') === '{"keep":"me"}', 'the linked file was rewritten');
+  const left = fs.readdirSync(outside).filter((n) => n.endsWith('.tmp'));
+  assert(!left.length, `temp files in the junction target: ${left.join(', ')}`);
 });
 
 check('G18 SECURITY on Windows, a git.exe planted in the repository is never run instead of the real one', () => {

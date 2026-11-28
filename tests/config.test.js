@@ -809,5 +809,35 @@ check('C59 paperclip trust with a failed rename: the list byte for byte, never t
   noTmp();
 });
 
+check('C60 SECURITY a file planted at the trust list\'s exact temp path: EEXIST, planted file kept, list byte for byte', () => {
+  const kept = makeProject(valid);
+  const { project, docs } = makeProject(valid, { trusted: false });
+  const before = fs.readFileSync(trustFile());
+  const crypto = require('crypto');
+  const planted = `${trustFile()}.${process.pid}.deadbeef.tmp`;
+  fs.writeFileSync(planted, 'planted');
+  const original = crypto.randomBytes;
+  crypto.randomBytes = () => Buffer.from('deadbeef', 'hex');
+  let error;
+  try {
+    try { trustDocsDir(project, docs); } catch (e) { error = e; }
+  } finally {
+    crypto.randomBytes = original;
+  }
+  try {
+    assert(error && error.code === 'EEXIST', `expected EEXIST, got ${error && error.code}`);
+    assertEqual(fs.readFileSync(planted, 'utf8'), 'planted', 'the planted file');
+    assert(fs.readFileSync(trustFile()).equals(before), 'the trust list changed');
+    assert(isTrusted(kept.project, kept.docs), 'the pair already there was lost');
+  } finally {
+    fs.rmSync(planted, { force: true });
+  }
+});
+
+check('C61 SECURITY FR-006: config.js requires neither standing-answers.js nor answers.js', () => {
+  const source = fs.readFileSync(MODULE, 'utf8');
+  assert(!/require\(\s*['"`]\.\/(standing-answers|answers)(\.js)?['"`]\s*\)/.test(source), 'config.js requires a module it must not');
+});
+
 console.log(`\n${passed}/${passed + failures.length} passed`);
 if (failures.length) process.exit(1);
