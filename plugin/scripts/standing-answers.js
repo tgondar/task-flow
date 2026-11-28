@@ -474,7 +474,7 @@ function promote({ projectDir, slug, item, rule, replaces }) {
     // never adopted: the id found is not proof the line came from this item.
     // The message names ids only, never the rule or the words.
     if (before.text !== undefined) {
-      const same = before.text.replace(/^﻿/, '').split(/\r?\n/)
+      const same = before.text.replace(/^\uFEFF/, '').split(/\r?\n/)
         .map(parseLine)
         .find((p) => p && p.entry && p.entry.run === slug && p.entry.rule === cleanRule && p.entry.words === words);
       if (same) {

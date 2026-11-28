@@ -1757,8 +1757,8 @@ Four headings, in this order, in `language`, in both modes:
    overrule it; every standing answer this run added or replaced — the items of
    `questions.json` with a `promotedAs` (§7) — each with its id, its rule as
    this run passed it to `promote --rule` (from its `_log.md`), never read back
-   from `standing-answers.md`; of an entry it replaced, only the id; the id it
-   replaced if it did, and how to undo it: delete its line from
+   from `standing-answers.md`; the id it replaced if it did (only the id, never
+   that entry's rule), and how to undo it: delete its line from
    `<docsDir>/standing-answers.md` (the absolute path), and the rule is gone from
    the next run on; its id is never used again, and the item is never promoted
    again; every class this run wrote into `bumpPolicy` (§7 item 2), with its
