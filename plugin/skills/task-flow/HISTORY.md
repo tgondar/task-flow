@@ -630,6 +630,82 @@ own recent runs.
   of the run it measures. `metrics.js` never edits a `.gitignore` or runs `git add`;
   SKILL.md tells the user they may ignore the file.
 
+## Each loop is measured: a start event by code, a result by the orchestrator (2026-11-27)
+
+The run-health row measures a run as a whole, and its split by phase did not work.
+In the `metrics.jsonl` rows the idea behind this change looked at on 2026-11-27 (30 by
+its count, across projects; this repository's own 4 rows, re-measured for the spec,
+had every token in `other`), the tokens fell almost entirely into `other`, because a token was given a
+phase from `phaseLog`, which the orchestrator writes as prose tells it to; and the
+outcome fields (tasks, review, harden, questions) were missing in about two runs of
+three for the same reason. So each loop — one execution of one agent — now gets a
+row of its own in `<stateDir>/loops.jsonl`, the same shape for task-flow and
+paperclip.
+
+- **The start is written by code, not by prose.** Only the moment a subagent starts
+  knows which run, phase and task it serves, and a step "write down what you just
+  spawned" is the kind of prose that failed above. The SubagentStart hook already
+  runs then, so it writes the event (`metrics.js appendLoopEvent`, the one writer);
+  no new hook. A SubagentStop hook was not added: the transcript
+  `agent-<id>.jsonl` already holds what it spent, and the close joins the two.
+- **`agent_id` is the key.** It is the transcript's file name (measured by
+  `tests/loops.e2e.sh`: every start event had its `agent-<id>.jsonl`, background and
+  synchronous subagents alike, on Claude Code 2.1.332), and the `Agent` tool's result
+  carries it to the orchestrator. Phase + task + round is not unique: the security pass of
+  task N runs beside the build of N+1, when the cursor already says N+1. For that
+  case the phase and task of the result win over the start's.
+- **The effort comes from the transcript.** Every `assistant` record of a subagent
+  carries an `effort` field (measured: all of them, and equal to the `effort:` of the
+  plugin's own agents). Taking it from the agent definitions alone would have left
+  every `general-purpose` phase agent `unknown`; the definitions are the fallback.
+- **The result is the orchestrator's, in a closed shape.** A transcript does not
+  say whether a task must be redone or how many Critical findings a review held,
+  and parsing an agent's report would treat untrusted text as data. So the
+  orchestrator records it (`metrics.js loop-result`, SKILL.md §1b) in closed
+  values, and nothing it passes is echoed back.
+- **The Stop hook asks for a missing result, at most twice — not a gate.** The
+  result is prose again, so it gets an anchor: once the run has moved on from the
+  phase or task a loop started in and the loop still has no result, `stop.js` keeps
+  the turn going with the ids and the command. Two pushes per set of ids, then it
+  says it gives up and decides as it would have without the check; every failure
+  is "nothing to ask for". A missing result costs one cell of a table, and a
+  measurement that can lock a session is a new way for a run to fail.
+- **The run's time row is computed, one row for the whole run.** Hours measured by
+  hand were the one number of a run nobody could check. `metrics.js time` ports the
+  rule of the `session-time.ps1` the wiki used, over the orchestrator's own
+  transcripts only — loops run in parallel, so their durations overlap and never
+  add up to the hours. One row for the run window, in the plan's table: the split
+  by phase is already in the "Loops" section and the PR summary, so nothing is
+  billed twice (decisions Q4, Q5 of the run `medicao-por-loop`).
+- **The PR summary is written when the PR opens.** The PR body is written then and
+  the review is already over; agents never merge, so "at merge time" reads as
+  "visible when the merge is decided" (Q3).
+- **Tokens, never money, on the task-flow side; paperclip's cost in USD.** A price
+  table goes out of date and would print invented numbers. The only cost recorded
+  is the one a source reports: paperclip's API reports US dollars (`costUsd`,
+  measured), so it is kept as USD cents with its unit, never converted with an
+  exchange rate — that would be the price table again (Q1, Q7). Paperclip reports
+  no model, so `model` stays empty rather than guessed from `adapterType`.
+- **Paperclip is collected by hand.** A paperclip run never reaches `done` here,
+  and nothing of task-flow runs at the merge, which is always the user's. A timer
+  on another machine was rejected in the idea. So `metrics.js paperclip --issue N`
+  is run when wanted, and is idempotent (Q2). `send-to-paperclip.js` now keeps the
+  issue's id as `paperclipIssueId`, so the collector never reads `outcomeNote`'s
+  free text to find it. Nothing was added to paperclip's own `AGENTS.md`: prose
+  there had already failed once.
+- **The backfill is explicit.** The transcripts of earlier runs already exist, so
+  `metrics.js backfill` turns them into rows (`backfill: true`, `unknown` where the
+  run or phase cannot be told from time alone) — only when run by hand, never on a
+  render, because a render must stay a few seconds and a guess written once sticks
+  (the first row of a key wins).
+- **Same trust model as the run-health row.** Events, rows, transcripts, `meta.json`
+  and the API's responses are untrusted input: closed shapes, nothing echoed, and
+  every failure fails open. `TASK_FLOW_METRICS=off` switches all of it off. The
+  files live in `stateDir` and may be versioned; the user decides, through their own
+  `.gitignore`.
+- **Anchored in code by `tests/metrics.docs.test.js`**, which fails when SKILL.md
+  stops naming the commands and flags `metrics.js` accepts, or the files they write.
+
 ## The viewer's components, CSS and icon vendoring, decoupled from FluidPlan (2026-10-15)
 
 - **`js/dom.js`, `i18n.js`, `icons.js`'s wrapper functions, `ui.js`, `css/tokens.css`,

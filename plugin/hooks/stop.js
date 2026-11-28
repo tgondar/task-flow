@@ -223,6 +223,71 @@ const live = runs.find(
   (run) => String(run.status || '').toLowerCase() === 'running' && String(run.phase || '') !== 'done'
 );
 
+// --- every loop the orchestrator launched gets its result -----------------
+// Each subagent of a live run leaves a start event (the SubagentStart hook), and
+// the orchestrator owes it a result (`metrics.js loop-result`, SKILL.md). That is
+// prose, so it gets forgotten; a loop with no result is a hole in the run's
+// measurement. Once the run has moved on from the phase or task a loop started in
+// and the loop still has no result, it was forgotten, and the turn goes on until
+// it is recorded. Which loops those are is metrics.js's call (loopsWithoutResult,
+// the one reader of the events file); this hook only phrases the ask.
+//
+// It is a bounded ask like the task-list one, never a gate: two pushes per set of
+// missing ids, then it says it gives up and the hook decides exactly as it would
+// have without this block. Everything fails open into that same path - an
+// unreadable events file is nothing to ask for, and metrics.js is loaded here,
+// inside the try, so even a module that will not load changes nothing.
+//
+// What reaches the model: the run's folder, a count, ids in the closed shape of an
+// agent id (the reader drops every other line) and a command naming this plugin's
+// own metrics.js. No other text of state.json or of the events file, and no error
+// message - stderr is read by the model whenever this turn is pushed, and an error
+// message can carry a path or a quoted value.
+//
+// Off with TASK_FLOW_METRICS=off: loop-result then records nothing, so asking for
+// it would be two pushes that cannot succeed.
+const LOOPS_MAX_PUSHES = 2;
+const LOOPS_SHOWN = 10;
+if (live && String(process.env.TASK_FLOW_METRICS || '').toLowerCase() !== 'off') {
+  try {
+    const metricsPath = path.join(__dirname, '..', 'scripts', 'metrics.js');
+    const owed = require(metricsPath).loopsWithoutResult(projectDir, stateDir, live.$dir, live);
+    // the reader only hands back agent ids; checked again here, where the text leaves
+    const ids = Array.isArray(owed) ? owed.filter((id) => typeof id === 'string' && /^[A-Za-z0-9]{1,64}$/.test(id)) : [];
+    if (ids.length > 0) {
+      const sessionKey = String(payload.session_id || 'nosession').replace(/[^A-Za-z0-9_-]/g, '');
+      const guardPath = guardFile('loops', sessionKey);
+      const signature = `${live.$dir}|${ids.join(',')}`;
+      let guard = { signature: null, consecutive: 0 };
+      try {
+        guard = JSON.parse(fs.readFileSync(guardPath, 'utf8'));
+      } catch (error) {
+        // no guard yet
+      }
+      if (!guard || guard.signature !== signature || !Number.isInteger(guard.consecutive)) guard = { signature, consecutive: 0 };
+      if (guard.consecutive >= LOOPS_MAX_PUSHES) {
+        process.stderr.write(
+          `STOP-HOOK: run "${live.$dir}" still has ${ids.length} subagent loop(s) with no recorded result; ` +
+            'not asking again. Say so in the reply.\n'
+        );
+      } else {
+        fs.writeFileSync(guardPath, JSON.stringify({ signature, consecutive: guard.consecutive + 1 }));
+        const shown = ids.slice(0, LOOPS_SHOWN).join(', ');
+        const more = ids.length > LOOPS_SHOWN ? ` (the first ${LOOPS_SHOWN} of ${ids.length})` : '';
+        keepGoing(
+          `run "${live.$dir}" has ${ids.length} subagent ${ids.length === 1 ? 'loop' : 'loops'} with no recorded result: ${shown}${more}.`,
+          `Record each one now: node "${metricsPath.replace(/\\/g, '/')}" loop-result --slug ${live.$dir} ` +
+            '--agent <id> --outcome ok|retry|failed|unknown, adding --tests, --critical, --required, --round, ' +
+            '--phase and --task when known. Record an id you do not recognise with --outcome unknown. Then carry on.'
+        );
+      }
+    }
+  } catch (error) {
+    // Fail open: decide as if this block were not here.
+    process.stderr.write('STOP-HOOK: the subagent loops were not checked; carrying on.\n');
+  }
+}
+
 if (!live) letItStop();
 
 // --- loop protection -------------------------------------------------------

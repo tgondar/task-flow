@@ -33,9 +33,13 @@
 // top: a top-level require in both directions would hand back partial exports.
 
 const fs = require('fs');
+const http = require('http');
+const https = require('https');
 const path = require('path');
-const { crossesLink, isInside, loadConfig } = require('./config.js');
-const { PHASES, SAFE_SEGMENT, readPlanTasks, readSkippedTasks, readPendingTasks } = require('./render-run.js');
+const {
+  crossesLink, isInside, isPaperclipUrlTrusted, loadConfig, parsePaperclipOrigin, runningRuns,
+} = require('./config.js');
+const { PHASES, SAFE_SEGMENT, STRINGS, formatDuration, readPlanTasks, readSkippedTasks, readPendingTasks } = require('./render-run.js');
 
 // --- constants ---------------------------------------------------------------
 // Named, at the top, not configurable: the spec (R7, section 9) fixes these
@@ -67,6 +71,16 @@ const CONSTANTS = Object.freeze({
   /** git --numstat: no shell, a short leash, a small buffer. */
   GIT_TIMEOUT_MS: 3000,
   GIT_MAX_BUFFER: 1024 * 1024,
+
+  /** One line of a run's loop-events.jsonl. A start event is about 150 bytes; a ceiling. */
+  LOOP_EVENT_MAX_BYTES: 512,
+  /** A loop-events.jsonl already past this gets no more lines (thousands of loops). */
+  LOOP_EVENTS_MAX_FILE_BYTES: 1024 * 1024,
+
+  /** One request to paperclip's API (plan T11, RF-042): the whole exchange, connect to last byte. */
+  PAPERCLIP_TIMEOUT_MS: 10000,
+  /** A paperclip response body past this is refused, not parsed (the request is destroyed). */
+  PAPERCLIP_MAX_BODY_BYTES: 1024 * 1024,
 });
 
 // --- deviation table (spec R7) --------------------------------------------------
@@ -121,6 +135,10 @@ const SHAPE = Object.freeze({
   date: /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/,
   /** ISO in UTC with a Z; optional milliseconds. Offsets are not accepted. */
   instant: /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,3})?Z$/,
+  /** A subagent's id, as the SubagentStart payload gives it and agent-<id>.jsonl names it. */
+  agentId: /^[A-Za-z0-9]{1,64}$/,
+  /** A subagent's type (`general-purpose`, `task-flow:security-auditor`): a model name's shape. */
+  agentType: /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/,
 });
 
 const OUTCOMES = ['done', 'failed'];
@@ -355,6 +373,53 @@ function closeQuietly(fd) {
 }
 
 /**
+ * The last `maxBytes` of `file` as text, for this module's bounded line readers
+ * (metrics.jsonl, a run's loop-events.jsonl). Returns `{ text, code }`: code null
+ * (text '' when the file does not exist yet), `unsafe-path` when the path fails
+ * isSafeHistoryPath or is a link/folder/etc. (nothing was opened), or
+ * `read-failed`. Never throws, and a code never carries text from the file.
+ *
+ * One bounded read whatever the size. When the file is bigger than the window, the
+ * window starts mid-line and that first fragment is dropped, so every line of
+ * `text` is whole as written (the last one may still be cut by a crash).
+ */
+function readTail(projectDir, stateDir, file, maxBytes) {
+  let fd = null;
+  try {
+    if (!isSafeHistoryPath(projectDir, stateDir, file)) return { text: '', code: 'unsafe-path' };
+    let stats;
+    try {
+      stats = fs.lstatSync(file);
+    } catch {
+      return { text: '', code: null }; // nothing written yet
+    }
+    if (!stats.isFile()) return { text: '', code: 'unsafe-path' };
+
+    fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW);
+    const size = fs.fstatSync(fd).size;
+    const length = Math.min(size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    let read = 0;
+    while (read < length) {
+      const n = fs.readSync(fd, buffer, read, length - read, size - length + read);
+      if (n === 0) break;
+      read += n;
+    }
+    let text = buffer.subarray(0, read).toString('utf8');
+    if (size > length) {
+      // the window starts mid-line: that first fragment is not a line
+      const cut = text.indexOf('\n');
+      text = cut === -1 ? '' : text.slice(cut + 1);
+    }
+    return { text, code: null };
+  } catch {
+    return { text: '', code: 'read-failed' };
+  } finally {
+    closeQuietly(fd);
+  }
+}
+
+/**
  * The validated rows of `<stateDir>/metrics.jsonl`, oldest first, one per
  * `run`+`created` (the FIRST line wins: two racing closes may both append, and the
  * earlier one is the measurement that was reported).
@@ -365,42 +430,17 @@ function closeQuietly(fd) {
  * opened) or `read-failed`. Never throws, and never carries text from the file:
  * only counts and codes.
  *
- * Cost is bounded whatever the file: only the last HISTORY_TAIL_BYTES are read, the
- * first (probably partial) line of a truncated window is dropped, and when the window
+ * Cost is bounded whatever the file: only the last HISTORY_TAIL_BYTES are read
+ * (readTail, which drops the partial first line of a cut window), and when the window
  * still holds more than HISTORY_MAX_ROWS lines only the last HISTORY_KEEP_ROWS are
  * looked at, so a hostile multi-GiB file costs one bounded read and a bounded parse.
  */
 function readHistory(projectDir, stateDir) {
   const result = { rows: [], ignored: 0, code: null };
-  let fd = null;
   try {
-    const file = historyPath(stateDir);
-    if (!isSafeHistoryPath(projectDir, stateDir, file)) return { ...result, code: 'unsafe-path' };
-    let stats;
-    try {
-      stats = fs.lstatSync(file);
-    } catch {
-      return result; // no history yet
-    }
-    if (!stats.isFile()) return { ...result, code: 'unsafe-path' };
-
-    fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW);
-    const size = fs.fstatSync(fd).size;
-    const length = Math.min(size, CONSTANTS.HISTORY_TAIL_BYTES);
-    const buffer = Buffer.alloc(length);
-    let read = 0;
-    while (read < length) {
-      const n = fs.readSync(fd, buffer, read, length - read, size - length + read);
-      if (n === 0) break;
-      read += n;
-    }
-    let text = buffer.subarray(0, read).toString('utf8');
-    if (size > length) {
-      // the window starts mid-line: that first fragment is not a row
-      const cut = text.indexOf('\n');
-      text = cut === -1 ? '' : text.slice(cut + 1);
-    }
-    let lines = text.split('\n');
+    const tail = readTail(projectDir, stateDir, historyPath(stateDir), CONSTANTS.HISTORY_TAIL_BYTES);
+    if (tail.code) return { ...result, code: tail.code };
+    let lines = tail.text.split('\n');
     if (lines.length > CONSTANTS.HISTORY_MAX_ROWS) lines = lines.slice(-CONSTANTS.HISTORY_KEEP_ROWS);
 
     const seen = new Set();
@@ -419,8 +459,6 @@ function readHistory(projectDir, stateDir) {
     return result;
   } catch {
     return { rows: [], ignored: 0, code: 'read-failed' };
-  } finally {
-    closeQuietly(fd);
   }
 }
 
@@ -431,20 +469,37 @@ function readHistory(projectDir, stateDir) {
  *
  * The row is re-validated here so that nothing that is not a closed-shape v1 row can
  * reach the file, whoever the caller is, and it is serialised from the validated
- * object. If the last byte on disk is not a newline (a crash cut the previous line)
- * a newline is written first, so the new row is never glued to the fragment. The
- * write is one append-mode write on a descriptor we fstat'ed (the same effect as
- * fs.appendFileSync with flag 'a', but the file we checked is the file we wrote).
+ * object, then written by appendLine (no size cap on the file: the reader reads a
+ * bounded tail of it).
  */
 function appendRow(projectDir, stateDir, row) {
-  let fd = null;
   try {
     const checked = validateRow(row);
     if (!checked.ok) return { ok: false, code: 'invalid-row' };
     const body = JSON.stringify(checked.row);
     if (Buffer.byteLength(body, 'utf8') + 1 > CONSTANTS.MAX_ROW_BYTES) return { ok: false, code: 'invalid-row' };
 
-    const file = historyPath(stateDir);
+    return appendLine(projectDir, stateDir, historyPath(stateDir), body, Infinity);
+  } catch {
+    return { ok: false, code: 'write-failed' };
+  }
+}
+
+/**
+ * Appends `body` and a newline to `file`: the one write path of this module's line
+ * files. `{ ok: true }` or `{ ok: false, code }` with code `unsafe-path`, `full`
+ * (the file is already over `maxFileBytes`; nothing written) or `write-failed`.
+ * Never throws, never creates a folder (no state folder means nothing to measure).
+ * Validating `body` is the caller's job: each file has its own closed shape.
+ *
+ * If the last byte on disk is not a newline (a crash cut the previous line) a
+ * newline is written first, so the new line is never glued to the fragment. The
+ * write is one append-mode write on a descriptor we fstat'ed (the same effect as
+ * fs.appendFileSync with flag 'a', but the file we checked is the file we wrote).
+ */
+function appendLine(projectDir, stateDir, file, body, maxFileBytes) {
+  let fd = null;
+  try {
     if (!isSafeHistoryPath(projectDir, stateDir, file)) return { ok: false, code: 'unsafe-path' };
     try {
       if (!fs.lstatSync(file).isFile()) return { ok: false, code: 'unsafe-path' };
@@ -455,6 +510,7 @@ function appendRow(projectDir, stateDir, row) {
     fd = fs.openSync(file, fs.constants.O_RDWR | fs.constants.O_APPEND | fs.constants.O_CREAT | NOFOLLOW, 0o644);
     const stats = fs.fstatSync(fd);
     if (!stats.isFile()) return { ok: false, code: 'unsafe-path' };
+    if (stats.size > maxFileBytes) return { ok: false, code: 'full' };
     let prefix = '';
     if (stats.size > 0) {
       const last = Buffer.alloc(1);
@@ -983,7 +1039,8 @@ function listTranscripts(projectsRoot, base, startMs, limits, expired) {
           if (files.length + 1 > limits.maxFiles) return { reason: 'timeout' };
           if (fstats.size > CONSTANTS.MAX_TRANSCRIPT_FILE_BYTES) {
             oversize += 1;
-            files.push({ file: null });
+            // the name (already TRANSCRIPT_NAME) lets the loop join tell an oversize transcript from a missing one
+            files.push({ file: null, name: item.name });
             continue;
           }
           total += fstats.size;
@@ -1324,6 +1381,1637 @@ module.exports = {
   closeRun,
 };
 
+// --- loop start events (spec 6.1, RF-001..RF-004, RF-060..RF-062; plan T1) --------------------
+//
+// One line per subagent of a live run, written by the SubagentStart hook at the moment the
+// subagent starts, in `<stateDir>/<run>/loop-events.jsonl`. WHY a start event at all: the
+// transcript of a subagent (`agent-<id>.jsonl`) says what it spent, but not which run, phase
+// or task it served - only the hook knows that, and only at that moment, from state.json. The
+// close (closeRun, a later task) joins each start to its transcript and writes one line per
+// loop to the project's history.
+//
+// Deliberately AFTER module.exports and BEFORE closeRun: the security suites scan slices of
+// this file that end at module.exports and that start at closeRun, and the code here does I/O
+// and reads TASK_FLOW_METRICS, which those slices forbid or count. Exported with
+// Object.assign for the same reason.
+//
+// Trust. The hook's payload, state.json and the events file are all input somebody else may
+// have written. So: the payload gives two values and only when they match their closed shape
+// (`agent_id`, `agent_type`) - session_id, transcript_path, cwd and the rest are never read,
+// let alone stored (RF-003, RF-062); state.json gives a phase from PHASES and a task id in
+// SHAPE.taskId, anything else becomes `unknown` / ''; the run folder must be a SAFE_SEGMENT;
+// the file goes through appendLine (contained in the project and the state folder, no link,
+// a plain file, append-only, no folder created, nothing once it is over 1 MiB). The reader
+// rebuilds every line fresh from validated values and only counts what it rejects.
+//
+// It FAILS OPEN (RF-061): every failure is a closed `{ ok, code }`, never an exception, and
+// the hook ignores the result. A subagent must start whatever happens here.
+
+const LOOP_EVENTS_FILE = 'loop-events.jsonl';
+const LOOP_EVENT_KEYS = ['v', 'kind', 'agent', 'type', 'phase', 'task', 'at'];
+const LOOP_PHASES = [...PHASES, 'unknown'];
+
+const loopResult = (ok, code) => ({ ok, code });
+/** An own property or undefined: an inherited or polluted key never answers. */
+const ownValue = (object, key) => (hasOwn(object, key) ? object[key] : undefined);
+/** The switch, read from `env` (process.env, or a caller's). The one spelling for every writer
+ *  and command of these sections; closeRun keeps its own check, its first statement. */
+const metricsOff = (env) => String(env.TASK_FLOW_METRICS || '').toLowerCase() === 'off';
+/** The project's accepted configuration when it names a stateDir, else null: the first step of
+ *  every writer and command of these sections. */
+function stateConfig(projectDir) {
+  const loaded = loadConfig(projectDir);
+  return loaded.ok && loaded.config && typeof loaded.config.stateDir === 'string' ? loaded.config : null;
+}
+/** A deadline `ms` from now, which `given` (ms since the epoch: a caller's or a test's) can only
+ *  bring forward. */
+function deadlineWithin(given, ms) {
+  const limit = Date.now() + ms;
+  return typeof given === 'number' && Number.isFinite(given) ? Math.min(given, limit) : limit;
+}
+
+/** The phase a subagent started now works in: state.json's `phase` is the last stage
+ *  COMPLETED (SKILL.md section 8), so the work in flight is the next one. Past the last
+ *  phase, or for anything that is not a phase, `unknown` - never a guess. */
+function phaseInFlight(done) {
+  const index = typeof done === 'string' ? PHASES.indexOf(done) : -1;
+  return index >= 0 && index + 1 < PHASES.length ? PHASES[index + 1] : 'unknown';
+}
+
+/** Where a run's state.json says the work is now, as a start event records it: the phase in
+ *  flight and the cursor in SHAPE.taskId, else ''. Only its own `phase` and `buildCursor` are read. */
+function whereNow(state) {
+  const cursor = ownValue(state, 'buildCursor');
+  return { phase: phaseInFlight(ownValue(state, 'phase')), task: typeof cursor === 'string' && SHAPE.taskId.test(cursor) ? cursor : '' };
+}
+
+/**
+ * Appends the start event of one subagent to the live run's loop-events.jsonl.
+ * `options`: `{ projectDir, payload, env }` - the hook's project, its parsed stdin and
+ * the environment (only TASK_FLOW_METRICS is read from it; the configuration expands
+ * its folder variables from the real environment, as in closeRun).
+ *
+ * Checks, in this order (RF-001): the switch; a valid configuration; exactly one running
+ * run, whose folder is a safe segment (two live runs: no way to tell which one the
+ * subagent serves, so none); the payload's two values in shape. Returns `{ ok, code }`:
+ * `written`, `disabled` (ok), or `bad-input`, `bad-config`, `no-single-run`, `bad-payload`,
+ * `bad-state`, `too-long`, `unsafe-path`, `full`, `write-failed`, `internal`. Never throws.
+ */
+function appendLoopEvent(options) {
+  try {
+    const opts = isObject(options) ? options : {};
+    const env = isObject(opts.env) ? opts.env : process.env;
+    if (metricsOff(env)) return loopResult(true, 'disabled');
+    const { projectDir, payload } = opts;
+    if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || !isObject(payload)) return loopResult(false, 'bad-input');
+
+    const config = stateConfig(projectDir);
+    if (!config) return loopResult(false, 'bad-config');
+    const stateDir = config.stateDir;
+
+    const runs = runningRuns(projectDir);
+    if (runs.length !== 1 || !isSlug(runs[0])) return loopResult(false, 'no-single-run');
+    const run = runs[0];
+
+    const agent = ownValue(payload, 'agent_id');
+    const type = ownValue(payload, 'agent_type');
+    if (typeof agent !== 'string' || !SHAPE.agentId.test(agent) || typeof type !== 'string' || !SHAPE.agentType.test(type)) {
+      return loopResult(false, 'bad-payload');
+    }
+
+    const state = readSmallObject(projectDir, path.join(stateDir, run, 'state.json'));
+    if (!state) return loopResult(false, 'bad-state');
+    const { phase, task } = whereNow(state);
+    const event = { v: 1, kind: 'start', agent, type, phase, task, at: new Date().toISOString() };
+    const body = JSON.stringify(event);
+    if (Buffer.byteLength(body, 'utf8') + 1 > CONSTANTS.LOOP_EVENT_MAX_BYTES) return loopResult(false, 'too-long');
+    const file = path.join(stateDir, run, LOOP_EVENTS_FILE);
+    const written = appendLine(projectDir, stateDir, file, body, CONSTANTS.LOOP_EVENTS_MAX_FILE_BYTES);
+    return written.ok ? loopResult(true, 'written') : loopResult(false, written.code);
+  } catch {
+    return loopResult(false, 'internal');
+  }
+}
+
+/** One line of loop-events.jsonl as parsed JSON, or null. Length first (a long line is never
+ *  parsed); the parser's message, which quotes the input, is dropped. */
+function parseEventLine(line) {
+  if (line.length > CONSTANTS.LOOP_EVENT_MAX_BYTES || Buffer.byteLength(line, 'utf8') > CONSTANTS.LOOP_EVENT_MAX_BYTES) return null;
+  try {
+    return JSON.parse(line);
+  } catch {
+    return null;
+  }
+}
+
+/** A parsed event as a fresh start event, or null: the closed shape of every field. */
+function parseStartEvent(value) {
+  if (!hasExactKeys(value, LOOP_EVENT_KEYS) || value.v !== 1 || value.kind !== 'start') return null;
+  const { agent, type, phase, task, at } = value;
+  if (typeof agent !== 'string' || !SHAPE.agentId.test(agent)) return null;
+  if (typeof type !== 'string' || !SHAPE.agentType.test(type)) return null;
+  if (!LOOP_PHASES.includes(phase)) return null;
+  if (task !== '' && !(typeof task === 'string' && SHAPE.taskId.test(task))) return null;
+  if (!isInstant(at)) return null;
+  return { v: 1, kind: 'start', agent, type, phase, task, at };
+}
+
+/**
+ * The events of run `slug`, oldest first: `{ starts, results, ignored }`. `results` are the
+ * loop-result events (plan T5, toResultEvent); `ignored` counts the non-blank lines that are
+ * not a valid event of either kind. Only the bounded tail is read (the writer's cap plus
+ * one line, so a file the writer filled is read whole). A missing, refused or unreadable
+ * file is simply no events. Never throws, never carries text from the file.
+ */
+function readLoopEvents(projectDir, stateDir, slug) {
+  const empty = () => ({ starts: [], results: [], ignored: 0 });
+  try {
+    if (!isSlug(slug) || typeof stateDir !== 'string') return empty();
+    const file = path.join(stateDir, slug, LOOP_EVENTS_FILE);
+    const tail = readTail(projectDir, stateDir, file, CONSTANTS.LOOP_EVENTS_MAX_FILE_BYTES + CONSTANTS.LOOP_EVENT_MAX_BYTES);
+    const result = empty();
+    if (tail.code) return result;
+    for (const raw of tail.text.split('\n')) {
+      const line = raw.replace(/^﻿/, '');
+      if (line.trim() === '') continue;
+      const value = parseEventLine(line);
+      const start = parseStartEvent(value);
+      const outcome = start ? null : toResultEvent(value);
+      if (start) result.starts.push(start);
+      else if (outcome) result.results.push(outcome);
+      else result.ignored += 1;
+    }
+    return result;
+  } catch {
+    return empty();
+  }
+}
+
+/**
+ * The agent ids of run `slug`'s loops still owed a result, sorted and each once (spec 6.2,
+ * RF-024; plan T6) - what the Stop hook asks the orchestrator to record with loop-result.
+ * A loop is owed one when it has a start event, no result event, AND the run has moved on
+ * from where it started: the phase or the task a start event would record now differ from the
+ * start's - both from whereNow, the function appendLoopEvent records them with, so the
+ * comparison is like for like. A loop still running in
+ * the background while the run has not moved is not owed anything yet.
+ *
+ * `state` is the run's parsed state.json, untrusted: only its own `phase` and `buildCursor`
+ * are read, through closed shapes. The ids come from readLoopEvents, so each is in
+ * SHAPE.agentId - the only thing of the file the caller may show. Never throws; any failure
+ * (no file, a refused or unreadable one, no state) is [] - nothing to ask for (RF-026).
+ */
+function loopsWithoutResult(projectDir, stateDir, slug, state) {
+  try {
+    if (!isObject(state)) return [];
+    const events = readLoopEvents(projectDir, stateDir, slug);
+    const { phase, task } = whereNow(state);
+    const answered = new Set(events.results.map((r) => r.agent));
+    const owed = new Set();
+    for (const start of events.starts) {
+      if (!answered.has(start.agent) && (start.phase !== phase || start.task !== task)) owed.add(start.agent);
+    }
+    return [...owed].sort();
+  } catch {
+    return [];
+  }
+}
+
+Object.assign(module.exports, { appendLoopEvent, readLoopEvents });
+Object.assign(module.exports, { loopsWithoutResult });
+
+// --- loop rows: the closed shape and the history loops.jsonl (spec 6.1, RF-009; plan T3) ---------
+//
+// One line per loop - one execution of an agent - in `<stateDir>/loops.jsonl`, the project's
+// loop history beside metrics.jsonl. The SAME validator takes the three origins (SC-007): a
+// task-flow subagent joined to its transcript at the close, a paperclip loop read from its API,
+// and a backfilled old run. WHY one shape for all three: the page, the PR summary and any later
+// comparison read one file and never ask where a line came from beyond `source`.
+//
+// Same section placement as the start events above (after module.exports, before closeRun), for
+// the same reason. Same trust model as metrics.jsonl: the file is repository data anybody may
+// have edited, so a line is a row only when every field is in its closed shape, an unknown key
+// at any level invalidates it, and the row handed back is rebuilt from the validated values
+// (never the parsed object: no prototype pollution, no smuggled key). A wrong line is counted,
+// never echoed. The key of a row is `source` + `run` + `id`; the FIRST line of a key wins on
+// read, and the writer never appends a key that is already there (RF-052: idempotent backfill).
+
+const LOOPS_FILE = 'loops.jsonl';
+const LOOP_KEYS = [
+  'v', 'source', 'run', 'id', 'agentType', 'phase', 'task', 'round', 'model', 'effort', 'startedAt', 'durationS',
+  'tokens', 'costCents', 'outcome', 'tests', 'critical', 'required', 'reason', 'backfill',
+];
+const LOOP_TOKEN_KEYS = ['input', 'cacheCreate', 'cacheRead', 'output'];
+const LOOP_SOURCES = ['taskflow', 'paperclip'];
+const LOOP_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'unknown'];
+const LOOP_OUTCOMES = ['ok', 'retry', 'failed', 'unknown'];
+const LOOP_TESTS = ['green', 'red'];
+const LOOP_REASONS = ['no-transcript', 'unreadable-format', 'timeout'];
+/** RF-009: one line of loops.jsonl. A full row is about 800 bytes; past this it is not ours. */
+const LOOP_ROW_MAX_BYTES = 1024;
+/** Only the tail is read. Bigger than the metrics.jsonl tail on purpose: the writer checks it
+ *  for keys already present, and a backfill must still see the rows it wrote earlier (about
+ *  5 000 rows fit). More lines than LOOPS_MAX_LINES in it: only the newest are parsed. */
+const LOOPS_TAIL_BYTES = 4 * 1024 * 1024;
+const LOOPS_MAX_LINES = 20000;
+/** A paperclip id: a lower-case UUID, the form its API uses in paths. One spelling only, so
+ *  that the same loop can never be two keys. */
+const PAPERCLIP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+const isShape = (re) => (value) => typeof value === 'string' && re.test(value);
+const isRound = (value) => typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 99;
+
+/**
+ * Is `row` a valid version-1 loop line? Never throws. `{ ok: true, row }` with `row` rebuilt
+ * from the validated values, in LOOP_KEYS order; `{ ok: false }` for a wrong shape;
+ * `{ ok: false, ignored: true }` for another version (a newer task-flow's line is not an
+ * error). No reason text, as in validateRow.
+ *
+ * Two rules tie fields together: `costCents` can only be a number on a paperclip line (RF-045:
+ * money only from paperclip, never priced by task-flow), and `reason` explains missing tokens,
+ * so it can only be set when `tokens` is null (tokens null with no reason is allowed: a
+ * paperclip loop may simply report none).
+ */
+function validateLoopRow(row) {
+  try {
+    if (!isObject(row)) return { ok: false };
+    if (hasOwn(row, 'v') && row.v !== 1 && typeof row.v === 'number') return { ok: false, ignored: true };
+    if (!hasExactKeys(row, LOOP_KEYS) || row.v !== 1 || !LOOP_SOURCES.includes(row.source)) return { ok: false };
+    const paperclip = row.source === 'paperclip';
+    const tokens = row.tokens;
+    if (tokens !== null && !(hasExactKeys(tokens, LOOP_TOKEN_KEYS) && LOOP_TOKEN_KEYS.every((key) => isCount(tokens[key])))) return { ok: false };
+
+    const fields =
+      (row.run === 'unknown' || isSlug(row.run)) &&
+      (paperclip ? isShape(PAPERCLIP_ID)(row.id) : isShape(SHAPE.agentId)(row.id)) &&
+      isShape(SHAPE.agentType)(row.agentType) &&
+      LOOP_PHASES.includes(row.phase) &&
+      (row.task === '' || isShape(SHAPE.taskId)(row.task)) &&
+      orNull(isRound)(row.round) &&
+      orNull(isShape(SHAPE.model))(row.model) &&
+      (row.effort === null || LOOP_EFFORTS.includes(row.effort)) &&
+      orNull(isInstant)(row.startedAt) &&
+      orNull(isCount)(row.durationS) &&
+      (row.costCents === null || (paperclip && isCount(row.costCents))) &&
+      (row.outcome === null || LOOP_OUTCOMES.includes(row.outcome)) &&
+      (row.tests === null || LOOP_TESTS.includes(row.tests)) &&
+      orNull(isCount)(row.critical) &&
+      orNull(isCount)(row.required) &&
+      (row.reason === null || (tokens === null && LOOP_REASONS.includes(row.reason))) &&
+      isBool(row.backfill);
+    if (!fields) return { ok: false };
+
+    const fresh = {};
+    for (const key of LOOP_KEYS) fresh[key] = row[key];
+    fresh.tokens = tokens === null ? null : { input: tokens.input, cacheCreate: tokens.cacheCreate, cacheRead: tokens.cacheRead, output: tokens.output };
+    if (Buffer.byteLength(JSON.stringify(fresh), 'utf8') > LOOP_ROW_MAX_BYTES) return { ok: false };
+    return { ok: true, row: fresh };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** One loops.jsonl line (text, without its newline) to a validated row. Never throws, never
+ *  echoes: length before parsing, and the JSON.parse message (which quotes the input) dropped. */
+function parseLoopRow(line) {
+  try {
+    if (typeof line !== 'string') return { ok: false };
+    const text = line.replace(/^﻿/, '').replace(/[\r\n]+$/, '');
+    if (text.length > LOOP_ROW_MAX_BYTES || Buffer.byteLength(text, 'utf8') > LOOP_ROW_MAX_BYTES) return { ok: false };
+    return validateLoopRow(JSON.parse(text));
+  } catch {
+    return { ok: false };
+  }
+}
+
+const loopKey = (row) => `${row.source}\n${row.run}\n${row.id}`;
+
+/**
+ * The validated rows of `<stateDir>/loops.jsonl`, oldest first, one per key (the first line
+ * wins). `{ rows, ignored, code }` exactly as readHistory: `ignored` counts non-blank lines that
+ * are not a row (a duplicate key is a valid row, not counted); `code` null, `unsafe-path` or
+ * `read-failed`. Bounded whatever the file; never throws, never carries text from the file.
+ */
+function readLoops(projectDir, stateDir) {
+  const result = { rows: [], ignored: 0, code: null };
+  try {
+    if (typeof stateDir !== 'string') return { ...result, code: 'unsafe-path' };
+    const tail = readTail(projectDir, stateDir, path.join(stateDir, LOOPS_FILE), LOOPS_TAIL_BYTES);
+    if (tail.code) return { ...result, code: tail.code };
+    let lines = tail.text.split('\n');
+    if (lines.length > LOOPS_MAX_LINES) lines = lines.slice(-LOOPS_MAX_LINES);
+    const seen = new Set();
+    for (const raw of lines) {
+      if (raw.replace(/^﻿/, '').trim() === '') continue;
+      const parsed = parseLoopRow(raw);
+      if (!parsed.ok) {
+        result.ignored += 1;
+        continue;
+      }
+      const key = loopKey(parsed.row);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.rows.push(parsed.row);
+    }
+    return result;
+  } catch {
+    return { rows: [], ignored: 0, code: 'read-failed' };
+  }
+}
+
+/**
+ * Appends to `<stateDir>/loops.jsonl` the rows of `rows` that are valid and whose key is not in
+ * the history yet (nor earlier in the same batch), each serialised from its validated object,
+ * all in ONE append (appendLine: contained, no link, no folder created). Returns
+ * `{ ok, code, written, invalid }`: code null on success (`written` 0 means nothing new, and
+ * then no file is created), or `bad-input`, `unsafe-path`, `read-failed`, `write-failed`.
+ * A history that cannot be read is not written either: without it the keys already there are
+ * unknown, and a blind append would duplicate them. Never throws.
+ */
+function appendLoopRows(projectDir, stateDir, rows) {
+  const outcome = (ok, code, written, invalid) => ({ ok, code, written, invalid });
+  try {
+    if (!Array.isArray(rows)) return outcome(false, 'bad-input', 0, 0);
+    const history = readLoops(projectDir, stateDir);
+    if (history.code) return outcome(false, history.code, 0, 0);
+    const seen = new Set(history.rows.map(loopKey));
+    const lines = [];
+    let invalid = 0;
+    for (const row of rows) {
+      const checked = validateLoopRow(row);
+      if (!checked.ok) {
+        invalid += 1;
+        continue;
+      }
+      const key = loopKey(checked.row);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      lines.push(JSON.stringify(checked.row));
+    }
+    if (lines.length === 0) return outcome(true, null, 0, invalid);
+    const written = appendLine(projectDir, stateDir, path.join(stateDir, LOOPS_FILE), lines.join('\n'), Infinity);
+    return written.ok ? outcome(true, null, lines.length, invalid) : outcome(false, written.code, 0, invalid);
+  } catch {
+    return outcome(false, 'write-failed', 0, 0);
+  }
+}
+
+Object.assign(module.exports, { LOOP_KEYS, validateLoopRow, parseLoopRow, readLoops, appendLoopRows });
+
+// --- the join: each loop's start event with its transcript, at the close (spec 6.1, RF-005..RF-008; plan T4)
+//
+// A start event says which run, phase and task a subagent served; its transcript
+// `agent-<id>.jsonl` says what it spent. At the close (closeRun, below) the two are joined into
+// one loop row per start event and appended to loops.jsonl. WHY at the close and not in the hook:
+// the transcript is only complete once the subagent is done, and the close already runs once per
+// run with a time budget.
+//
+// The transcripts are the same untrusted, unversioned format readTokens reads, so the same rules:
+// ONE bounded listing of the project's transcript folder (listTranscripts: lstat, no link, names
+// in TRANSCRIPT_NAME only, under ~/.claude/projects), files opened through scanFile (O_NOFOLLOW,
+// fstat, size and line ceilings), only `assistant` records with an API_ID requestId and a usage in
+// the known shape count, deduplicated by requestId with the max of each field. Nothing of the
+// messages is read into a row: numbers, a model in SHAPE.model and an effort from a closed set.
+// The agent id is never joined into a path - it only looks a listed name up.
+//
+// Fail open (RF-008): a loop whose transcript is missing, unreadable or out of time still gets
+// its row, with tokens/duration/model/effort null and a closed reason, and never stops the others.
+
+/** RF-007: the `effort:` of each agent this plugin ships (plugin/agents/*.md), by the type a
+ *  SubagentStart payload gives it. A test compares it with the files, both ways. */
+const AGENT_EFFORT = Object.freeze({
+  'task-flow:code-reviewer': 'low',
+  'task-flow:security-auditor': 'low',
+  'task-flow:second-opinion-low': 'low',
+  'task-flow:second-opinion-medium': 'medium',
+  'task-flow:second-opinion-high': 'high',
+  'task-flow:second-opinion-xhigh': 'xhigh',
+  'task-flow:second-opinion-max': 'max',
+});
+const TRANSCRIPT_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+/** The listing skips transcripts last written before the run's first start event, less this
+ *  margin (clock rounding between the hook and the transcript writer). Not measured: a guess. */
+const LOOP_MTIME_SLACK_MS = 60 * 1000;
+
+/** The most frequent non-null value; a tie goes to the one that sorts first (deterministic). */
+function mostFrequent(values) {
+  const counts = new Map();
+  for (const value of values) if (value !== null) counts.set(value, (counts.get(value) || 0) + 1);
+  let best = null;
+  for (const [value, n] of counts) {
+    const top = best === null ? 0 : counts.get(best);
+    if (n > top || (n === top && value < best)) best = value;
+  }
+  return best;
+}
+
+/** Counts one parsed transcript record into `requests` (requestId -> the max of each token field,
+ *  the first model in SHAPE.model, the first effort from the closed set): only an `assistant`
+ *  record with an API_ID requestId and a usage in the known shape, never a `<synthetic>` one.
+ *  False when the record is a new request and `requests` already holds MAX_REQUESTS: the
+ *  caller's overflow. Shared by the loop transcripts and the main ones (readMainTranscripts). */
+function addRequest(requests, line) {
+  if (ownValue(line, 'type') !== 'assistant') return true;
+  const id = ownValue(line, 'requestId');
+  const message = ownValue(line, 'message');
+  if (typeof id !== 'string' || !API_ID.test(id) || !isObject(message)) return true;
+  const model = ownValue(message, 'model');
+  if (model === '<synthetic>') return true;
+  const usage = readUsage(ownValue(message, 'usage'));
+  if (!usage) return true;
+  let request = requests.get(id);
+  if (!request) {
+    if (requests.size >= MAX_REQUESTS) return false;
+    request = { input: 0, cacheCreate: 0, cacheRead: 0, output: 0, model: null, effort: null };
+    requests.set(id, request);
+  }
+  // one request is written once per content block and only `output` grows: the max is final
+  for (const key of LOOP_TOKEN_KEYS) request[key] = Math.max(request[key], usage[key]);
+  if (request.model === null && typeof model === 'string' && SHAPE.model.test(model)) request.model = model;
+  const effort = ownValue(line, 'effort');
+  if (request.effort === null && TRANSCRIPT_EFFORTS.includes(effort)) request.effort = effort;
+  return true;
+}
+
+/** addRequest's map summed: `{ tokens, model, effort }`, the most frequent model and effort
+ *  counted once per request. `tokens` is null when a sum passes the count ceiling (sums of many
+ *  bounded counts can): that is not a measurement. */
+function sumRequests(requests) {
+  const tokens = { input: 0, cacheCreate: 0, cacheRead: 0, output: 0 };
+  for (const request of requests.values()) for (const key of LOOP_TOKEN_KEYS) tokens[key] += request[key];
+  const list = [...requests.values()];
+  return {
+    tokens: LOOP_TOKEN_KEYS.every((key) => isCount(tokens[key])) ? tokens : null,
+    model: mostFrequent(list.map((r) => r.model)),
+    effort: mostFrequent(list.map((r) => r.effort)),
+  };
+}
+
+/** The project's transcript folder `{ projectsRoot, base }`, or null when it is not a plain
+ *  folder inside ~/.claude/projects reached without a link. The folder readTokens reads: the
+ *  slug has only [A-Za-z0-9-], so whatever `projectDir` holds this is ONE folder name. */
+function transcriptFolder(projectDir) {
+  const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
+  const base = path.join(projectsRoot, projectDir.replace(/[^A-Za-z0-9]/g, '-'));
+  if (!isInside(projectsRoot, base) || crossesLink(projectsRoot, base)) return null;
+  try {
+    return fs.lstatSync(base).isDirectory() ? { projectsRoot, base } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What one loop's transcript says: `{ tokens, durationS, model, effort, reason: null }`, or
+ * `{ reason }` (`timeout`, `unreadable-format`). `effort` is the most frequent closed value in the
+ * records, or null (the caller applies RF-007's fallback). Never throws.
+ */
+function readLoopTranscript(file, deadline) {
+  try {
+    const requests = new Map();
+    let first = null;
+    let last = null;
+    let overflow = false;
+    const onLine = (text) => {
+      let line;
+      try {
+        line = JSON.parse(text);
+      } catch {
+        return; // the parser's message quotes the input: dropped
+      }
+      if (!isObject(line)) return;
+      const timestamp = ownValue(line, 'timestamp');
+      if (isInstant(timestamp)) {
+        const ms = Date.parse(timestamp);
+        first = first === null ? ms : Math.min(first, ms);
+        last = last === null ? ms : Math.max(last, ms);
+      }
+      if (!addRequest(requests, line)) overflow = true;
+    };
+    const scanned = scanFile(file, deadline, onLine, () => {});
+    if (scanned === 'timeout' || overflow) return { reason: 'timeout' };
+    if (scanned !== 'ok' || requests.size === 0) return { reason: 'unreadable-format' };
+
+    const { tokens, model, effort } = sumRequests(requests);
+    const durationS = first === null ? null : Math.round((last - first) / 1000);
+    // a sum past the ceiling, or a duration that is not a count: not a measurement
+    if (tokens === null || !orNull(isCount)(durationS)) return { reason: 'unreadable-format' };
+    return {
+      tokens,
+      durationS,
+      model,
+      effort,
+      // the first record of any type: the backfill's run window (plan T13); joinLoops keeps the event's
+      startedAt: first === null ? null : new Date(first).toISOString(),
+      reason: null,
+    };
+  } catch {
+    return { reason: 'unreadable-format' };
+  }
+}
+
+/**
+ * `joinLoops({ projectDir, slug, events, deadline })` -> the loop rows of run `slug`, in memory
+ * (nothing is written): one per start event of `events` (readLoopEvents' result), the first start
+ * of an agent id winning, in event order. The LAST result event of an agent (plan T5: a later
+ * result is a correction) gives outcome, tests, critical, required and round, and its phase/task,
+ * when set, beat the start's (RF-022: a security pass started while buildCursor had already
+ * moved on is put right by its result); round comes only from a result (RF-023). A result with
+ * no start adds no row (RF-005: one row per start event). `deadline` (ms since the epoch) can
+ * only tighten the BUDGET_MS from now. Every row passes validateLoopRow; a start that would not is dropped.
+ * Never throws.
+ */
+function joinLoops(options) {
+  try {
+    const opts = isObject(options) ? options : {};
+    const { projectDir, slug } = opts;
+    if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || projectDir.length > 1024 || !isSlug(slug)) return [];
+    const given = isObject(opts.events) && Array.isArray(opts.events.starts) ? opts.events.starts : [];
+    const deadline = deadlineWithin(opts.deadline, CONSTANTS.BUDGET_MS);
+    const expired = () => Date.now() > deadline;
+
+    const starts = [];
+    const seen = new Set();
+    for (const s of given.slice(0, 20000)) {
+      if (!isObject(s) || typeof s.agent !== 'string' || !SHAPE.agentId.test(s.agent) || !isInstant(s.at) || seen.has(s.agent)) continue;
+      seen.add(s.agent);
+      starts.push(s);
+    }
+    if (starts.length === 0) return [];
+    const results = new Map();
+    const givenResults = isObject(opts.events) && Array.isArray(opts.events.results) ? opts.events.results : [];
+    for (const r of givenResults.slice(-20000)) {
+      const checked = toResultEvent(r);
+      if (checked) results.set(checked.agent, checked);
+    }
+
+    const row = (s, read) => {
+      const found = read.reason === null;
+      const result = results.get(s.agent) || null;
+      const from = (key) => (result === null ? null : result[key]);
+      const fallback = typeof s.type === 'string' && hasOwn(AGENT_EFFORT, s.type) ? AGENT_EFFORT[s.type] : 'unknown';
+      return {
+        v: 1, source: 'taskflow', run: slug, id: s.agent, agentType: s.type,
+        phase: from('phase') || s.phase,
+        task: from('task') || s.task,
+        round: from('round'),
+        model: found ? read.model : null,
+        effort: found ? read.effort || fallback : null,
+        startedAt: s.at,
+        durationS: found ? read.durationS : null,
+        tokens: found ? read.tokens : null,
+        costCents: null, outcome: from('outcome'), tests: from('tests'), critical: from('critical'), required: from('required'),
+        reason: read.reason,
+        backfill: false,
+      };
+    };
+    const finish = (rows) => rows.map(validateLoopRow).filter((r) => r.ok).map((r) => r.row);
+    const all = (reason) => finish(starts.map((s) => row(s, { reason })));
+
+    const folder = transcriptFolder(projectDir);
+    if (!folder) return all('no-transcript');
+    const { projectsRoot, base } = folder;
+    if (expired()) return all('timeout');
+    const startMs = Math.min(...starts.map((s) => Date.parse(s.at))) - LOOP_MTIME_SLACK_MS;
+    const limits = { maxFiles: CONSTANTS.MAX_TRANSCRIPT_FILES, maxTotalBytes: CONSTANTS.MAX_TRANSCRIPT_TOTAL_BYTES };
+    const listed = listTranscripts(projectsRoot, base, startMs, limits, expired);
+    if (listed.reason) return all('timeout');
+    // name -> file (null: listed but over the size ceiling); the first listed wins
+    const byName = new Map();
+    for (const entry of listed.files) {
+      const name = entry.file === null ? entry.name : path.basename(entry.file);
+      if (typeof name === 'string' && !byName.has(name)) byName.set(name, entry.file);
+    }
+
+    return finish(starts.map((s) => {
+      if (expired()) return row(s, { reason: 'timeout' });
+      const name = `agent-${s.agent}.jsonl`;
+      if (!byName.has(name)) return row(s, { reason: 'no-transcript' });
+      const file = byName.get(name);
+      return row(s, file === null ? { reason: 'unreadable-format' } : readLoopTranscript(file, deadline));
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/** closeRun's loop step: the run's start events joined and appended to loops.jsonl. A run with
+ *  no start event reads no transcript and creates no file. The result is information only;
+ *  `orphans` counts the result events whose agent has no start (ignored, plan T5). */
+function recordLoops(projectDir, stateDir, slug, deadline) {
+  try {
+    const events = readLoopEvents(projectDir, stateDir, slug);
+    const started = new Set(events.starts.map((s) => s.agent));
+    const orphans = events.results.filter((r) => !started.has(r.agent)).length;
+    if (events.starts.length === 0) return { ok: true, code: null, written: 0, invalid: 0, orphans };
+    return { ...appendLoopRows(projectDir, stateDir, joinLoops({ projectDir, slug, events, deadline })), orphans };
+  } catch {
+    return { ok: false, code: 'internal', written: 0, invalid: 0, orphans: 0 };
+  }
+}
+
+Object.assign(module.exports, { AGENT_EFFORT, joinLoops });
+
+// --- the loop result: the loop-result CLI and its event (spec 6.2, RF-020..RF-023; plan T5) -------
+//
+// Only the orchestrator knows how a loop ended (a transcript does not say whether a review
+// passed or a task must be redone), so after each loop it records it:
+//
+//   node plugin/scripts/metrics.js loop-result --slug <run> --agent <id> --outcome ok|retry|failed|unknown
+//     [--tests green|red] [--critical <n>] [--required <n>] [--round <1-99>] [--phase <phase>]
+//     [--task <id>] [--project-dir <dir>]
+//
+// It appends one `kind: "result"` event to the run's loop-events.jsonl, through the same writer
+// as the start events (appendLine: contained, no link, no folder created, capped at 1 MiB);
+// closeRun's join (above) puts the last one of each agent on that loop's row. A start event is
+// not required (the CLI would have to read the file first); the close ignores and counts it.
+//
+// Trust. Every argument is untrusted text: the parse is all-or-nothing - each flag known, at most
+// once, with a value in its closed shape - and anything else is exit 1 with ONE fixed message,
+// nothing written. Nothing the caller passed is ever printed back (RF-021), not even on success:
+// the output is `metrics: <closed code> loop-result`. A count is decimal digits with no leading
+// zero (`08`, `1e3`, `-1`, ` 1` are not counts), turned into a number only after the regex.
+//
+// Here, before closeRun, for the same reasons as the sections above: this reads
+// TASK_FLOW_METRICS (counted once from closeRun to the end of the file), and the CLI block only
+// hands it control through `runCommand(argv, projectDir)`, so that block stays as it was.
+
+const RESULT_KEYS = ['v', 'kind', 'agent', 'outcome', 'tests', 'critical', 'required', 'round', 'phase', 'task'];
+const COUNT_ARG = /^(?:0|[1-9][0-9]{0,11})$/;
+const ROUND_ARG = /^[1-9][0-9]?$/;
+const CLI_USAGE = [
+  'usage: metrics.js close --slug <slug> [--project-dir <dir>] [--quiet]',
+  '       metrics.js loop-result --slug <run> --agent <id> --outcome ok|retry|failed|unknown',
+  '         [--tests green|red] [--critical <n>] [--required <n>] [--round <1-99>]',
+  `         [--phase ${PHASES.join('|')}] [--task <id>] [--project-dir <dir>]`,
+  '       metrics.js time --slug <run> [--project-dir <dir>]',
+  '       metrics.js summary --slug <run> [--project-dir <dir>]',
+  '       metrics.js paperclip --issue <n> [--paperclip-issue <id>] [--project-dir <dir>]',
+  '       metrics.js backfill [--project-dir <dir>]',
+  '',
+].join('\n');
+
+/** A result event (parsed JSON, or the CLI's) as a fresh object, or null: exactly RESULT_KEYS,
+ *  each value in its closed shape, every optional one null when absent. */
+function toResultEvent(value) {
+  if (!hasExactKeys(value, RESULT_KEYS) || value.v !== 1 || value.kind !== 'result') return null;
+  const { agent, outcome, tests, critical, required, round, phase, task } = value;
+  const ok =
+    isShape(SHAPE.agentId)(agent) &&
+    LOOP_OUTCOMES.includes(outcome) &&
+    (tests === null || LOOP_TESTS.includes(tests)) &&
+    orNull(isCount)(critical) &&
+    orNull(isCount)(required) &&
+    orNull(isRound)(round) &&
+    (phase === null || PHASES.includes(phase)) &&
+    orNull(isShape(SHAPE.taskId))(task);
+  return ok ? { v: 1, kind: 'result', agent, outcome, tests, critical, required, round, phase, task } : null;
+}
+
+/** The flags of loop-result and the closed shape of each value. A Map: a flag from argv is never
+ *  used as an object key (`__proto__`, `constructor` are simply unknown flags). */
+const RESULT_FLAGS = new Map([
+  ['--slug', isSlug],
+  ['--agent', isShape(SHAPE.agentId)],
+  ['--outcome', (v) => LOOP_OUTCOMES.includes(v)],
+  ['--tests', (v) => LOOP_TESTS.includes(v)],
+  ['--critical', (v) => COUNT_ARG.test(v)],
+  ['--required', (v) => COUNT_ARG.test(v)],
+  ['--round', (v) => ROUND_ARG.test(v)],
+  ['--phase', (v) => PHASES.includes(v)],
+  ['--task', isShape(SHAPE.taskId)],
+  ['--project-dir', () => true], // resolved and checked by the CLI block, as for close
+]);
+
+/** `--flag value` pairs as a Map, or null: every flag in `flags` (a Map flag -> check), at most
+ *  once, with a string value its check accepts. All or nothing. Shared by the CLI commands. */
+function parseFlags(args, flags) {
+  const given = new Map();
+  for (let i = 0; i < args.length; i += 2) {
+    const flag = args[i];
+    const value = args[i + 1];
+    const check = typeof flag === 'string' ? flags.get(flag) : undefined;
+    if (!check || given.has(flag) || typeof value !== 'string' || !check(value)) return null;
+    given.set(flag, value);
+  }
+  return given;
+}
+
+/** loop-result's arguments (after the command) as `{ slug, event }`, or null. All or nothing. */
+function parseResultArgs(args) {
+  const given = parseFlags(args, RESULT_FLAGS);
+  if (!given || !given.has('--slug') || !given.has('--agent') || !given.has('--outcome')) return null;
+  const text = (flag) => (given.has(flag) ? given.get(flag) : null);
+  const number = (flag) => (given.has(flag) ? Number(given.get(flag)) : null);
+  const event = toResultEvent({
+    v: 1, kind: 'result', agent: text('--agent'), outcome: text('--outcome'), tests: text('--tests'),
+    critical: number('--critical'), required: number('--required'), round: number('--round'),
+    phase: text('--phase'), task: text('--task'),
+  });
+  return event ? { slug: given.get('--slug'), event } : null;
+}
+
+/** loop-result's write: a closed code (`written`, `invalid`, `bad-config`, `too-long`,
+ *  appendLine's `unsafe-path` / `full` / `write-failed`, `internal`). Never throws. */
+function appendLoopResult(projectDir, args) {
+  try {
+    const parsed = parseResultArgs(args);
+    if (!parsed || typeof projectDir !== 'string' || !path.isAbsolute(projectDir)) return 'invalid';
+    const config = stateConfig(projectDir);
+    if (!config) return 'bad-config';
+    const stateDir = config.stateDir;
+    const body = JSON.stringify(parsed.event);
+    if (Buffer.byteLength(body, 'utf8') + 1 > CONSTANTS.LOOP_EVENT_MAX_BYTES) return 'too-long';
+    const file = path.join(stateDir, parsed.slug, LOOP_EVENTS_FILE);
+    const written = appendLine(projectDir, stateDir, file, body, CONSTANTS.LOOP_EVENTS_MAX_FILE_BYTES);
+    return written.ok ? 'written' : written.code;
+  } catch {
+    return 'internal';
+  }
+}
+
+/**
+ * Every CLI command but `close` (which the CLI block runs itself). Writes its own output and
+ * sets process.exitCode, which it also returns. An unknown command is the usage text and 2, as
+ * before this existed. `time` goes to timeCommand (plan T8, below), `summary` to summaryCommand (plan T9). loop-result: 0 when
+ * written, or with TASK_FLOW_METRICS=off (checked first: nothing parsed, nothing done); else 1;
+ * one fixed line either way. `projectDir` is the CLI block's resolution (--project-dir, CLAUDE_PROJECT_DIR, the cwd), or null.
+ */
+function runCommand(argv, projectDir) {
+  const exit = (code, stream, text) => {
+    stream.write(text);
+    process.exitCode = code;
+    return code;
+  };
+  try {
+    const args = Array.isArray(argv) ? argv : [];
+    if (args[0] === 'time') return timeCommand(args.slice(1), projectDir, exit); // plan T8, below
+    if (args[0] === 'summary') return summaryCommand(args.slice(1), projectDir, exit); // plan T9, below
+    // plan T12, below: asynchronous (HTTP), so this one returns a promise; it never rejects
+    if (args[0] === 'paperclip') return paperclipCommand(args.slice(1), projectDir, exit);
+    if (args[0] === 'backfill') return backfillCommand(args.slice(1), projectDir, exit); // plan T13, below
+    if (args[0] !== 'loop-result') return exit(2, process.stderr, CLI_USAGE);
+    if (metricsOff(process.env)) return exit(0, process.stdout, 'metrics: disabled loop-result\n');
+    const code = appendLoopResult(projectDir, args.slice(1));
+    return code === 'written' ? exit(0, process.stdout, 'metrics: written loop-result\n') : exit(1, process.stderr, `metrics: ${code} loop-result\n`);
+  } catch {
+    return exit(1, process.stderr, 'metrics: internal loop-result\n');
+  }
+}
+
+Object.assign(module.exports, { runCommand });
+
+// --- the main transcripts and the time CLI (spec 6.3, RF-035..RF-037; plan T8) -------------------
+//
+// The run's row of the plan's `## Registo de tempo` table, computed instead of measured by hand
+// with session-time.ps1 (decisions Q4, Q5: ONE row for the whole run window, in the plan's table):
+//
+//   node plugin/scripts/metrics.js time --slug <run> [--project-dir <dir>]
+//   -> | <local date> | run /task-flow (spec → PR) | <session h> | <Claude h> | <effort> | <model> |
+//
+// The hours are the ps1's rule, ported: per main transcript (one session), the session runs from
+// its first to its last event, and Claude works from each real user message to the last event
+// before the next one; the sessions add up. Only the orchestrator's <session>.jsonl files at the
+// top of ~/.claude/projects/<slug> are read - a subagent's transcript lives under
+// <session>/subagents/ and is never listed, so loops running in parallel can never add up to more
+// hours than the wall clock (pressuposto 5): their time is already inside the orchestrator's turn.
+//
+// Window: the run's startedAt to now while it is open, to phaseChangedAt once phase is `done`
+// (repeated after the close, it must not count later sessions). An event counts only inside the
+// window AND under the project's cwd; a record without a cwd does not count (as in readTokens).
+//
+// Trust. The main transcripts are the same untrusted, unversioned format as the subagents', so
+// the same rules (RF-037 -> RF-006): one bounded listing (lstat, no link, a closed file name,
+// mtime, file/total size ceilings), files read through scanFile, the time budget BUDGET_MS. A
+// "real user message" is decided by FIELDS only (type, isMeta, isSidechain, toolUseResult), never
+// by text: a message saying `"isMeta":true` is still the user's (the ps1 matched raw text; this
+// does not). Nothing of a message reaches the output: numbers, the local date, a fixed phrase per
+// language, an effort from a closed set and a model in SHAPE.model (which has no `|`), else
+// `unknown`. It writes nothing. Without data, one fixed line `metrics: <code> time`, exit 0;
+// arguments out of shape: the fixed usage, exit 2 - nothing the caller passed is printed back.
+
+/** A main transcript: `<session id>.jsonl` (a UUID today). `agent-*.jsonl` live one level down. */
+const MAIN_TRANSCRIPT_NAME = /^[A-Za-z0-9][A-Za-z0-9-]{0,127}\.jsonl$/;
+/** Events one call may remember (each in-window, in-cwd timestamped record is one). A ceiling. */
+const MAX_MAIN_EVENTS = 1000000;
+const TIME_PHRASE = Object.freeze({ 'pt-PT': 'run /task-flow (spec → PR)', en: '/task-flow run (spec → PR)' });
+const TIME_FLAGS = new Map([
+  ['--slug', isSlug],
+  ['--project-dir', () => true], // resolved and checked by the CLI block, as for close
+]);
+
+const noMain = (reason) => ({ reason, sessions: [], tokens: null, model: null, effort: null });
+
+/** The main transcripts of `base`, or `{ reason }`: lstat'ed, never a link, inside the root. */
+function listMainTranscripts(projectsRoot, base, startMs, expired) {
+  const files = [];
+  let total = 0;
+  let dir = null;
+  try {
+    dir = fs.opendirSync(base);
+    for (let seen = 0, entry; (entry = dir.readSync()) !== null; seen += 1) {
+      if (seen >= MAX_DIR_ENTRIES || expired()) return { reason: 'timeout' };
+      if (!MAIN_TRANSCRIPT_NAME.test(entry.name)) continue;
+      const file = path.join(base, entry.name);
+      let stats;
+      try {
+        stats = fs.lstatSync(file);
+      } catch {
+        continue;
+      }
+      if (!stats.isFile() || !isInside(projectsRoot, file) || crossesLink(projectsRoot, file)) continue;
+      // last written before the run began: it cannot hold an event of this run
+      if (stats.mtimeMs < startMs) continue;
+      // a limit hit, never read: skipping a session would print fewer hours as if measured
+      if (stats.size > CONSTANTS.MAX_TRANSCRIPT_FILE_BYTES) return { reason: 'timeout' };
+      total += stats.size;
+      if (files.length + 1 > CONSTANTS.MAX_TRANSCRIPT_FILES || total > CONSTANTS.MAX_TRANSCRIPT_TOTAL_BYTES) return { reason: 'timeout' };
+      files.push(file);
+    }
+    return { files };
+  } catch {
+    return { files };
+  } finally {
+    closeDirQuietly(dir);
+  }
+}
+
+/**
+ * `readMainTranscripts({ projectDir, window, deadline })` -> `{ reason: null, sessions, tokens,
+ * model, effort }` or `{ reason }` with sessions [] and the rest null. Never throws.
+ *
+ * `window` is `{ startedAt, closedAt }` (UTC instants with a Z). `sessions` has one
+ * `{ events: [{ ms, real }] }` per main transcript with at least one event in the window and the
+ * project's cwd, in file order (any timestamped record is an event, a sidechain one included, as
+ * in the ps1). `tokens` are the orchestrator's (`assistant`, not sidechain, a usage in shape),
+ * deduplicated by requestId with the max of each field; `model`/`effort` the most frequent of
+ * those requests, counted once per request (as joinLoops), or null. `deadline` (ms since the
+ * epoch) can only tighten BUDGET_MS from now. Reasons: `no-window`, `no-transcripts`, `timeout`.
+ */
+function readMainTranscripts(options) {
+  try {
+    const opts = isObject(options) ? options : {};
+    const window = isObject(opts.window) ? opts.window : {};
+    if (!isInstant(window.startedAt) || !isInstant(window.closedAt)) return noMain('no-window');
+    const startMs = Date.parse(window.startedAt);
+    const endMs = Date.parse(window.closedAt);
+    if (!(startMs <= endMs)) return noMain('no-window');
+    const { projectDir } = opts;
+    if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || projectDir.length > 1024) return noMain('no-transcripts');
+    const deadline = deadlineWithin(opts.deadline, CONSTANTS.BUDGET_MS);
+    const expired = () => Date.now() > deadline;
+
+    const folder = transcriptFolder(projectDir);
+    if (!folder) return noMain('no-transcripts');
+    const listed = listMainTranscripts(folder.projectsRoot, folder.base, startMs, expired);
+    if (listed.reason) return noMain(listed.reason);
+    const wantCwd = foldCwd(projectDir);
+
+    const sessions = [];
+    const requests = new Map();
+    let eventCount = 0;
+    let overflow = false;
+    for (const file of listed.files) {
+      if (expired()) return noMain('timeout');
+      const events = [];
+      const onLine = (text) => {
+        let line;
+        try {
+          line = JSON.parse(text);
+        } catch {
+          return; // the parser's message quotes the input: dropped
+        }
+        if (!isObject(line)) return;
+        const timestamp = ownValue(line, 'timestamp');
+        if (!isInstant(timestamp)) return;
+        const ms = Date.parse(timestamp);
+        if (ms < startMs || ms > endMs || foldCwd(ownValue(line, 'cwd')) !== wantCwd) return;
+        if (eventCount >= MAX_MAIN_EVENTS) {
+          overflow = true;
+          return;
+        }
+        eventCount += 1;
+        const type = ownValue(line, 'type');
+        const sidechain = ownValue(line, 'isSidechain');
+        // RF-037: by fields, never by text - typed by the human: not meta, not a subagent's, not a tool result
+        const real = type === 'user' && ownValue(line, 'isMeta') !== true && sidechain === false && !hasOwn(line, 'toolUseResult');
+        events.push({ ms, real });
+
+        // the orchestrator's own requests only: a sidechain record is a subagent's
+        if (sidechain !== true && !addRequest(requests, line)) overflow = true;
+      };
+      if (scanFile(file, deadline, onLine, () => {}) === 'timeout' || overflow) return noMain('timeout');
+      if (events.length > 0) sessions.push({ events });
+    }
+    if (sessions.length === 0) return noMain('no-transcripts');
+    // a sum past the count ceiling is tokens null: no token count at all, the hours still stand
+    return { reason: null, sessions, ...sumRequests(requests) };
+  } catch {
+    return noMain('timeout');
+  }
+}
+
+/** session-time.ps1's rule on one session's events (not empty): `{ firstMs, sessionMs, claudeMs }`. */
+function sessionTime(events) {
+  const sorted = events.slice().sort((a, b) => a.ms - b.ms); // stable: file order on a tie
+  const starts = [];
+  for (let i = 0; i < sorted.length; i += 1) if (sorted[i].real) starts.push(i);
+  let claudeMs = 0;
+  for (let k = 0; k < starts.length; k += 1) {
+    const end = k + 1 < starts.length ? starts[k + 1] - 1 : sorted.length - 1;
+    if (end > starts[k]) claudeMs += Math.max(0, sorted[end].ms - sorted[starts[k]].ms);
+  }
+  return { firstMs: sorted[0].ms, sessionMs: sorted[sorted.length - 1].ms - sorted[0].ms, claudeMs };
+}
+
+/** Hours as the ps1 prints them: rounded to 2 decimals, invariant (`2`, `0.5`, `1.23`).
+ *  ponytail: half-up rounding, .NET's Math.Round is half-even; differs only on an exact .xx5. */
+const hours = (ms) => String(Math.round(ms / 36000) / 100);
+
+/** The local date of an instant, `yyyy-MM-dd` (the ps1's `Data` column). */
+function localDate(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** The run's window `{ startedAt, closedAt }` from its state.json, or `{ code }` (`bad-state`,
+ *  `no-window`, `unsafe-path`). Open run: until now; phase `done`: until phaseChangedAt. */
+function runWindow(projectDir, stateDir, slug) {
+  const statePath = path.join(stateDir, slug, 'state.json');
+  if (!isInside(stateDir, statePath) || !isInside(projectDir, statePath) || crossesLink(projectDir, statePath)) return { code: 'unsafe-path' };
+  const state = readSmallObject(projectDir, statePath);
+  if (!state) return { code: 'bad-state' };
+  const startedAt = parseHealth(state).startedAt;
+  const closedAt = state.phase === 'done' ? ownValue(state, 'phaseChangedAt') : new Date().toISOString();
+  if (!startedAt || !isInstant(closedAt) || Date.parse(startedAt) > Date.parse(closedAt)) return { code: 'no-window' };
+  return { startedAt, closedAt };
+}
+
+/** The time row, or `{ code }`. Never throws. */
+function timeRow(projectDir, slug) {
+  try {
+    const config = stateConfig(projectDir);
+    if (!config) return { code: 'bad-config' };
+    const window = runWindow(projectDir, config.stateDir, slug);
+    if (window.code) return { code: window.code };
+    const read = readMainTranscripts({ projectDir, window });
+    if (read.reason) return { code: read.reason };
+    let sessionMs = 0;
+    let claudeMs = 0;
+    let first = Infinity; // a loop, not Math.min(...): a million events would overflow the stack
+    for (const s of read.sessions) {
+      const t = sessionTime(s.events);
+      sessionMs += t.sessionMs;
+      claudeMs += t.claudeMs;
+      first = Math.min(first, t.firstMs);
+    }
+    const phrase = TIME_PHRASE[config.pageLanguage] || TIME_PHRASE.en;
+    const effort = TRANSCRIPT_EFFORTS.includes(read.effort) ? read.effort : 'unknown';
+    const model = typeof read.model === 'string' && SHAPE.model.test(read.model) ? read.model : 'unknown';
+    return { line: `| ${localDate(first)} | ${phrase} | ${hours(sessionMs)} | ${hours(claudeMs)} | ${effort} | ${model} |\n` };
+  } catch {
+    return { code: 'internal' };
+  }
+}
+
+/** runCommand's `time`: TASK_FLOW_METRICS=off first (nothing read), then the arguments (all or
+ *  nothing: the usage and 2), then the row on stdout or `metrics: <code> time`, exit 0 either way. */
+function timeCommand(args, projectDir, exit) {
+  if (metricsOff(process.env)) return exit(0, process.stdout, 'metrics: disabled time\n');
+  const given = parseFlags(args, TIME_FLAGS);
+  if (!given || !given.has('--slug') || typeof projectDir !== 'string' || !path.isAbsolute(projectDir)) return exit(2, process.stderr, CLI_USAGE);
+  const row = timeRow(projectDir, given.get('--slug'));
+  return exit(0, process.stdout, row.line || `metrics: ${row.code} time\n`);
+}
+
+Object.assign(module.exports, { readMainTranscripts });
+
+// --- the PR summary CLI (spec 6.3, RF-033, RF-034; plan T9) ---------------------------------------
+//
+// The cost block of the PR body, put in its `## Changed` section when the PR is opened (Q3):
+//
+//   node plugin/scripts/metrics.js summary --slug <run> [--project-dir <dir>]
+//
+// Computed on demand, and NOTHING is written: the PR opens before `phase: "done"`, so the run's
+// loop rows are not in loops.jsonl yet (spec-log decision "Linhas finais no fecho"). The rows are
+// therefore the run's start events joined to their transcripts in memory (joinLoops, as the close
+// would), plus the rows loops.jsonl already holds for the run (a run summarised after its close,
+// or a paperclip run that has rows and no events) - a recorded row wins over a fresh join of the
+// same loop, so the PR body and the page agree. As on the page, a row counts only when it started
+// at or after the run's startedAt (a folder name can be reused). The orchestrator's own tokens
+// come from the main transcripts in the run window (readMainTranscripts, plan T8) on a line of
+// their own, not as a loop (spec-log decision "Tokens do orquestrador").
+//
+// Tokens only, never money (Q1: euros only ever come from paperclip). FRESH tokens - input +
+// cache creation + output - and the block says so (Q6, the definition the page uses). A loop with
+// no measured tokens is left out of the sums and counted on a line of its own, so a number that
+// is short is never printed as if complete. Review rounds: the highest `round` of the review
+// loops; without any, the count of those loops, said as such (RF-033).
+//
+// Trust: the block goes into a PR body on GitHub, read by people and by models. It holds only
+// numbers formatted here, phase names from PHASES and fixed phrases per language (render-run's
+// strings where the page has the same words) - nothing from a file, an exception or an argument,
+// not even the slug. Arguments: all or nothing, the usage and exit 2. Without data, one fixed
+// line `metrics: <code> summary`, exit 0. One budget, BUDGET_MS, for the join and the main read.
+
+const SUMMARY_STRINGS = Object.freeze({
+  en: {
+    heading: '### Run cost',
+    fresh: 'Fresh tokens = input + cache creation + output, without cache reads.',
+    orchestrator: 'orchestrator',
+    rounds: (n) => `Review rounds: ${n}.`,
+    noRounds: (n) => `Review rounds: ${n} review ${n === 1 ? 'loop' : 'loops'}, no round recorded.`,
+    unmeasured: (n) => `Loops without measured tokens: ${n} (not in the sums).`,
+  },
+  'pt-PT': {
+    heading: '### Custo da run',
+    fresh: 'Tokens frescos = input + cache creation + output, sem cache reads.',
+    orchestrator: 'orquestrador',
+    rounds: (n) => `Rondas de review: ${n}.`,
+    noRounds: (n) => `Rondas de review: ${n} ${n === 1 ? 'loop' : 'loops'} de review, sem ronda registada.`,
+    unmeasured: (n) => `Loops sem tokens medidos: ${n} (fora das somas).`,
+  },
+});
+/** readMainTranscripts' reasons in the words the page already has for a loop's missing tokens. */
+const MAIN_REASON = Object.freeze({ 'no-transcripts': 'no-transcript', timeout: 'timeout' });
+
+/** The block, from validated loop rows (not empty) and readMainTranscripts' result. */
+function summaryBlock(rows, main, lang) {
+  const page = (STRINGS[lang] || STRINGS.en).loops;
+  const s = SUMMARY_STRINGS[lang] || SUMMARY_STRINGS.en;
+  const DASH = '—';
+  const number = (value) => (Number.isSafeInteger(value) && value >= 0 ? String(value) : DASH);
+  const fresh = (tokens) => tokens.input + tokens.cacheCreate + tokens.output;
+  // [fresh tokens, seconds] of some rows, each null when no row has one
+  const sums = (list) => {
+    const measured = list.filter((row) => row.tokens !== null);
+    const timed = list.filter((row) => row.durationS !== null);
+    return [
+      measured.length ? measured.reduce((n, row) => n + fresh(row.tokens), 0) : null,
+      timed.length ? timed.reduce((n, row) => n + row.durationS, 0) : null,
+    ];
+  };
+
+  const out = [s.heading, '', s.fresh, '', `| ${page.byPhaseHeader.join(' | ')} |`, '| --- | ---: | ---: | ---: |'];
+  for (const phase of LOOP_PHASES) {
+    const inPhase = rows.filter((row) => row.phase === phase);
+    if (inPhase.length === 0) continue;
+    const [tokens, seconds] = sums(inPhase);
+    out.push(`| ${phase === 'unknown' ? page.unknown : phase} | ${inPhase.length} | ${tokens === null ? DASH : number(tokens)} | ${formatDuration(seconds)} |`);
+  }
+  const mainTokens = main.reason === null && main.tokens !== null ? fresh(main.tokens) : null;
+  const mainCell = mainTokens !== null ? number(mainTokens)
+    : hasOwn(MAIN_REASON, main.reason) ? `${DASH} (${page.reasons[MAIN_REASON[main.reason]]})` : DASH;
+  out.push(`| ${s.orchestrator} | ${DASH} | ${mainCell} | ${DASH} |`);
+  const [loopTokens, seconds] = sums(rows);
+  const total = loopTokens === null && mainTokens === null ? null : (loopTokens || 0) + (mainTokens || 0);
+  out.push(`| **Total** | ${rows.length} | ${total === null ? DASH : number(total)} | ${formatDuration(seconds)} |`, '', page.overlap);
+
+  const unmeasured = rows.filter((row) => row.tokens === null).length;
+  if (unmeasured > 0) out.push('', s.unmeasured(unmeasured));
+  const review = rows.filter((row) => row.phase === 'review');
+  const rounds = review.map((row) => row.round).filter(isRound);
+  out.push('', rounds.length ? s.rounds(Math.max(...rounds)) : s.noRounds(review.length), '');
+  return out.join('\n');
+}
+
+/** The summary text of run `slug`, or `{ code }`. Reads only; never throws. */
+function summaryText(projectDir, slug) {
+  try {
+    const config = stateConfig(projectDir);
+    if (!config) return { code: 'bad-config' };
+    const stateDir = config.stateDir;
+    const window = runWindow(projectDir, stateDir, slug);
+    if (window.code) return { code: window.code };
+    const deadline = Date.now() + CONSTANTS.BUDGET_MS;
+    // a history that cannot be read could hold this run's rows: no block rather than a short one
+    const history = readLoops(projectDir, stateDir);
+    if (history.code) return { code: history.code };
+    const joined = joinLoops({ projectDir, slug, events: readLoopEvents(projectDir, stateDir, slug), deadline });
+
+    const sinceMs = Date.parse(window.startedAt);
+    const byKey = new Map();
+    for (const row of [...history.rows, ...joined]) { // recorded first: the first of a key wins
+      if (row.run !== slug || row.startedAt === null || Date.parse(row.startedAt) < sinceMs || byKey.has(loopKey(row))) continue;
+      byKey.set(loopKey(row), row);
+    }
+    if (byKey.size === 0) return { code: 'no-loops' };
+    const main = readMainTranscripts({ projectDir, window, deadline });
+    return { text: summaryBlock([...byKey.values()], main, config.pageLanguage) };
+  } catch {
+    return { code: 'internal' };
+  }
+}
+
+/** runCommand's `summary`, the shape of timeCommand: TASK_FLOW_METRICS=off first (nothing read),
+ *  then the arguments (all or nothing: the usage and 2), then the block or one fixed line, exit 0. */
+function summaryCommand(args, projectDir, exit) {
+  if (metricsOff(process.env)) return exit(0, process.stdout, 'metrics: disabled summary\n');
+  const given = parseFlags(args, TIME_FLAGS); // the same two flags as time
+  if (!given || !given.has('--slug') || typeof projectDir !== 'string' || !path.isAbsolute(projectDir)) return exit(2, process.stderr, CLI_USAGE);
+  const result = summaryText(projectDir, given.get('--slug'));
+  return exit(0, process.stdout, result.text || `metrics: ${result.code} summary\n`);
+}
+
+
+// --- the one request to paperclip's API (spec 6.4, RF-042, RF-060; plan T11) ------------------------
+//
+// `paperclipGet({ projectDir, url, pathname, env, deadline })` -> a Promise that always resolves to
+// `{ ok, code, body }`: `{ ok: true, code: 'ok', body: <parsed JSON> }`, or `ok: false`, `body: null`
+// and one closed code - untrusted-url, no-token, timeout, http-status, too-large, bad-json, network.
+// It never rejects and never throws: the caller (metrics.js paperclip, plan T12) is information,
+// and a down or slow paperclip must cost it one fixed line, not a stack.
+//
+// Trust. The request carries the board token, so where it goes is decided the way
+// send-to-paperclip.js decides it: `url` (a project's committed `paperclip.url`) counts only once
+// config.js `parsePaperclipOrigin` reads it as a plain http(s) origin and `isPaperclipUrlTrusted`
+// finds that pair confirmed on this machine; only that ORIGIN is used, never the raw string. The
+// token comes only from PAPERCLIP_TOKEN (fixed name, never configurable) and a value that is not a
+// plain header token is treated as missing. Neither check passing means no request at all.
+// `pathname` is built by the caller from closed-shape ids (encodeURIComponent all the same); it
+// must start with /api/, hold only path/query characters, and survive `new URL` unchanged - so a
+// dot segment, %2e%2e (which the URL parser folds into ..), a scheme-relative //host or a fragment
+// is refused as untrusted-url before anything leaves the process.
+//
+// Response. Untrusted data: no redirect is followed (Node's http never does; a 3xx is http-status,
+// so the token never reaches a Location), only 2xx counts, the body is cut at
+// PAPERCLIP_MAX_BODY_BYTES by destroying the request, one timer covers the whole exchange
+// (PAPERCLIP_TIMEOUT_MS, or less when `deadline`, ms since the epoch, comes first - a slow drip
+// cannot keep a socket-idle timeout alive), and JSON.parse runs in a try. Nothing of a body, a
+// status line, an error message or the token is ever put in a code. `agent: false`: a fresh agent
+// per request, never a shared or environment-configured one (Node can be told to route the global
+// agent through a proxy, which would hand the bearer token to that proxy).
+
+const PAPERCLIP_CODES = ['untrusted-url', 'no-token', 'timeout', 'http-status', 'too-large', 'bad-json', 'network'];
+const PAPERCLIP_PATHNAME = /^\/api(?:\/[A-Za-z0-9._~%-]+)+(?:\?[A-Za-z0-9._~%=&-]*)?$/;
+const HEADER_TOKEN = /^[\x21-\x7e]{1,4096}$/;
+
+const paperclipFailure = (code) => ({ ok: false, code: PAPERCLIP_CODES.includes(code) ? code : 'network', body: null });
+
+/** The URL to request, or null: origin trusted for projectDir and a pathname of the closed shape. */
+function paperclipTarget(projectDir, url, pathname) {
+  if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || typeof pathname !== 'string' || !PAPERCLIP_PATHNAME.test(pathname)) return null;
+  const origin = parsePaperclipOrigin(url);
+  if (!origin || !isPaperclipUrlTrusted(projectDir, url)) return null;
+  const target = new URL(pathname, origin);
+  return target.origin === origin && target.pathname + target.search === pathname ? target : null;
+}
+
+function paperclipGet(options) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    let req = null;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (req) req.destroy();
+      resolve(result);
+    };
+    try {
+      const opts = isObject(options) ? options : {};
+      const target = paperclipTarget(opts.projectDir, opts.url, opts.pathname);
+      if (!target) return finish(paperclipFailure('untrusted-url'));
+      const env = isObject(opts.env) ? opts.env : process.env;
+      const token = hasOwn(env, 'PAPERCLIP_TOKEN') ? env.PAPERCLIP_TOKEN : undefined;
+      if (typeof token !== 'string' || !HEADER_TOKEN.test(token)) return finish(paperclipFailure('no-token'));
+      const deadline = deadlineWithin(opts.deadline, CONSTANTS.PAPERCLIP_TIMEOUT_MS);
+      timer = setTimeout(() => finish(paperclipFailure('timeout')), Math.max(0, deadline - Date.now()));
+      const client = target.protocol === 'https:' ? https : http;
+      req = client.request(target, {
+        method: 'GET', agent: false, headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+      }, (res) => {
+        if (res.statusCode < 200 || res.statusCode > 299) return finish(paperclipFailure('http-status'));
+        const chunks = [];
+        let size = 0;
+        res.on('data', (chunk) => {
+          size += chunk.length;
+          if (size > CONSTANTS.PAPERCLIP_MAX_BODY_BYTES) return finish(paperclipFailure('too-large'));
+          chunks.push(chunk);
+          return undefined;
+        });
+        res.on('end', () => {
+          let body;
+          try {
+            body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          } catch {
+            return finish(paperclipFailure('bad-json'));
+          }
+          return finish({ ok: true, code: 'ok', body });
+        });
+        res.on('error', () => finish(paperclipFailure('network')));
+        return undefined;
+      });
+      req.on('error', () => finish(paperclipFailure('network')));
+      req.end();
+    } catch {
+      finish(paperclipFailure('network'));
+    }
+    return undefined;
+  });
+}
+
+Object.assign(module.exports, { paperclipGet });
+
+// --- metrics.js paperclip --issue N: paperclip's runs as loop rows (spec 6.4, RF-040..RF-045; plan T12)
+//
+//   node plugin/scripts/metrics.js paperclip --issue <n> [--paperclip-issue <id>] [--project-dir <dir>]
+//
+// A run handed to paperclip never reaches `done` here, so its loops are collected by hand (Q2),
+// with this command, as often as wanted: a row is keyed by source+run+id and appendLoopRows never
+// writes a key twice, so a second call only adds what finished since.
+//
+// Steps, and why each one is where it is:
+//   1. `--issue N` (^[1-9][0-9]*$) finds THE run whose state.json `paperclipIssue` is a JSON number
+//      whose decimal form is N (SKILL.md §0d); zero or several is a code and nothing is asked.
+//   2. The paperclip issue: state.json `paperclipIssueId` (plan T10) or `--paperclip-issue`, both a
+//      UUID or a GON-12 identifier (RF-041); both given and different is a code. None: no request.
+//   3. GET the issue (an identifier is resolved to its UUID there), its sub-issues (one level:
+//      `?parentId=`, and each one must really name the parent - a server that ignored the query
+//      would otherwise hand us every issue of the company), and the runs of each.
+//   4. Per FINISHED run (a `finishedAt` instant: the status values were never measured) not yet in
+//      the history: one GET of its agent, once per distinct agentId, for `name`/`role` through the
+//      closed role table. An agent lookup that fails leaves its runs for the next call instead of
+//      writing them as `unknown` - the first row of a key wins forever, so a guess would stick.
+//   5. Rows through validateLoopRow (inside appendLoopRows), the same validator as the other
+//      origins (SC-007). `model` and `effort` are null: paperclip reports neither (`adapterType`
+//      is not a model). Tokens and cost are paperclip's own figures (RF-045, Q7): integer USD cents,
+//      unit USD, never converted or priced here.
+//
+// Trust: every value of a response is untrusted data. Ids are taken only in their closed shape
+// and lower-cased (one spelling per key, T3), objects are read by own keys, nothing of a response
+// is ever printed, and the output is one fixed line `metrics: <code> paperclip`, exit 0 (RF-044),
+// with TASK_FLOW_METRICS=off checked before anything is read. Every request goes through
+// paperclipGet (trusted origin, token from PAPERCLIP_TOKEN, 10 s each), all of them inside ONE
+// command deadline, so a slow paperclip costs at most PAPERCLIP_COMMAND_MS.
+
+/** The whole command, every request included. A guess: a handful of issues and agents each. */
+const PAPERCLIP_COMMAND_MS = 60 * 1000;
+const PAPERCLIP_MAX_SUBISSUES = 100;
+const PAPERCLIP_MAX_RUNS = 5000;
+const PAPERCLIP_MAX_AGENTS = 50;
+const ISSUE_ARG = /^[1-9][0-9]*$/;
+const PAPERCLIP_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const PAPERCLIP_IDENTIFIER = /^[A-Z][A-Z0-9]{0,9}-[1-9][0-9]{0,6}$/;
+/** The closed role table (RF-043): lower-cased name or role -> [agentType, phase]. */
+const PAPERCLIP_ROLES = new Map([
+  ['builder', ['Builder', 'build']], ['tester', ['Tester', 'tests']], ['security', ['Security', 'harden']], ['reviewer', ['Reviewer', 'review']],
+]);
+/** usageJson's names for each token count, first present wins (camelCase is paperclip's own). */
+const PAPERCLIP_TOKEN_FIELDS = new Map([
+  ['input', ['inputTokens', 'input_tokens']],
+  ['cacheCreate', ['cacheCreationInputTokens', 'cache_creation_input_tokens']],
+  ['cacheRead', ['cachedInputTokens', 'cached_input_tokens', 'cache_read_input_tokens']],
+  ['output', ['outputTokens', 'output_tokens']],
+]);
+const PAPERCLIP_COST_FIELDS = ['costUsd', 'cost_usd', 'total_cost_usd'];
+const PAPERCLIP_FLAGS = new Map([
+  ['--issue', (v) => ISSUE_ARG.test(v)],
+  ['--paperclip-issue', (v) => PAPERCLIP_UUID.test(v) || PAPERCLIP_IDENTIFIER.test(v)],
+  ['--project-dir', () => true], // resolved and checked by the CLI block, as for close
+]);
+
+/** A UUID in its one spelling (lower case), or null. */
+const uuidOf = (value) => (typeof value === 'string' && PAPERCLIP_UUID.test(value) ? value.toLowerCase() : null);
+/** A paperclip issue reference (UUID lower-cased, or an identifier), or null. */
+const issueRefOf = (value) => uuidOf(value) || (typeof value === 'string' && PAPERCLIP_IDENTIFIER.test(value) ? value : null);
+
+/** Every run folder of `stateDir` (a slug, the first MAX_OTHER_RUNS) whose state.json reads as an
+ *  object: `[{ slug, state }]`. Read only (readSmallObject: lstat, no link, size first); no
+ *  folder is no run. Shared by the paperclip lookup and the backfill's windows. */
+function readRunStates(projectDir, stateDir) {
+  let names = [];
+  try {
+    names = fs.readdirSync(stateDir).filter(isSlug).slice(0, MAX_OTHER_RUNS); // filtered first: junk names cannot use up the cap
+  } catch {
+    // no folder: no run
+  }
+  const runs = [];
+  for (const name of names) {
+    const state = readSmallObject(projectDir, path.join(stateDir, name, 'state.json'));
+    if (state) runs.push({ slug: name, state });
+  }
+  return runs;
+}
+
+/** The one run recorded for GitHub issue `issue`: `{ slug, state }`, or `{ code }` (no-run, many-runs). */
+function findPaperclipRun(projectDir, stateDir, issue) {
+  const found = readRunStates(projectDir, stateDir).filter(({ state }) => {
+    const recorded = ownValue(state, 'paperclipIssue');
+    return Number.isSafeInteger(recorded) && String(recorded) === issue;
+  });
+  if (found.length === 0) return { code: 'no-run' };
+  return found.length === 1 ? found[0] : { code: 'many-runs' };
+}
+
+/** usageJson's tokens, or null: input and output must be there; a count that is present but not a
+ *  count spoils the block. No cache-creation field (none measured, T11) counts as 0. */
+function paperclipTokens(usage) {
+  if (!isObject(usage)) return null;
+  const tokens = {};
+  for (const [key, names] of PAPERCLIP_TOKEN_FIELDS) {
+    const name = names.find((n) => hasOwn(usage, n));
+    if (name === undefined && (key === 'input' || key === 'output')) return null;
+    if (name !== undefined && !isCount(usage[name])) return null;
+    tokens[key] = name === undefined ? 0 : usage[name];
+  }
+  return tokens;
+}
+
+/** usageJson's cost in integer USD cents, or null. Every cost field present must be a finite
+ *  amount >= 0 and they must agree to the cent; when they disagree no figure is chosen. Rounded
+ *  half up after dropping binary float noise (1.005 USD is 101 cents, not 100). */
+function paperclipCostCents(usage) {
+  if (!isObject(usage)) return null;
+  const cents = PAPERCLIP_COST_FIELDS.filter((n) => hasOwn(usage, n)).map((n) => {
+    const usd = usage[n];
+    return typeof usd === 'number' && Number.isFinite(usd) && usd >= 0 ? Math.round(Number((usd * 100).toPrecision(12))) : NaN;
+  });
+  return cents.length > 0 && cents.every((c) => c === cents[0] && isCount(c)) ? cents[0] : null;
+}
+
+/** An agent object to its [agentType, phase] from the role table, by `name` then `role`; else null. */
+function paperclipRole(agent) {
+  if (!isObject(agent)) return null;
+  for (const field of ['name', 'role']) {
+    const value = ownValue(agent, field);
+    if (typeof value === 'string' && value.length <= 100 && PAPERCLIP_ROLES.has(value.toLowerCase())) return PAPERCLIP_ROLES.get(value.toLowerCase());
+  }
+  return null;
+}
+
+/** One finished paperclip run as a loop row (validated later, by appendLoopRows). */
+function paperclipRow(slug, id, run, role) {
+  const startedAt = toUtcInstant(ownValue(run, 'startedAt'));
+  const ms = startedAt ? Date.parse(ownValue(run, 'finishedAt')) - Date.parse(ownValue(run, 'startedAt')) : NaN;
+  const usage = ownValue(run, 'usageJson');
+  return {
+    v: 1, source: 'paperclip', run: slug, id,
+    agentType: role ? role[0] : 'unknown', phase: role ? role[1] : 'unknown', task: '', round: null,
+    model: null, effort: null, startedAt, durationS: ms >= 0 ? Math.round(ms / 1000) : null,
+    tokens: paperclipTokens(usage), costCents: paperclipCostCents(usage),
+    outcome: null, tests: null, critical: null, required: null, reason: null, backfill: false,
+  };
+}
+
+/**
+ * The command's work: `{ code, written }`, never rejects, never carries text from a response.
+ * Codes: written, up-to-date, partial (some request failed: what was read is written, the rest
+ * waits for the next call), invalid, bad-config, no-run, many-runs, no-issue-id, id-mismatch,
+ * bad-response, paperclipGet's codes for the issue itself, appendLoopRows' codes, internal.
+ * `deadline` (ms since the epoch) is a test seam: it can only tighten PAPERCLIP_COMMAND_MS.
+ */
+async function collectPaperclip(options) {
+  const done = (code, written) => ({ code, written: written || 0 });
+  try {
+    const opts = isObject(options) ? options : {};
+    const { projectDir, issue } = opts;
+    if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || typeof issue !== 'string' || !ISSUE_ARG.test(issue)) return done('invalid');
+    const flag = opts.paperclipIssue === undefined ? null : issueRefOf(opts.paperclipIssue);
+    if (opts.paperclipIssue !== undefined && !flag) return done('invalid');
+
+    const config = stateConfig(projectDir);
+    if (!config) return done('bad-config');
+    const stateDir = config.stateDir;
+    const found = findPaperclipRun(projectDir, stateDir, issue);
+    if (found.code) return done(found.code);
+    const recorded = issueRefOf(ownValue(found.state, 'paperclipIssueId'));
+    if (recorded && flag && recorded !== flag) return done('id-mismatch');
+    const ref = recorded || flag;
+    if (!ref) return done('no-issue-id');
+    const raw = isObject(config.raw) ? ownValue(config.raw, 'paperclip') : undefined;
+    const company = isObject(raw) ? uuidOf(ownValue(raw, 'companyId')) : null;
+    if (!company) return done('bad-config');
+    const history = readLoops(projectDir, stateDir);
+    if (history.code) return done(history.code);
+    const known = new Set(history.rows.map(loopKey));
+
+    const deadline = deadlineWithin(opts.deadline, PAPERCLIP_COMMAND_MS);
+    const env = isObject(opts.env) ? opts.env : process.env;
+    const get = (pathname) => (Date.now() >= deadline
+      ? paperclipFailure('timeout')
+      : paperclipGet({ projectDir, url: ownValue(raw, 'url'), pathname, env, deadline }));
+    const enc = encodeURIComponent;
+
+    const head = await get(`/api/issues/${enc(ref)}`);
+    if (!head.ok) return done(head.code);
+    const parent = isObject(head.body) ? uuidOf(ownValue(head.body, 'id')) : null;
+    if (!parent || (parent !== ref && ownValue(head.body, 'identifier') !== ref)) return done('bad-response');
+
+    let partial = false;
+    const issues = [parent];
+    const subs = await get(`/api/companies/${enc(company)}/issues?parentId=${enc(parent)}`);
+    if (!subs.ok || !Array.isArray(subs.body)) partial = true;
+    else {
+      for (const sub of subs.body) {
+        const id = isObject(sub) ? uuidOf(ownValue(sub, 'id')) : null;
+        if (!id || issues.includes(id) || uuidOf(ownValue(sub, 'parentId')) !== parent) continue;
+        if (issues.length > PAPERCLIP_MAX_SUBISSUES) { partial = true; break; }
+        issues.push(id);
+      }
+    }
+
+    const runs = new Map(); // runId -> run, finished and not in the history yet
+    for (const id of issues) {
+      const got = await get(`/api/issues/${enc(id)}/runs`); // eslint-disable-line no-await-in-loop
+      if (!got.ok || !Array.isArray(got.body)) { partial = true; continue; }
+      for (const run of got.body) {
+        const runId = isObject(run) ? uuidOf(ownValue(run, 'runId')) : null;
+        if (!runId || runs.has(runId) || !toUtcInstant(ownValue(run, 'finishedAt'))) continue;
+        if (known.has(loopKey({ source: 'paperclip', run: found.slug, id: runId }))) continue;
+        if (runs.size >= PAPERCLIP_MAX_RUNS) { partial = true; break; }
+        runs.set(runId, run);
+      }
+    }
+
+    const roles = new Map(); // agentId -> { role } once answered, { failed: true } once failed
+    const rows = [];
+    for (const [runId, run] of runs) {
+      const agentId = uuidOf(ownValue(run, 'agentId'));
+      if (agentId && !roles.has(agentId)) {
+        if (roles.size >= PAPERCLIP_MAX_AGENTS) { partial = true; continue; }
+        const got = await get(`/api/agents/${enc(agentId)}`); // eslint-disable-line no-await-in-loop
+        roles.set(agentId, got.ok ? { role: paperclipRole(got.body) } : { failed: true });
+      }
+      const entry = agentId ? roles.get(agentId) : { role: null };
+      if (entry.failed) { partial = true; continue; }
+      rows.push(paperclipRow(found.slug, runId, run, entry.role));
+    }
+
+    const appended = appendLoopRows(projectDir, stateDir, rows);
+    if (!appended.ok) return done(appended.code);
+    if (partial) return done('partial', appended.written);
+    return done(appended.written > 0 ? 'written' : 'up-to-date', appended.written);
+  } catch {
+    return done('internal');
+  }
+}
+
+/** runCommand's `paperclip`: TASK_FLOW_METRICS=off first (nothing read), then the arguments (all
+ *  or nothing: the usage and 2), then one fixed line `metrics: <code> paperclip`, exit 0. Never
+ *  rejects (the CLI block does not wait on it). */
+async function paperclipCommand(args, projectDir, exit) {
+  try {
+    if (metricsOff(process.env)) return exit(0, process.stdout, 'metrics: disabled paperclip\n');
+    const given = parseFlags(args, PAPERCLIP_FLAGS);
+    if (!given || !given.has('--issue') || typeof projectDir !== 'string' || !path.isAbsolute(projectDir)) return exit(2, process.stderr, CLI_USAGE);
+    const result = await collectPaperclip({
+      projectDir, issue: given.get('--issue'), paperclipIssue: given.has('--paperclip-issue') ? given.get('--paperclip-issue') : undefined,
+    });
+    return exit(0, process.stdout, `metrics: ${result.code} paperclip\n`);
+  } catch {
+    return exit(0, process.stdout, 'metrics: internal paperclip\n');
+  }
+}
+
+Object.assign(module.exports, { collectPaperclip });
+
+// --- metrics.js backfill: the transcripts already there as loop rows (spec 6.5, RF-050..RF-052; plan T13)
+//
+//   node plugin/scripts/metrics.js backfill [--project-dir <dir>]
+//
+// Run by hand (spec-log decision «Backfill explícito»: never on a render), once or as often as
+// wanted: every subagent transcript `agent-<id>.jsonl` of the project that has no task-flow row in
+// loops.jsonl yet (under ANY run: a loop measured at a close, or backfilled as `unknown` before, is
+// never measured twice) becomes one row with `backfill: true`, read by the same readLoopTranscript
+// as the close (RF-006, RF-007), through the same bounded listing (listTranscripts, without its
+// mtime filter: old transcripts are the point). A loop whose start event sits in a run still
+// going is left alone - that run's close owns it, and a backfill row first would leave the loop
+// with two keys (backfill `unknown` + the close's).
+//
+// Attribution (RF-051), from data that has no link to the transcript but time: the run is the ONE
+// run whose window (state.json `startedAt`..`phaseChangedAt`, both validated instants) holds the
+// loop's first record, else `unknown`; the phase is phaseAt over that run's validated phaseLog
+// (no log, or past the last phase: `unknown`); task, round and result stay empty. The agent type
+// comes only from `agentType` of the `agent-<id>.meta.json` beside the transcript (readSmallObject:
+// lstat, no link, size first), in SHAPE.agentType, else `unknown` - no other key of it is used
+// (`description` is free text). Every state.json is only read (RF-052).
+//
+// Budget: BACKFILL_MS for the whole command (RF-050: not a hook, so more than the close's 5 s).
+// When it runs out, the rows already read are written and the rest is left for the next call (a
+// `timeout` row would stick: the first row of a key wins). Output: one fixed line
+// `metrics: <code> backfill`, exit 0 (usage errors: the usage text and 2); TASK_FLOW_METRICS=off
+// first, before anything is read. Nothing of a transcript, a meta.json or a state.json is printed.
+
+/** The whole backfill, listing and every transcript read. A ceiling, not measured. */
+const BACKFILL_MS = 60 * 1000;
+const BACKFILL_FLAGS = new Map([['--project-dir', () => true]]); // resolved by the CLI block
+
+/** The project's runs that have a window: `[{ slug, startMs, endMs, log }]`, `log` the validated
+ *  phaseLog sorted for phaseAt (or null). A run without both instants, or with them reversed, has
+ *  no window. Read only; never throws. */
+function backfillWindows(projectDir, stateDir) {
+  const windows = [];
+  for (const { slug, state } of readRunStates(projectDir, stateDir)) {
+    const { startedAt, phaseLog } = parseHealth(state);
+    const end = ownValue(state, 'phaseChangedAt');
+    if (!startedAt || !isInstant(end) || Date.parse(startedAt) > Date.parse(end)) continue;
+    const log = phaseLog ? phaseLog.map((e) => ({ phase: e.phase, ms: Date.parse(e.at) })).sort((a, b) => a.ms - b.ms) : null;
+    windows.push({ slug, startMs: Date.parse(startedAt), endMs: Date.parse(end), log });
+  }
+  return windows;
+}
+
+/** The `agentType` of the meta.json beside `transcript`, in its shape, else `unknown`. */
+function backfillAgentType(projectsRoot, transcript) {
+  const meta = readSmallObject(projectsRoot, transcript.replace(/\.jsonl$/, '.meta.json'));
+  const type = meta ? ownValue(meta, 'agentType') : undefined;
+  return isShape(SHAPE.agentType)(type) ? type : 'unknown';
+}
+
+/** One backfilled row from readLoopTranscript's `read` (RF-051). */
+function backfillRow(id, agentType, read, windows) {
+  const found = read.reason === null;
+  const firstMs = found && isInstant(read.startedAt) ? Date.parse(read.startedAt) : NaN;
+  const holding = windows.filter((w) => firstMs >= w.startMs && firstMs <= w.endMs);
+  const owner = holding.length === 1 ? holding[0] : null;
+  const phase = owner ? phaseAt(owner.log, firstMs) : 'other';
+  const fallback = hasOwn(AGENT_EFFORT, agentType) ? AGENT_EFFORT[agentType] : 'unknown';
+  return {
+    v: 1, source: 'taskflow', run: owner ? owner.slug : 'unknown', id, agentType,
+    phase: LOOP_PHASES.includes(phase) ? phase : 'unknown', task: '', round: null,
+    model: found ? read.model : null,
+    effort: found ? read.effort || fallback : null,
+    startedAt: found ? read.startedAt : null,
+    durationS: found ? read.durationS : null,
+    tokens: found ? read.tokens : null,
+    costCents: null, outcome: null, tests: null, critical: null, required: null,
+    reason: read.reason,
+    backfill: true,
+  };
+}
+
+/**
+ * The backfill's work: `{ code, written }`. Codes: written, up-to-date, timeout (the budget ran
+ * out: what was read is written), no-transcripts, invalid, bad-config, readLoops' and
+ * appendLoopRows' codes, internal. `deadline` (ms since the epoch) is a test seam: it can only
+ * tighten BACKFILL_MS. Never throws.
+ */
+function backfillLoops(options) {
+  const done = (code, written) => ({ code, written: written || 0 });
+  try {
+    const opts = isObject(options) ? options : {};
+    const { projectDir } = opts;
+    if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || projectDir.length > 1024) return done('invalid');
+    const deadline = deadlineWithin(opts.deadline, BACKFILL_MS);
+    const expired = () => Date.now() > deadline;
+
+    const config = stateConfig(projectDir);
+    if (!config) return done('bad-config');
+    const stateDir = config.stateDir;
+    const history = readLoops(projectDir, stateDir);
+    if (history.code) return done(history.code);
+    // RF-052: any task-flow row of the loop, whatever its run; and the loops a live run's close owns
+    const skip = new Set(history.rows.filter((row) => row.source === 'taskflow').map((row) => row.id));
+    for (const name of runningRuns(projectDir)) {
+      if (isSlug(name)) for (const s of readLoopEvents(projectDir, stateDir, name).starts) skip.add(s.agent);
+    }
+
+    // the same folder readTokens and joinLoops read
+    const folder = transcriptFolder(projectDir);
+    if (!folder) return done('no-transcripts');
+    const { projectsRoot, base } = folder;
+    const limits = { maxFiles: CONSTANTS.MAX_TRANSCRIPT_FILES, maxTotalBytes: CONSTANTS.MAX_TRANSCRIPT_TOTAL_BYTES };
+    const listed = listTranscripts(projectsRoot, base, 0, limits, expired);
+    if (listed.reason) return done('timeout');
+
+    const windows = backfillWindows(projectDir, stateDir);
+    const rows = [];
+    let timedOut = false;
+    for (const entry of listed.files) {
+      const name = entry.file === null ? entry.name : path.basename(entry.file);
+      const id = typeof name === 'string' ? name.slice('agent-'.length, -'.jsonl'.length) : '';
+      if (!SHAPE.agentId.test(id) || skip.has(id)) continue;
+      if (expired()) { timedOut = true; break; }
+      // over the size ceiling: listed by name only (no path, so no meta.json either)
+      const read = entry.file === null ? { reason: 'unreadable-format' } : readLoopTranscript(entry.file, deadline);
+      // out of time mid-file: left for the next call; a request-count overflow is a row, as in joinLoops
+      if (read.reason === 'timeout' && expired()) { timedOut = true; break; }
+      skip.add(id);
+      rows.push(backfillRow(id, entry.file === null ? 'unknown' : backfillAgentType(projectsRoot, entry.file), read, windows));
+    }
+
+    const appended = appendLoopRows(projectDir, stateDir, rows);
+    if (!appended.ok) return done(appended.code);
+    if (timedOut) return done('timeout', appended.written);
+    return done(appended.written > 0 ? 'written' : 'up-to-date', appended.written);
+  } catch {
+    return done('internal');
+  }
+}
+
+/** runCommand's `backfill`: TASK_FLOW_METRICS=off first (nothing read), then the arguments (only
+ *  --project-dir; anything else: the usage and 2), then one fixed line, exit 0. */
+function backfillCommand(args, projectDir, exit) {
+  if (metricsOff(process.env)) return exit(0, process.stdout, 'metrics: disabled backfill\n');
+  const given = parseFlags(args, BACKFILL_FLAGS);
+  if (!given || typeof projectDir !== 'string' || !path.isAbsolute(projectDir)) return exit(2, process.stderr, CLI_USAGE);
+  return exit(0, process.stdout, `metrics: ${backfillLoops({ projectDir }).code} backfill\n`);
+}
+
+Object.assign(module.exports, { backfillLoops });
+
 // --- closeRun and the CLI (spec R3, R4, R9; plan T7) -----------------------------------------------
 //
 // Deliberately AFTER module.exports: the security suites of the pure/reader sections scan
@@ -1343,7 +3031,9 @@ module.exports = {
 //   1. TASK_FLOW_METRICS=off - before anything is read (D7, like TASK_FLOW_GATE in gate.js);
 //   2. arguments and config, then only state.json: eligible (phase done + startedAt)?
 //   3. is run+created already in metrics.jsonl? then stop: no collect, no write;
-//   4. collect -> baseline over the history -> re-check the history -> appendRow.
+//   4. collect -> baseline over the history -> re-check the history -> appendRow;
+//      just before appendRow, the loop rows of the run's start events (plan T4), inside the
+//      same 5 s budget counted from the start of the close.
 // Only a row that came out of collect (which validates it) is ever handed to baseline
 // (T3's note: baseline does not validate `current`). The token reader's time budget
 // lives in collect (BUDGET_MS): out of budget the row is written with tokensNull
@@ -1376,6 +3066,9 @@ function closeRun(options) {
     // 1. the escape hatch, first of all: no file is read when it is set
     const env = isObject(opts.env) ? opts.env : process.env;
     if (String(env.TASK_FLOW_METRICS || '').toLowerCase() === 'off') return closeResult(true, 'disabled');
+    // the one budget of this close; `budgetMs` (a test seam, like steps) can only tighten it
+    const budget = typeof opts.budgetMs === 'number' && Number.isFinite(opts.budgetMs) ? Math.min(opts.budgetMs, CONSTANTS.BUDGET_MS) : CONSTANTS.BUDGET_MS;
+    const deadline = Date.now() + budget;
 
     const { projectDir, slug } = opts;
     if (typeof projectDir !== 'string' || !path.isAbsolute(projectDir) || !isSlug(slug)) return closeResult(false, 'bad-state');
@@ -1420,6 +3113,12 @@ function closeRun(options) {
     if (isObject(again) && again.code === 'unsafe-path') return closeResult(false, 'unsafe-path');
     if (isObject(again) && hasKey(again, key)) return closeResult(true, 'already-closed');
 
+    // 5. the loop rows (plan T4), BEFORE the metrics.jsonl line: a close cut short here is
+    // repeated by the next render (no line yet, so not already-closed), and the loop append is
+    // idempotent by key. With what is left of the budget; whatever it returns or throws, the
+    // close goes on to its own line and its own code.
+    attempt(() => step('loops', recordLoops)(projectDir, stateDir, slug, deadline));
+
     let appended;
     try {
       appended = step('appendRow', appendRow)(projectDir, stateDir, row);
@@ -1434,15 +3133,15 @@ function closeRun(options) {
 }
 
 if (require.main === module) {
-  const USAGE = 'usage: metrics.js close --slug <slug> [--project-dir <dir>] [--quiet]\n';
   const argv = process.argv.slice(2);
   const value = (flag) => {
     const index = argv.indexOf(flag);
     return index >= 0 ? argv[index + 1] : undefined;
   };
-  // Usage errors are the only non-zero exit, and print only the fixed usage text: the
-  // offending argument is never echoed. Everything else exits 0 (spec R9): a run must
-  // not change its exit code because its measurement failed.
+  // For close, usage errors are the only non-zero exit, and print only the fixed usage text:
+  // the offending argument is never echoed. Everything else exits 0 (spec R9): a run must
+  // not change its exit code because its measurement failed. Every other command goes to
+  // runCommand (above closeRun), which owns its output and exit code.
   const slug = value('--slug');
   let projectDir = null;
   try {
@@ -1454,8 +3153,10 @@ if (require.main === module) {
   } catch {
     // stays null: reported as a usage error below
   }
-  if (argv[0] !== 'close' || !isSlug(slug) || projectDir === null) {
-    process.stderr.write(USAGE);
+  if (argv[0] !== 'close') {
+    runCommand(argv, projectDir); // every other command (plan T5): its own output and exit code
+  } else if (!isSlug(slug) || projectDir === null) {
+    process.stderr.write(CLI_USAGE);
     process.exitCode = 2;
   } else {
     const result = closeRun({ projectDir, slug });

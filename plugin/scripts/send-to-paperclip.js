@@ -39,6 +39,9 @@ const ISSUE_NUMBER = /^[1-9][0-9]*$/;
 // paperclip's own id shape (its API validates projectId as a GUID). Hex groups
 // only, so a committed value can name a project and nothing else.
 const PAPERCLIP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// A paperclip issue identifier as its UI shows one (GON-12): a short uppercase
+// prefix, a dash, a number with no leading zero.
+const PAPERCLIP_IDENTIFIER = /^[A-Z][A-Z0-9]{0,9}-[1-9][0-9]{0,6}$/;
 
 function fail(message) {
   process.stderr.write(`send-to-paperclip: ${message}\n`);
@@ -121,6 +124,19 @@ function postIssue({ baseUrl, token, companyId, title, description, assigneeAgen
     req.write(body);
     req.end();
   });
+}
+
+/** The issue id kept on the run (state.json `paperclipIssueId`), so that
+ *  metrics.js can find the issue again later without ever reading
+ *  `outcomeNote`'s free text. The POST response is a third party's data, so
+ *  only a closed shape is kept and nothing else of it is echoed: the UUID `id`
+ *  first (the stable id paperclip's API paths take), else the `identifier`,
+ *  else nothing. Never throws, whatever the response parsed to. */
+function paperclipIssueIdOf(issue) {
+  if (!issue || typeof issue !== 'object') return undefined;
+  if (typeof issue.id === 'string' && PAPERCLIP_ID.test(issue.id)) return issue.id;
+  if (typeof issue.identifier === 'string' && PAPERCLIP_IDENTIFIER.test(issue.identifier)) return issue.identifier;
+  return undefined;
 }
 
 // --- the GitHub Project status flip -----------------------------------------
@@ -350,10 +366,16 @@ async function main() {
   state.updated = now;
   if (!state.phaseChangedAt) state.phaseChangedAt = now;
   state.outcome = 'handed-off';
-  state.outcomeNote = `paperclip issue ${issue.identifier || issue.id}${statusFlipped ? '' : ' (board status not flipped)'}`;
+  const paperclipIssueId = paperclipIssueIdOf(issue);
+  if (paperclipIssueId) state.paperclipIssueId = paperclipIssueId;
+  // Only the closed-shape id is ever written or printed: the raw identifier/id
+  // is a third party's text (stdout reaches the model), and a response that
+  // parsed to null used to throw here after the issue was already created.
+  const shownId = paperclipIssueId || '(id not recognised)';
+  state.outcomeNote = `paperclip issue ${shownId}${statusFlipped ? '' : ' (board status not flipped)'}`;
   fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
 
-  process.stdout.write(`handed off ${slug} to paperclip as ${issue.identifier || issue.id}\n`);
+  process.stdout.write(`handed off ${slug} to paperclip as ${shownId}\n`);
 }
 
 if (require.main === module) {
@@ -365,4 +387,6 @@ if (require.main === module) {
   });
 }
 
-module.exports = { readArtifact, findProjectItemId, flipStatus, issueTitle, cleanTitle, issueBody };
+module.exports = {
+  readArtifact, findProjectItemId, flipStatus, issueTitle, cleanTitle, issueBody, paperclipIssueIdOf,
+};

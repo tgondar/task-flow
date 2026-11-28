@@ -138,6 +138,21 @@ const STRINGS = {
         sizePoints: 'Size (points)',
       },
     },
+    loops: {
+      heading: '## Loops',
+      header: ['Phase', 'Task', 'Round', 'Agent', 'Model', 'Effort', 'Duration', 'Fresh tokens', 'Result'],
+      byPhase: '### By phase',
+      byPhaseHeader: ['Phase', 'Loops', 'Fresh tokens', 'Duration'],
+      overlap: 'Durations overlap: loops run in parallel, so a sum is not wall-clock time.',
+      unknown: 'unknown',
+      outcomes: { ok: 'ok', retry: 'retry', failed: 'failed', unknown: 'unknown' },
+      tests: { green: 'tests green', red: 'tests red' },
+      reasons: {
+        'no-transcript': 'no transcript',
+        'unreadable-format': 'transcript format not recognised',
+        timeout: 'reading took too long',
+      },
+    },
   },
   'pt-PT': {
     generatedNote: (by) => [
@@ -229,12 +244,38 @@ const STRINGS = {
         sizePoints: 'Tamanho (pontos)',
       },
     },
+    loops: {
+      heading: '## Loops',
+      header: ['Fase', 'Tarefa', 'Ronda', 'Agente', 'Modelo', 'Effort', 'Duração', 'Tokens frescos', 'Resultado'],
+      byPhase: '### Por fase',
+      byPhaseHeader: ['Fase', 'Loops', 'Tokens frescos', 'Duração'],
+      overlap: 'As durações sobrepõem-se: os loops correm em paralelo, por isso uma soma não é tempo de relógio.',
+      unknown: 'desconhecido',
+      outcomes: { ok: 'ok', retry: 'repetir', failed: 'falhou', unknown: 'desconhecido' },
+      tests: { green: 'testes verdes', red: 'testes vermelhos' },
+      reasons: {
+        'no-transcript': 'sem transcript',
+        'unreadable-format': 'formato do transcript não reconhecido',
+        timeout: 'leitura demasiado longa',
+      },
+    },
   },
 };
 
 const stringsFor = (lang) => STRINGS[lang] || STRINGS.en;
 
 // --- small helpers ---------------------------------------------------------
+
+/** A duration in seconds as the "Loops" section prints it: `N s`, `N min SS s`, `N h MM min`;
+ *  anything that is not a count is a dash. Shared with metrics.js's PR summary, so the page
+ *  and the PR body never print the same loop time two ways. */
+function formatDuration(s) {
+  if (!Number.isSafeInteger(s) || s < 0) return '—';
+  const pad = (n) => String(n).padStart(2, '0');
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ${pad(s % 60)} s`;
+  return `${Math.floor(s / 3600)} h ${pad(Math.floor(s / 60) % 60)} min`;
+}
 
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
 
@@ -671,7 +712,83 @@ function healthSection(health, t) {
   }
 }
 
-function buildDocument({ state, slug, tasks, questions, openQuestions, depth, artifacts = {}, created, lang = 'en', health = null }) {
+/** The "Loops" section (spec 6.3, RF-030..RF-032), as lines; [] when there is no row.
+ *
+ * Same discipline as healthSection, for the same reason: loops.jsonl is a file anyone can
+ * edit and this page is read as generated truth, by the user and by the model. So every row
+ * goes through metrics.js's validateLoopRow AGAIN here (buildDocument is exported and takes
+ * whatever it is handed), and the page prints ONLY: numbers formatted here, words from the
+ * fixed tables above looked up by closed-set values, phase/effort names from closed sets,
+ * task ids in their closed shape, and the agent type and model - already in their closed
+ * shapes, which hold no backtick or pipe - in code spans. Any state, not just "done": a
+ * paperclip run stops at plan/blocked and never closes (RF-032).
+ *
+ * Tokens are the FRESH ones (input + cache creation + output), the definition "Run health"
+ * already uses: cache reads are re-reads of the same context and would bury the rest. */
+function loopsSection(loops, t) {
+  try {
+    if (!Array.isArray(loops) || loops.length === 0) return [];
+    // lazily, like the close: metrics.js imports this file
+    const { validateLoopRow } = require('./metrics.js');
+    const rows = loops.map((row) => validateLoopRow(row)).filter((checked) => checked.ok).map((checked) => checked.row);
+    if (rows.length === 0) return [];
+    const l = t.loops;
+    const DASH = '—';
+    const word = (value) => (value === 'unknown' ? l.unknown : value);
+    const number = (value) => (Number.isSafeInteger(value) && value >= 0 ? String(value) : DASH);
+    const fresh = (tokens) => tokens.input + tokens.cacheCreate + tokens.output;
+    const tokensCell = (row) => (row.tokens !== null ? number(fresh(row.tokens))
+      : row.reason !== null ? `${DASH} (${l.reasons[row.reason]})` : DASH);
+    const result = (row) => {
+      const parts = [];
+      if (row.outcome !== null) parts.push(l.outcomes[row.outcome]);
+      if (row.tests !== null) parts.push(l.tests[row.tests]);
+      if (row.critical !== null) parts.push(`critical ${row.critical}`);
+      if (row.required !== null) parts.push(`required ${row.required}`);
+      return parts.length ? parts.join(' · ') : DASH;
+    };
+
+    // start order; a row without a start goes last, keeping file order (the sort is stable)
+    const at = (row) => (row.startedAt === null ? Infinity : Date.parse(row.startedAt));
+    rows.sort((a, b) => (at(a) === at(b) ? 0 : at(a) < at(b) ? -1 : 1));
+
+    const out = [l.heading, ''];
+    out.push(`| ${l.header.join(' | ')} |`, '| --- | --- | ---: | --- | --- | --- | ---: | ---: | --- |');
+    for (const row of rows) {
+      const cells = [
+        word(row.phase),
+        row.task || DASH,
+        row.round === null ? DASH : String(row.round),
+        codeSpan(row.agentType) || DASH,
+        (row.model !== null && codeSpan(row.model)) || DASH,
+        row.effort === null ? DASH : word(row.effort),
+        formatDuration(row.durationS),
+        tokensCell(row),
+        result(row),
+      ];
+      out.push(`| ${cells.join(' | ')} |`);
+    }
+    out.push('');
+
+    out.push(l.byPhase, '', l.overlap, '');
+    out.push(`| ${l.byPhaseHeader.join(' | ')} |`, '| --- | ---: | ---: | ---: |');
+    for (const phase of [...PHASES, 'unknown']) {
+      const inPhase = rows.filter((row) => row.phase === phase);
+      if (inPhase.length === 0) continue;
+      const withTokens = inPhase.filter((row) => row.tokens !== null);
+      const withTime = inPhase.filter((row) => row.durationS !== null);
+      const tokens = withTokens.length ? number(withTokens.reduce((sum, row) => sum + fresh(row.tokens), 0)) : DASH;
+      const time = withTime.length ? formatDuration(withTime.reduce((sum, row) => sum + row.durationS, 0)) : DASH;
+      out.push(`| ${word(phase)} | ${inPhase.length} | ${tokens} | ${time} |`);
+    }
+    out.push('');
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function buildDocument({ state, slug, tasks, questions, openQuestions, depth, artifacts = {}, created, lang = 'en', health = null, loops = [] }) {
   const t = stringsFor(lang);
   const declaredIndex = PHASES.indexOf(state.phase);
   const isDone = state.phase === 'done';
@@ -874,6 +991,8 @@ function buildDocument({ state, slug, tasks, questions, openQuestions, depth, ar
   // Only for a finished run that metrics.js already measured: no row, no section, so
   // runs from before the measurement keep the page they always had, byte for byte.
   if (isDone) out.push(...healthSection(health, t));
+  // Right after it, or where it would be; no row, no section (the page of today, byte for byte).
+  out.push(...loopsSection(loops, t));
 
   const outcome = codeSpan(state.outcome);
   if (outcome) {
@@ -1159,6 +1278,7 @@ function renderAll({ projectDir, docsDir, slug } = {}) {
   // "off" nothing of metrics.js is loaded, run or shown.
   const metricsOff = String(process.env.TASK_FLOW_METRICS || '').toLowerCase() === 'off';
   let history = null; // one read per render, dropped whenever a close appends to it
+  let loopRows = null; // loops.jsonl, the same: one read per render, dropped after a close
   const metricsStarted = Date.now();
   // metrics.js imports this file (PHASES, readPlanTasks...), so it is required HERE,
   // lazily: a require at the top would hand it back half-built. Throws an error carrying
@@ -1183,9 +1303,27 @@ function renderAll({ projectDir, docsDir, slug } = {}) {
       const closed = metrics.closeRun({ projectDir: root, slug: entry });
       if (!closed.ok) throw Object.assign(new Error('metrics close failed'), { metricsCode: /^[a-z-]{1,30}$/.test(String(closed.code)) ? closed.code : 'internal' });
       history = null; // 'already-closed' by a racing render means the copy read above is stale too
+      loopRows = null; // the close also appends this run's loop rows
       found = find();
     }
     return found.row ? { row: found.row, baseline: metrics.baseline(found.rows, found.row) } : null;
+  };
+
+  // The loop rows of one run (spec 6.3). A folder name can be reused by a later run, so with a
+  // valid startedAt in state.json only rows that started at or after it are this run's; a row
+  // without a start cannot prove that and is left out. A history that cannot be read is a
+  // closed note, like metricsError, and the page is that of a run without rows.
+  const loopsFor = (entry, state) => {
+    const metrics = require('./metrics.js');
+    if (loopRows === null) {
+      const read = metrics.readLoops(root, stateRoot);
+      if (read.code) result.loopsError = /^[a-z-]{1,30}$/.test(String(read.code)) ? read.code : 'internal';
+      loopRows = Array.isArray(read.rows) ? read.rows : [];
+    }
+    const since = metrics.parseHealth(state).startedAt;
+    const sinceMs = since === null ? null : Date.parse(since);
+    return loopRows.filter((row) => row.run === entry &&
+      (sinceMs === null || (row.startedAt !== null && Date.parse(row.startedAt) >= sinceMs)));
   };
 
   for (const entry of fs.readdirSync(stateRoot)) {
@@ -1254,6 +1392,15 @@ function renderAll({ projectDir, docsDir, slug } = {}) {
         }
       }
 
+      let loops = [];
+      if (!metricsOff) {
+        try {
+          loops = loopsFor(entry, state);
+        } catch {
+          result.loopsError = 'internal'; // never the error's message: it may quote a file
+        }
+      }
+
       const body = buildDocument({
         state,
         slug: entry,
@@ -1265,6 +1412,7 @@ function renderAll({ projectDir, docsDir, slug } = {}) {
         created: `20${prefix.slice(0, 2)}-${prefix.slice(2, 4)}-${prefix.slice(4, 6)}`,
         lang,
         health,
+        loops,
       });
 
       const file = placeDocument({
@@ -1315,6 +1463,7 @@ module.exports = {
   readJson,
   readSkippedTasks,
   readPendingTasks,
+  formatDuration,
 };
 
 // --- CLI -------------------------------------------------------------------
@@ -1345,4 +1494,5 @@ if (require.main === module) {
   // A note, not a failure: the documentation was rendered either way.
   if (outcome.feedError) process.stderr.write(`viewer feed not written: ${outcome.feedError}\n`);
   if (outcome.metricsError) process.stderr.write(`metrics not closed: ${outcome.metricsError}\n`);
+  if (outcome.loopsError) process.stderr.write(`loops not read: ${outcome.loopsError}\n`);
 }
