@@ -56,6 +56,8 @@ const cli = (project, ...args) => spawnSync(process.execPath, [MODULE, ...args, 
   encoding: 'utf8', env: { ...process.env, HOME: TEST_HOME, USERPROFILE: TEST_HOME },
 });
 const readConfig = (project) => JSON.parse(fs.readFileSync(path.join(project, '.claude', 'task-flow.json'), 'utf8'));
+/** Temp files config.js's atomic write (`<file>.<pid>.<hex>.tmp`) left under `dir`. */
+const tmpFiles = (dir) => (fs.existsSync(dir) ? fs.readdirSync(dir, { recursive: true }).filter((name) => String(name).endsWith('.tmp')) : []);
 
 console.log('config.js githubProject');
 
@@ -179,6 +181,35 @@ check('G12 setGithubProject keeps every other field, and writes null or a board'
   setGithubProject(project, BOARD);
   c = readConfig(project);
   assert(c.githubProject.projectId === BOARD.projectId && c.docsDir === 'docs', JSON.stringify(c));
+});
+
+check('G12b a successful setGithubProject leaves no temp file in .claude/ or ~/.claude/', () => {
+  const project = makeProject({});
+  setGithubProject(project, BOARD);
+  assert(readConfig(project).githubProject.projectId === BOARD.projectId, 'not written');
+  const left = [...tmpFiles(path.join(project, '.claude')), ...tmpFiles(path.join(TEST_HOME, '.claude'))];
+  assert(!left.length, `temp files left behind: ${left.join(', ')}`);
+});
+
+// A rename that fails (a file held open on Windows) must leave the old file
+// whole, never a truncated or half-written one: the write is atomic.
+check('G12c a failed rename: the error rises, task-flow.json byte for byte, no temp file', () => {
+  const project = makeProject({ githubProject: null, stateDir: 'x/state' });
+  const file = path.join(project, '.claude', 'task-flow.json');
+  const before = fs.readFileSync(file);
+  const original = fs.renameSync;
+  fs.renameSync = () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); };
+  let error;
+  try {
+    setGithubProject(project, BOARD);
+  } catch (caught) {
+    error = caught;
+  } finally {
+    fs.renameSync = original;
+  }
+  assert(error && error.code === 'EPERM', `the error did not rise: ${error && error.message}`);
+  assert(fs.readFileSync(file).equals(before), 'the file changed');
+  assert(!tmpFiles(path.join(project, '.claude')).length, 'a temp file was left behind');
 });
 
 check('G13 setGithubProject refuses an invalid board, a missing file and an unreadable one', () => {

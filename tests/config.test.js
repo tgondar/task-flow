@@ -733,5 +733,81 @@ check('C55 runningRuns never reads a state.json that is huge, a folder or (POSIX
   assert(Date.now() - started < 2000, 'runningRuns took too long');
 });
 
+// --- every JSON writer is atomic ----------------------------------------------
+//
+// init and the two trust lists write through a temp file and a rename. A rename
+// that fails (a file held open on Windows) must leave the old file whole: a
+// truncated trust list would silently untrust every folder already in it.
+
+const { isTrusted, trustPaperclipUrl, paperclipTrustFile, trustFile } = require(MODULE);
+/** Temp files the atomic write (`<file>.<pid>.<hex>.tmp`) left under `dir`. */
+const tmpFiles = (dir) => (fs.existsSync(dir) ? fs.readdirSync(dir, { recursive: true }).filter((name) => String(name).endsWith('.tmp')) : []);
+const noTmp = (...dirs) => {
+  const left = [path.join(TEST_HOME, '.claude'), ...dirs].flatMap(tmpFiles);
+  assert(!left.length, `temp files left behind: ${left.join(', ')}`);
+};
+/** The error fn threw while fs.renameSync fails with EPERM; the real one is always put back. */
+function errorWithFailingRename(fn) {
+  const original = fs.renameSync;
+  fs.renameSync = () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); };
+  try {
+    fn();
+  } catch (error) {
+    return error;
+  } finally {
+    fs.renameSync = original;
+  }
+  throw new Error('did not throw');
+}
+
+check('C56 init, trust and paperclip trust write their files and leave no temp file', () => {
+  const project = temp('atomic-ok');
+  const docs = temp('atomic-ok-docs');
+  fs.mkdirSync(path.join(project, '.claude'));
+  fs.writeFileSync(path.join(project, '.claude', 'task-flow.json'), JSON.stringify({ defaultBump: 'patch' }));
+  const outcome = initConfig(project, { docsDir: docs, language: 'EN', tasksFile: 'tasks/index.md' });
+  assert(outcome.ok, outcome.errors.join('; '));
+  assertEqual(JSON.parse(fs.readFileSync(path.join(project, '.claude', 'task-flow.json'), 'utf8')).defaultBump, 'patch', 'kept field');
+  trustPaperclipUrl(project, 'http://127.0.0.1:3100');
+  const listed = JSON.parse(fs.readFileSync(paperclipTrustFile(), 'utf8')).trusted;
+  assert(listed.some((entry) => entry.url === 'http://127.0.0.1:3100'), JSON.stringify(listed));
+  noTmp(path.join(project, '.claude'));
+});
+
+check('C57 init with a failed rename: the error rises, task-flow.json byte for byte, no temp file', () => {
+  const project = temp('atomic-init');
+  const docs = temp('atomic-init-docs');
+  fs.mkdirSync(path.join(project, '.claude'));
+  const file = path.join(project, '.claude', 'task-flow.json');
+  fs.writeFileSync(file, JSON.stringify({ defaultBump: 'patch', docsDir: 'old' }));
+  const before = fs.readFileSync(file);
+  const error = errorWithFailingRename(() => initConfig(project, { docsDir: docs, language: 'EN', tasksFile: 'tasks/index.md' }));
+  assertEqual(error.code, 'EPERM', 'the error that rose');
+  assert(fs.readFileSync(file).equals(before), 'the file changed');
+  noTmp(path.join(project, '.claude'));
+});
+
+check('C58 trust with a failed rename: the trust list byte for byte, never truncated', () => {
+  const kept = makeProject(valid);
+  assert(isTrusted(kept.project, kept.docs), 'fixture: the first pair is not in the list');
+  const { project, docs } = makeProject(valid, { trusted: false });
+  const before = fs.readFileSync(trustFile());
+  const error = errorWithFailingRename(() => trustDocsDir(project, docs));
+  assertEqual(error.code, 'EPERM', 'the error that rose');
+  assert(fs.readFileSync(trustFile()).equals(before), 'the trust list changed');
+  assert(isTrusted(kept.project, kept.docs), 'the pair already there was lost');
+  noTmp();
+});
+
+check('C59 paperclip trust with a failed rename: the list byte for byte, never truncated', () => {
+  const first = temp('atomic-pc');
+  trustPaperclipUrl(first, 'http://127.0.0.1:3101');
+  const before = fs.readFileSync(paperclipTrustFile());
+  const error = errorWithFailingRename(() => trustPaperclipUrl(temp('atomic-pc2'), 'http://127.0.0.1:3102'));
+  assertEqual(error.code, 'EPERM', 'the error that rose');
+  assert(fs.readFileSync(paperclipTrustFile()).equals(before), 'the paperclip trust list changed');
+  noTmp();
+});
+
 console.log(`\n${passed}/${passed + failures.length} passed`);
 if (failures.length) process.exit(1);

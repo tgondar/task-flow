@@ -27,7 +27,7 @@ const ROOT = path.join(__dirname, '..');
 const MODULE = path.join(ROOT, 'plugin', 'scripts', 'config.js');
 const STOP = path.join(ROOT, 'plugin', 'hooks', 'stop.js');
 const SUBAGENT_START = path.join(ROOT, 'plugin', 'hooks', 'subagent-start.js');
-const { BUMP_CLASSES, BUMP_LEVELS, bumpPolicyErrors, loadConfig } = require(MODULE);
+const { BUMP_CLASSES, BUMP_LEVELS, bumpPolicyErrors, loadConfig, setBumpPolicy } = require(MODULE);
 
 let passed = 0;
 const failures = [];
@@ -64,6 +64,35 @@ const readConfig = (project) => JSON.parse(fs.readFileSync(configFile(project), 
 const cli = (project, ...args) => spawnSync(process.execPath, [MODULE, ...args, '--project-dir', project], {
   encoding: 'utf8', env: { ...process.env, HOME: TEST_HOME, USERPROFILE: TEST_HOME },
 });
+
+/** Temp files left under `dir`: config.js writes `<file>.<pid>.<hex>.tmp` and
+ *  renames it, so after any write, good or failed, there must be none. */
+const tmpFiles = (dir) => (fs.existsSync(dir) ? fs.readdirSync(dir, { recursive: true }).filter((name) => String(name).endsWith('.tmp')) : []);
+const noTmp = (project) => {
+  const left = [...tmpFiles(path.join(project, '.claude')), ...tmpFiles(path.join(TEST_HOME, '.claude'))];
+  assert(!left.length, `temp files left behind: ${left.join(', ')}`);
+};
+/** Runs fn with fs[name] replaced by `fake(original, ...args)` - the same fs
+ *  object config.js uses - and always puts the original back. */
+function withFs(name, fake, fn) {
+  const original = fs[name];
+  fs[name] = (...args) => fake(original, ...args);
+  try {
+    return fn();
+  } finally {
+    fs[name] = original;
+  }
+}
+/** The error fn threw, or a failure when it did not throw. */
+function thrownBy(fn) {
+  try {
+    fn();
+  } catch (error) {
+    return error;
+  }
+  throw new Error('did not throw');
+}
+const failingRename = () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); };
 
 console.log('config.js bumpPolicy');
 
@@ -212,12 +241,14 @@ check('B9 `bump-policy` writes one class and keeps every other field and class',
   assert(after.defaultBump === 'patch' && after.versionFiles[0] === 'a.csproj' && after.githubProject === null && after.docsDir === 'docs',
     JSON.stringify(after));
   assert(cli(project, 'check').status === 0, 'check fails after the write');
+  noTmp(project);
 });
 
 check('B10 `bump-policy` changes the level of a class already there', () => {
   const project = makeProject({ bumpPolicy: { feature: 'minor', fix: 'patch' } });
   assert(cli(project, 'bump-policy', '--class', 'feature', '--level', 'major').status === 0, 'refused');
   assert(readConfig(project).bumpPolicy.feature === 'major', JSON.stringify(readConfig(project)));
+  noTmp(project);
 });
 
 check('B11 `bump-policy` writes a first policy when given feature and fix together', () => {
@@ -225,6 +256,7 @@ check('B11 `bump-policy` writes a first policy when given feature and fix togeth
   const r = cli(project, 'bump-policy', '--class', 'feature', '--level', 'minor', '--class', 'fix', '--level', 'patch');
   assert(r.status === 0, `exit ${r.status}: ${r.stderr}`);
   assert(JSON.stringify(readConfig(project).bumpPolicy) === JSON.stringify({ feature: 'minor', fix: 'patch' }), JSON.stringify(readConfig(project)));
+  noTmp(project);
 });
 
 /** Runs bump-policy and asserts it refused without touching the file. */
@@ -293,6 +325,37 @@ check('S3 `bump-policy` refuses a policy with a __proto__ key already in the fil
     `"bumpPolicy":{"feature":"minor","fix":"patch","__proto__":{"${MARKER}":"major"}}}`);
   refuses(project, ['--class', 'fix', '--level', 'minor'], /not a class/);
   assert(({})[MARKER] === undefined, 'Object.prototype was polluted');
+});
+
+// --- the write is atomic: a failure leaves the old file whole --------------
+//
+// A rename that fails (an antivirus or an editor holding the file on Windows)
+// or a disk that fills up mid-write must never leave a truncated or half-written
+// task-flow.json behind: the error rises and the file is the one from before.
+
+check('B20 a failed rename: the error rises, task-flow.json byte for byte, no temp file', () => {
+  const project = makeProject(POLICY);
+  const before = fs.readFileSync(configFile(project));
+  const error = withFs('renameSync', failingRename, () => thrownBy(() => setBumpPolicy(project, { fix: 'minor' })));
+  assert(error.code === 'EPERM', `another error rose: ${error.message}`);
+  assert(fs.readFileSync(configFile(project)).equals(before), 'the file changed');
+  noTmp(project);
+});
+
+check('B21 a disk full while writing the temp file: the error rises, task-flow.json byte for byte, no temp file', () => {
+  const project = makeProject(POLICY);
+  const before = fs.readFileSync(configFile(project));
+  // Half the text reaches the temp file, then the disk is full: what a real
+  // ENOSPC leaves, so the cleanup has something to remove.
+  const fullDisk = (original, file, text, options) => {
+    if (!String(file).endsWith('.tmp')) return original(file, text, options);
+    original(file, String(text).slice(0, 10), options);
+    throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+  };
+  const error = withFs('writeFileSync', fullDisk, () => thrownBy(() => setBumpPolicy(project, { fix: 'minor' })));
+  assert(error.code === 'ENOSPC', `another error rose: ${error.message}`);
+  assert(fs.readFileSync(configFile(project)).equals(before), 'the file changed');
+  noTmp(project);
 });
 
 console.log(`\n${passed}/${passed + failures.length} passed`);

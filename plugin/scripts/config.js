@@ -275,6 +275,31 @@ function isTrusted(projectDir, docsDir) {
   );
 }
 
+/** Writes the file whole: a temp file next to it (random name, `wx`, so a
+ *  file or link already sitting there is never followed), then a rename. A
+ *  crash, a full disk or a failed rename leaves the old file as it was.
+ *
+ *  Every JSON file this module writes goes through here: the two trust lists
+ *  and .claude/task-flow.json. A plain writeFileSync truncates first and
+ *  writes second, so a failure in between left an empty or half-written file -
+ *  for a trust list, every folder already in it silently untrusted; for the
+ *  configuration, a project `check` refuses. Next to the target, so the rename
+ *  stays on one volume. No retry on EPERM/EBUSY (a file held open on
+ *  Windows): the error rises and the person sees it, the old file intact. */
+function writeAtomic(file, text) {
+  const temp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  try {
+    fs.writeFileSync(temp, text, { encoding: 'utf8', flag: 'wx' });
+    fs.renameSync(temp, file);
+  } catch (error) {
+    // EEXIST is `wx` refusing a name that is not ours: leave that file alone.
+    if (error.code !== 'EEXIST') {
+      try { fs.unlinkSync(temp); } catch { /* never written, or already gone */ }
+    }
+    throw error;
+  }
+}
+
 /** Adds the pair to the list. Refuses to overwrite a list it cannot read, rather
  *  than silently dropping the pairs already in it. */
 function trustDocsDir(projectDir, docsDir) {
@@ -293,7 +318,7 @@ function trustDocsDir(projectDir, docsDir) {
   if (!isTrusted(projectDir, docsDir)) {
     current.trusted.push({ project: path.resolve(projectDir), docsDir: path.resolve(docsDir) });
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(current, null, 2) + '\n');
+    writeAtomic(file, JSON.stringify(current, null, 2) + '\n');
   }
   return file;
 }
@@ -404,7 +429,7 @@ function trustPaperclipUrl(projectDir, url) {
   if (!isPaperclipUrlTrusted(projectDir, url)) {
     current.trusted.push({ project: path.resolve(projectDir), url: origin });
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(current, null, 2) + '\n');
+    writeAtomic(file, JSON.stringify(current, null, 2) + '\n');
   }
   return file;
 }
@@ -549,7 +574,7 @@ function setGithubProject(projectDir, value) {
   if (!read.exists) throw new Error(`${CONFIG_FILE} is missing; run init first`);
   if (read.error) throw new Error(`${CONFIG_FILE} ${read.error}; fix or remove it first`);
   refuseLinkedConfig(projectDir);
-  fs.writeFileSync(configPath(projectDir), JSON.stringify({ ...read.raw, githubProject: value }, null, 2) + '\n');
+  writeAtomic(configPath(projectDir), JSON.stringify({ ...read.raw, githubProject: value }, null, 2) + '\n');
 }
 
 // --- the project's bump policy (SKILL.md §6, §7 item 2) --------------------
@@ -628,7 +653,7 @@ function setBumpPolicy(projectDir, levels) {
   const errors = bumpPolicyErrors(next, read.raw.defaultBump);
   if (errors.length) throw new Error(errors.join('; '));
   refuseLinkedConfig(projectDir);
-  fs.writeFileSync(configPath(projectDir), JSON.stringify({ ...read.raw, bumpPolicy: next }, null, 2) + '\n');
+  writeAtomic(configPath(projectDir), JSON.stringify({ ...read.raw, bumpPolicy: next }, null, 2) + '\n');
   return next;
 }
 
@@ -899,7 +924,7 @@ function initConfig(projectDir, { docsDir, language = DEFAULT_LANGUAGE, tasksFil
   }
 
   fs.mkdirSync(path.join(projectDir, '.claude'), { recursive: true });
-  fs.writeFileSync(configPath(projectDir), JSON.stringify(next, null, 2) + '\n');
+  writeAtomic(configPath(projectDir), JSON.stringify(next, null, 2) + '\n');
   // The person just gave this folder, so it is trusted for this project.
   if (!isPlainlyInside(projectDir, resolvedDocs)) trustDocsDir(projectDir, resolvedDocs);
   return loadConfig(projectDir, { env });
