@@ -450,13 +450,36 @@ function promote({ projectDir, slug, item, rule, replaces }) {
   }
 
   // ponytail: optimistic check, no lock file - a lock left behind in a synced
-  // notes folder would block every later write. The window between the re-read
-  // and the rename stays; take a lock next to the page if two writers ever meet there.
+  // notes folder would block every later write. Still open: a write between the
+  // re-read and the rename can be lost, and two parallel calls for one item with
+  // different --rule texts both pass the same-run/rule/words guard (the second
+  // then fails to mark promotedAs and says so). Take a lock next to the page if
+  // two writers ever meet there.
   for (let attempt = 1; attempt <= WRITE_TRIES; attempt += 1) {
+    // The item again on every try, the first included: a parallel call for the
+    // same item that renamed its page between our tries has marked promotedAs
+    // by now, and without this re-read the re-try wrote a second line for it.
+    takeItem();
     const before = loadPageText(config);
     if (before.refused) throw new Error(`the standing-answers page is refused: ${before.refused}`);
     if (before.bytes && !Buffer.from(before.text, 'utf8').equals(before.bytes)) {
       throw new Error('the standing-answers page is not valid UTF-8, so its lines could not be kept byte for byte');
+    }
+    // The line this call would write may already be there, from a parallel call
+    // that renamed its page but has not marked the item yet. Every line the
+    // reader takes as an entry counts - accepted, replaced, past the limit,
+    // suspicious, a repeated id - through parseLine, since parsePage keeps no
+    // fields of the ones it does not accept. Exact fields as this writer writes
+    // them (oneLine'd), no date: a repeated call can cross midnight. Refused,
+    // never adopted: the id found is not proof the line came from this item.
+    // The message names ids only, never the rule or the words.
+    if (before.text !== undefined) {
+      const same = before.text.replace(/^﻿/, '').split(/\r?\n/)
+        .map(parseLine)
+        .find((p) => p && p.entry && p.entry.run === slug && p.entry.rule === cleanRule && p.entry.words === words);
+      if (same) {
+        throw new Error(`the page already has ${same.entry.id} from run ${slug} with this rule and these words: ${item} may have been promoted by a parallel call; nothing was written`);
+      }
     }
     const next = nextPage(before.text, { rule: cleanRule, words, slug, date, replaces, strings });
     if (Buffer.byteLength(next.text, 'utf8') > LIMITS.pageBytes) {

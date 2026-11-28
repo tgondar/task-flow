@@ -517,6 +517,69 @@ check('a page created by someone else while this one was writing a new page is n
   assertEqual(result.created, false, 'not "created" any more');
 });
 
+// --- the same item, promoted twice at once (task #5, History 1) --------------------
+//
+// Two calls for one item (the same command run twice, or two sessions) used to
+// both get past the item check made once before the loop: the first renamed
+// its page, the second saw the page changed, re-read it, and wrote a second
+// line for the same item. Each try now re-reads the item, and a line from this
+// run with the same rule and the same words is refused before a byte is written.
+
+const Q1_WORDS = 'Always euros, in every project run.';
+
+check('FR-001 a parallel call that promoted the item between this one\'s tries: the re-try re-reads the item and stops, no second line', () => {
+  const before = ['# T', '<!-- task-flow: next R2 -->', entry(1), ''].join('\n');
+  const p = project({ page: before });
+  const theirs = `- **R50** · Mine · «${Q1_WORDS}» · demo-run · ${today()}`;
+  const original = fs.writeFileSync;
+  let left = 1;
+  fs.writeFileSync = function parallel(target, ...rest) {
+    const result = original.call(fs, target, ...rest);
+    if (left > 0 && String(target).endsWith('.tmp') && path.dirname(String(target)) === p.docsDir) {
+      left -= 1;
+      original.call(fs, p.pageFile, before + theirs + '\n');
+      const data = JSON.parse(fs.readFileSync(p.questionsFile, 'utf8'));
+      data.items.find((x) => x.id === 'Q1').promotedAs = 'R50';
+      original.call(fs, p.questionsFile, JSON.stringify(data, null, 2) + '\n');
+    }
+    return result;
+  };
+  let message = null;
+  try {
+    promote(p, { item: 'Q1', rule: 'Mine' });
+  } catch (error) {
+    message = error.message;
+  } finally {
+    fs.writeFileSync = original;
+  }
+  // The item check's own message, not the guard's: the guard would refuse this
+  // page too, so only this message shows the item was read again.
+  assert(message && /already promoted as R50/.test(message), `refused by the item check: ${message}`);
+  assert(!/was written to the page/.test(message), `a second line was written first: ${message}`);
+  assertEqual(read(p.pageFile), before + theirs + '\n', 'the page holds only the other call\'s line');
+  assertEqual(fs.readdirSync(p.docsDir).filter((x) => x.endsWith('.tmp')), [], 'temp files left');
+});
+
+check('FR-002 a line of this run with the same rule and words, the item not marked: refused, naming that line and the item', () => {
+  const p = project({ page: ['# T', '<!-- task-flow: next R5 -->', entry(1), `- **R4** · Mine · «${Q1_WORDS}» · demo-run · 2026-11-20`, ''].join('\n') });
+  const message = refused(p, () => promote(p, { item: 'Q1', rule: 'Mine' }), 'same run, rule and words');
+  assert(/\bR4\b/.test(message) && /\bQ1\b/.test(message), `names the line and the item: ${message}`);
+});
+
+check('Q1 a line of this run with the same words but another rule is not a duplicate: written', () => {
+  const p = project({ page: ['# T', '<!-- task-flow: next R2 -->', `- **R1** · Another rule · «${Q1_WORDS}» · demo-run · 2026-11-20`, ''].join('\n') });
+  const result = promote(p, { item: 'Q1', rule: 'Mine' });
+  assertEqual(result.id, 'R2', 'id');
+  assertEqual(itemOf(p, 'Q1').promotedAs, 'R2', 'promotedAs');
+  assertEqual(sa.read({ projectDir: p.projectDir }).entries.map((e) => e.id), ['R1', 'R2'], 'entries');
+});
+
+check('a line of another run with the same rule and words is not a duplicate: written', () => {
+  const p = project({ page: ['# T', '<!-- task-flow: next R2 -->', `- **R1** · Mine · «${Q1_WORDS}» · some-run · 2026-11-20`, ''].join('\n') });
+  assertEqual(promote(p, { item: 'Q1', rule: 'Mine' }).id, 'R2', 'id');
+  assertEqual(itemOf(p, 'Q1').promotedAs, 'R2', 'promotedAs');
+});
+
 // --- the CLI -----------------------------------------------------------------------
 
 check('SECURITY questions.json changed after the page write (answers.js consume) keeps that change: the write-back re-reads, no lost update', () => {
