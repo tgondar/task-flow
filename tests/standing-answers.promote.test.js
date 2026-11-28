@@ -580,6 +580,14 @@ check('a line of another run with the same rule and words is not a duplicate: wr
   assertEqual(itemOf(p, 'Q1').promotedAs, 'R2', 'promotedAs');
 });
 
+// The third field of the guard: same run and rule, other words (another item
+// of this run stated the same rule) is a different entry, not a duplicate.
+check('a line of this run with the same rule but other words is not a duplicate: written', () => {
+  const p = project({ page: ['# T', '<!-- task-flow: next R2 -->', `- **R1** · Mine · «Other words, from another item.» · demo-run · 2026-11-20`, ''].join('\n') });
+  assertEqual(promote(p, { item: 'Q1', rule: 'Mine' }).id, 'R2', 'id');
+  assertEqual(itemOf(p, 'Q1').promotedAs, 'R2', 'promotedAs');
+});
+
 // --- SECURITY: the same-run/rule/words guard (T1) ---------------------------------
 
 const dupLine = (n, rule = 'Mine', words = Q1_WORDS, extra = '') => `- **R${n}** · ${rule} · «${words}» · demo-run · 2026-11-20${extra}`;
