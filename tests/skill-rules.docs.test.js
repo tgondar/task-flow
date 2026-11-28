@@ -319,6 +319,17 @@ check('section 3 (security): the ## Found line has the question as this run wrot
 check('section 8b (security): the ## Found line has the question as this run wrote it, never the entry\'s words',
   /the\s+question\s+as\s+this\s+run\s+wrote\s+it,\s+never\s+the\s+entry's\s+words\s+or\s+rule/.test(s8bFound));
 
+// Task #5 (2026-11-28): the rule of an entry this run promoted, under
+// ## Needs you, is the text the run passed to promote --rule and logged. The
+// page is untrusted (edited after the write, or cloned with the repository), so
+// it is never read back into the PR body - the D6 principle again.
+check('section 8b: a promoted entry\'s rule is the one this run passed to promote --rule, never read back from the page',
+  /as\s+this\s+run\s+passed\s+it\s+to\s+`promote --rule`[^;]*never\s+read\s+back\s+from\s+`standing-answers\.md`/.test(s8bNeeds));
+check('section 7: the log entry of each promotion carries the rule as passed to --rule',
+  /⚠️\s+entry\s+citing\s+`Q<n>`[^.]*the\s+rule\s+as\s+you\s+passed\s+it\s+to\s+`--rule`/.test(s7));
+check('HISTORY.md says why the PR never reads a promoted rule back from the page',
+  /never\s+read\s+back\s+from\s+the\s+page/.test(history));
+
 // D6 (T8 builder question, decided): a bump answer written into bumpPolicy is
 // the user's decision, so it is also an audit entry in the run's log, as
 // ⚠️→asked, besides the line under ## Needs you.

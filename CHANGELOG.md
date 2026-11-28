@@ -5,6 +5,28 @@ Every change to `plugin/` raises the `version` in
 (`scripts/check-version.js` checks both in CI). Compare the version `/plugin`
 shows with the top entry to know whether your install is current.
 
+## 2.4.1 — 2026-11-28
+
+- **`standing-answers.js promote` no longer writes the same entry twice**: every
+  try, the first included, re-reads the item and stops when it is already
+  promoted, and a page that already holds a line the reader takes as an entry
+  (accepted, replaced, past the limit, suspicious or a repeated id) with the
+  same run, rule and words is refused before anything is written, naming ids
+  only, never the rule or the words. Still open, and named in the code: a write
+  between the re-read and the rename can be lost, and two parallel calls for one
+  item with different `--rule` texts both pass the guard.
+- **`config.js` writes its JSON files atomically** (`.claude/task-flow.json`
+  from `init`, `github-project` and `bump-policy`, and both trust lists,
+  `~/.claude/task-flow-trusted.json` and
+  `~/.claude/task-flow-trusted-paperclip.json`): a temp file next to the target
+  with a random name, created with `wx` so a file or link already at that name
+  is never followed, then a rename. A full disk or a failed rename leaves the old
+  file byte for byte and removes the temp file; `EPERM`/`EBUSY` is not retried.
+- **`## Needs you` takes a promoted entry's rule from what the run passed to
+  `promote --rule`**, which the promotion's `_log.md` entry now carries (§7),
+  never read back from `standing-answers.md`; of an entry it replaced, only the
+  id (§8b).
+
 ## 2.4.0 — 2026-11-27
 
 - **Each loop is measured** (one execution of one agent): the SubagentStart hook
