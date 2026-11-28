@@ -580,6 +580,67 @@ check('a line of another run with the same rule and words is not a duplicate: wr
   assertEqual(itemOf(p, 'Q1').promotedAs, 'R2', 'promotedAs');
 });
 
+// --- SECURITY: the same-run/rule/words guard (T1) ---------------------------------
+
+const dupLine = (n, rule = 'Mine', words = Q1_WORDS, extra = '') => `- **R${n}** · ${rule} · «${words}» · demo-run · 2026-11-20${extra}`;
+
+/** Refused like `refused`, and no temp file was even created. */
+function refusedBeforeTemp(p, fn, label) {
+  const original = fs.writeFileSync;
+  let temps = 0;
+  fs.writeFileSync = function spy(target, ...rest) {
+    if (String(target).endsWith('.tmp')) temps += 1;
+    return original.call(fs, target, ...rest);
+  };
+  try {
+    return refused(p, fn, label);
+  } finally {
+    fs.writeFileSync = original;
+    assertEqual(temps, 0, `${label}: a temp file was created before the refusal`);
+  }
+}
+
+check('SECURITY guard refusal never echoes the rule or the words (API and CLI)', () => {
+  const data = questions('demo-run');
+  data.items[0].answer.comment = `Always euros ${MARK}`;
+  const rule = `Mine ${MARK}R`;
+  const page = ['# T', '<!-- task-flow: next R5 -->', dupLine(4, rule, `Always euros ${MARK}`), ''].join('\n');
+  const p = project({ page, data });
+  const message = refusedBeforeTemp(p, () => promote(p, { item: 'Q1', rule }), 'api');
+  assert(!message.includes(MARK), `echoed: ${message}`);
+  const out = cli('promote', '--slug', p.slug, '--item', 'Q1', '--rule', rule, '--project-dir', p.projectDir);
+  assert(out.status !== 0 && out.status !== null, `exit: ${out.status}`);
+  assert(/\bR4\b/.test(out.stderr), `names the id: ${out.stderr}`);
+  assert(!(out.stdout + out.stderr).includes(MARK), 'CLI echoed the rule or the words');
+  assertEqual(read(p.pageFile), page, 'page changed by the CLI');
+});
+
+check('SECURITY a same line already replaced by a later entry still counts: refused before any temp file', () => {
+  const p = project({ page: ['# T', '<!-- task-flow: next R6 -->', dupLine(4), entry(5, 'Other', 'other words', ' · replaces R4'), ''].join('\n') });
+  assert(/\bR4\b/.test(refusedBeforeTemp(p, () => promote(p, { item: 'Q1', rule: 'Mine' }), 'replaced')), 'names R4');
+});
+
+check('SECURITY a same line past the entry limit still counts: refused before any temp file', () => {
+  const lines = ['# T', '<!-- task-flow: next R200 -->'];
+  for (let n = 1; n <= 100; n += 1) lines.push(entry(n));
+  lines.push(dupLine(150), '');
+  const p = project({ page: lines.join('\n') });
+  assert(/\bR150\b/.test(refusedBeforeTemp(p, () => promote(p, { item: 'Q1', rule: 'Mine' }), 'past limit')), 'names R150');
+});
+
+check('SECURITY a same line under a repeated id still counts: refused before any temp file', () => {
+  const p = project({ page: ['# T', '<!-- task-flow: next R3 -->', entry(2), dupLine(2), ''].join('\n') });
+  const m = refusedBeforeTemp(p, () => promote(p, { item: 'Q1', rule: 'Mine' }), 'repeated id');
+  assert(/already has R2 from run/.test(m), `refused by the guard: ${m}`);
+});
+
+check('SECURITY a same-looking line the reader rejects (control character) does not count: written', () => {
+  const bad = dupLine(4).replace('Mine', 'Mi\u0007ne');
+  const p = project({ page: ['# T', '<!-- task-flow: next R5 -->', bad, `- **R6**  broken · Mine · «${Q1_WORDS}» · demo-run · 2026-11-20`, ''].join('\n') });
+  const result = promote(p, { item: 'Q1', rule: 'Mine' });
+  assertEqual(itemOf(p, 'Q1').promotedAs, result.id, 'promotedAs');
+});
+
 // --- the CLI -----------------------------------------------------------------------
 
 check('SECURITY questions.json changed after the page write (answers.js consume) keeps that change: the write-back re-reads, no lost update', () => {
